@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+out/
+dist/
+build/
+.next/
+cache/
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Secrets
+*token*.txt
+*token*.json
+*.key
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.Zone.Identifier
+
+# Logs
+*.log
+npm-debug.log*
+
+# Redis dump
+dump.rdb
