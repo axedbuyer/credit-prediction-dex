@@ -1,0 +1,16 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
+ffi = true
+fs_permissions = [{ access = "read-write", path = "./" }]
+
+[rpc_endpoints]
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+
+[etherscan]
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://base-sepolia.blockscout.com/api" }
