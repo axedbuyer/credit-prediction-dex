@@ -1,0 +1,33 @@
+# Terminal 1: local blockchain fork of Base Sepolia
+cd contracts
+anvil --fork-url $BASE_SEPOLIA_RPC_URL --chain-id 84532
+
+# Terminal 2: deploy contracts to local fork
+cd contracts
+forge script script/DeployLocal.s.sol --tc DeployLocal --rpc-url http://localhost:8545 --broadcast
+
+# Terminal 2 (continued): approve MockUSDC so CreditMarket can pull collateral on mint
+# Replace <USDC_ADDRESS> and <CREDIT_MARKET_ADDRESS> with addresses printed by the deploy script
+cast send <USDC_ADDRESS> "approve(address,uint256)" <CREDIT_MARKET_ADDRESS> 100000000000 \
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --rpc-url http://localhost:8545
+
+# Terminal 3: Redis (required by order book server)
+redis-server
+
+# Terminal 4: order book server
+cd backend/order-book-server
+npm run dev
+
+# Terminal 5: matching engine
+cd backend/matching-engine
+npm run dev
+
+# Terminal 6: funding keeper
+cd backend/keepers
+npm run dev
+
+# Terminal 7: frontend
+cd frontend
+npm run dev
+# Open: http://localhost:3000
