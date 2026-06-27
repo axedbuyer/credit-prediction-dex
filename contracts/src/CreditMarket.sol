@@ -27,15 +27,17 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     bool public creditEventConfirmed;
 
     uint256 public cumulativeFundingPerYES; // 1e18-scaled; rises monotonically
+    uint256 public cumFundingPerNO;         // always equals cumulativeFundingPerYES (complete-set invariant)
     uint256 public lastFundingTime;
-    mapping(address => uint256) public fundingSnapshot;
+    mapping(address => uint256) public fundingSnapshot; // YES snapshot per holder
+    mapping(address => uint256) public snapNO;          // NO snapshot per holder
     mapping(address => uint256) public fundingDebt;
 
-    event TokensMinted(address indexed user, uint256 usdcAmount, uint256 yesAmount, uint256 noAmount);
+    event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
     event YESSettled(address indexed user, uint256 amount);
     event CreditEventTriggered();
-    event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 timestamp);
+    event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp);
 
     error CreditEventAlreadyConfirmed();
     error CreditEventNotConfirmed();
@@ -61,8 +63,9 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 elapsed = block.timestamp - lastFundingTime;
         if (elapsed == 0) return;
         cumulativeFundingPerYES += currentMark * elapsed / 365 days;
+        cumFundingPerNO = cumulativeFundingPerYES; // exact equality; YES.totalSupply()==NO.totalSupply() always
         lastFundingTime = block.timestamp;
-        emit FundingAccrued(cumulativeFundingPerYES, block.timestamp);
+        emit FundingAccrued(cumulativeFundingPerYES, cumFundingPerNO, block.timestamp);
     }
 
     function _syncUserFunding(address user) internal {
@@ -72,20 +75,20 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
             fundingDebt[user] += balance * delta / 1e18;
         }
         fundingSnapshot[user] = cumulativeFundingPerYES;
+        snapNO[user] = cumFundingPerNO;
     }
 
     // ─── core ───────────────────────────────────────────────────────────────────
 
-    // Deposit usdcAmount USDC; receive YES and NO tokens split at currentMark.
+    // Deposit usdcAmount USDC; receive equal YES and NO tokens 1:1 (Polymarket-style).
+    // currentMark is the CLOB price of YES, not the mint ratio.
     function mint(uint256 usdcAmount) external nonReentrant whenNotPaused {
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), usdcAmount);
         _accrueFunding();
         _syncUserFunding(msg.sender); // sync before balance increases
-        uint256 yesAmount = usdcAmount * currentMark / 1e18;
-        uint256 noAmount = usdcAmount - yesAmount; // subtraction avoids rounding dust
-        IRestrictedToken(yesToken).mint(msg.sender, yesAmount);
-        IRestrictedToken(noToken).mint(msg.sender, noAmount);
-        emit TokensMinted(msg.sender, usdcAmount, yesAmount, noAmount);
+        IRestrictedToken(yesToken).mint(msg.sender, usdcAmount);
+        IRestrictedToken(noToken).mint(msg.sender, usdcAmount);
+        emit TokensMinted(msg.sender, usdcAmount);
     }
 
     // Burn tokenAmount YES + tokenAmount NO; receive tokenAmount USDC (pre-settlement only).
@@ -117,6 +120,16 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         IRestrictedToken(yesToken).burn(msg.sender, amount);
         IERC20(usdc).safeTransfer(msg.sender, amount);
         emit YESSettled(msg.sender, amount);
+    }
+
+    // ─── funding views ──────────────────────────────────────────────────────────
+
+    function yesFundingOwed(address user) public view returns (uint256) {
+        return IERC20(yesToken).balanceOf(user) * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
+    }
+
+    function noFundingCredit(address user) public view returns (uint256) {
+        return IERC20(noToken).balanceOf(user) * (cumFundingPerNO - snapNO[user]) / 1e18;
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {

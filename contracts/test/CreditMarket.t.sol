@@ -59,54 +59,32 @@ contract CreditMarketTest is Test {
 
     // ─── mint tests ────────────────────────────────────────────────────────────
 
-    function test_Mint_At23Percent() public {
+    function test_Mint_OneToOne() public {
         uint256 usdcAmount = 1000e18;
         vm.prank(alice);
         market.mint(usdcAmount);
 
-        uint256 yesBalance = yesToken.balanceOf(alice);
-        uint256 noBalance = noToken.balanceOf(alice);
-
-        assertEq(yesBalance, 230e18, "yes amount");
-        assertEq(noBalance, 770e18, "no amount");
-        assertEq(yesBalance + noBalance, usdcAmount, "yes+no must equal usdcIn");
+        assertEq(yesToken.balanceOf(alice), usdcAmount, "YES minted 1:1");
+        assertEq(noToken.balanceOf(alice),  usdcAmount, "NO minted 1:1");
         assertEq(mockUsdc.balanceOf(address(market)), usdcAmount, "market holds collateral");
     }
 
-    function test_Mint_At50Percent() public {
-        CreditMarket m50 = _marketAt(0.5e18);
-        vm.prank(alice);
-        assertTrue(mockUsdc.approve(address(m50), type(uint256).max));
-
+    function test_Mint_MarkDoesNotAffectRatio() public {
+        // At any mark, mint always gives usdcAmount YES and usdcAmount NO.
         uint256 usdcAmount = 1000e18;
+
+        CreditMarket m23 = _marketAt(0.23e18);
+        CreditMarket m99 = _marketAt(0.99e18);
+
         vm.prank(alice);
-        m50.mint(usdcAmount);
-
-        uint256 yesBalance = yesToken.balanceOf(alice);
-        uint256 noBalance = noToken.balanceOf(alice);
-
-        assertEq(yesBalance, 500e18, "yes at 50%");
-        assertEq(noBalance, 500e18, "no at 50%");
-        assertEq(yesBalance + noBalance, usdcAmount, "yes+no must equal usdcIn");
-    }
-
-    function test_Mint_At1Percent() public {
-        // usdcAmount = 100e18 + 1 exposes integer truncation.
-        // Division-only noAmount = 99e18 (loses 1 wei); subtraction gives 99e18+1. ✓
-        CreditMarket m1 = _marketAt(0.01e18);
+        mockUsdc.approve(address(m23), type(uint256).max);
         vm.prank(alice);
-        assertTrue(mockUsdc.approve(address(m1), type(uint256).max));
+        mockUsdc.approve(address(m99), type(uint256).max);
 
-        uint256 usdcAmount = 100e18 + 1;
         vm.prank(alice);
-        m1.mint(usdcAmount);
-
-        uint256 yesBalance = yesToken.balanceOf(alice);
-        uint256 noBalance = noToken.balanceOf(alice);
-
-        assertEq(yesBalance, 1e18, "yes: 1% of 100+1 truncates to 1");
-        assertEq(noBalance, 99e18 + 1, "no: absorbs the truncated dust");
-        assertEq(yesBalance + noBalance, usdcAmount, "dust check: no USDC lost");
+        m23.mint(usdcAmount);
+        assertEq(yesToken.balanceOf(alice), usdcAmount, "23% mark: YES 1:1");
+        assertEq(noToken.balanceOf(alice),  usdcAmount, "23% mark: NO 1:1");
     }
 
     // ─── redeem tests ──────────────────────────────────────────────────────────
@@ -115,16 +93,16 @@ contract CreditMarketTest is Test {
         uint256 usdcAmount = 1000e18;
         vm.prank(alice);
         market.mint(usdcAmount);
-        // alice: 230 YES, 770 NO; market: 1000 USDC
+        // alice: 1000 YES, 1000 NO; market: 1000 USDC
 
-        uint256 redeemAmount = 230e18; // redeem full YES position
+        uint256 redeemAmount = 400e18;
         uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
 
         vm.prank(alice);
         market.redeem(redeemAmount);
 
-        assertEq(yesToken.balanceOf(alice), 0, "YES fully burned");
-        assertEq(noToken.balanceOf(alice), 770e18 - redeemAmount, "partial NO burned");
+        assertEq(yesToken.balanceOf(alice), usdcAmount - redeemAmount, "YES reduced");
+        assertEq(noToken.balanceOf(alice),  usdcAmount - redeemAmount, "NO reduced");
         assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + redeemAmount, "USDC returned");
         assertEq(mockUsdc.balanceOf(address(market)), usdcAmount - redeemAmount, "market USDC reduced");
     }
@@ -199,7 +177,7 @@ contract CreditMarketTest is Test {
     }
 
     function test_Funding_DeductedOnRedeem() public {
-        uint256 usdcAmount = 1000e18; // → 230 YES + 770 NO at 23%
+        uint256 usdcAmount = 1000e18; // → 1000 YES + 1000 NO (1:1 mint)
 
         vm.prank(alice);
         market.mint(usdcAmount);
@@ -207,13 +185,13 @@ contract CreditMarketTest is Test {
         // Exactly 1 year: cumulative = 0.23e18 * 365d / 365d = 0.23e18 (exact integer).
         vm.warp(block.timestamp + 365 days);
 
-        uint256 redeemAmount = yesToken.balanceOf(alice); // 230e18
+        uint256 redeemAmount = yesToken.balanceOf(alice); // 1000e18
         uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
 
         vm.prank(alice);
         market.redeem(redeemAmount);
 
-        // debt = 230e18 * 0.23e18 / 1e18 = 52.9e18
+        // debt = 1000e18 * 0.23e18 / 1e18 = 230e18
         uint256 expectedDebt = redeemAmount * uint256(0.23e18) / 1e18;
         uint256 expectedUsdcOut = redeemAmount - expectedDebt;
 
@@ -221,14 +199,92 @@ contract CreditMarketTest is Test {
         assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + expectedUsdcOut, "net USDC returned");
     }
 
+    // ─── v1b: mirrored NO index tests ─────────────────────────────────────────
+
+    function test_BothIndices_AlwaysEqual() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 7 days);
+        market.accrueFunding();
+        assertEq(market.cumFundingPerNO(), market.cumulativeFundingPerYES(), "equal after 7 days");
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.5e18); // internally accrues at old mark then updates
+        assertEq(market.cumFundingPerNO(), market.cumulativeFundingPerYES(), "equal after mark change");
+
+        vm.warp(block.timestamp + 30 days);
+        market.accrueFunding();
+        assertEq(market.cumFundingPerNO(), market.cumulativeFundingPerYES(), "equal after second accrual");
+    }
+
+    // Fuzz: sum of yesFundingOwed == sum of noFundingCredit at any mark and timing.
+    // With 1:1 mint, YES.totalSupply() == NO.totalSupply() always, so the equal indices
+    // guarantee exact conservation of total funding flow across all holders.
+    function test_Conservation_TotalOwedEqualsTotalCredited(
+        uint256 markPct,
+        uint256 warpSecs,
+        uint256 aliceAmt,
+        uint256 bobAmt
+    ) public {
+        markPct  = bound(markPct,  1,   99);
+        warpSecs = bound(warpSecs, 1,   365 days);
+        aliceAmt = bound(aliceAmt, 1e18, 5_000e18);
+        bobAmt   = bound(bobAmt,   1e18, 5_000e18);
+
+        CreditMarket m = _marketAt(markPct * 1e16);
+
+        address bob = makeAddr("bob");
+        mockUsdc.mint(bob, 10_000e18);
+
+        vm.prank(alice);
+        mockUsdc.approve(address(m), type(uint256).max);
+        vm.prank(bob);
+        mockUsdc.approve(address(m), type(uint256).max);
+
+        // Both mint at t=0 — elapsed==0 so no accrual; both snapshots land at 0.
+        vm.prank(alice);
+        m.mint(aliceAmt);
+        vm.prank(bob);
+        m.mint(bobAmt);
+
+        vm.warp(block.timestamp + warpSecs);
+        m.accrueFunding();
+
+        uint256 totalOwed   = m.yesFundingOwed(alice) + m.yesFundingOwed(bob);
+        uint256 totalCredit = m.noFundingCredit(alice) + m.noFundingCredit(bob);
+
+        assertEq(totalOwed, totalCredit, "conservation: total YES owed == total NO credited");
+    }
+
+    function test_NoFundingCredit_ScalesWithBalance() public {
+        address bob = makeAddr("bob");
+        mockUsdc.mint(bob, 10_000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(market), type(uint256).max);
+
+        // Alice deposits 2× bob at same mark → 2× NO balance.
+        vm.prank(alice);
+        market.mint(2000e18);
+        vm.prank(bob);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+        market.accrueFunding();
+
+        uint256 aliceCredit = market.noFundingCredit(alice);
+        uint256 bobCredit   = market.noFundingCredit(bob);
+
+        assertEq(aliceCredit, 2 * bobCredit, "2x NO balance yields 2x credit");
+    }
+
     // Fuzz: at any valid mark and any elapsed time ≤ 1 year,
     // the USDC payout after funding deduction is always >= 0.
     function test_Funding_NeverExceedsCollateral(uint256 markPct, uint256 warpSecs) public {
-        markPct = bound(markPct, 1, 99);         // 1 % – 99 %
+        markPct  = bound(markPct,  1, 99);
         warpSecs = bound(warpSecs, 0, 365 days);
 
-        uint256 mark = markPct * 1e16; // 1e16 … 99e16 in 1e18 scale
-        CreditMarket m = _marketAt(mark);
+        CreditMarket m = _marketAt(markPct * 1e16);
 
         vm.prank(alice);
         assertTrue(mockUsdc.approve(address(m), type(uint256).max));
@@ -237,11 +293,8 @@ contract CreditMarketTest is Test {
 
         vm.warp(block.timestamp + warpSecs);
 
-        // Redeem the smaller of the two positions so we hold enough of both tokens.
-        uint256 yesBalance = yesToken.balanceOf(alice);
-        uint256 noBalance = noToken.balanceOf(alice);
-        uint256 redeemAmount = yesBalance < noBalance ? yesBalance : noBalance;
-
+        // With 1:1 mint, YES and NO balances are equal — redeem the full position.
+        uint256 redeemAmount = yesToken.balanceOf(alice); // == noToken.balanceOf(alice)
         if (redeemAmount == 0) return;
 
         uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);

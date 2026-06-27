@@ -108,13 +108,14 @@ of a buffer-exhaustion trigger. v1b's trigger and price are both purely formulai
 ### Token Model (CreditMarket.sol)
 
 ```solidity
-// Mint: deposit USDC, receive YES + NO tokens in proportion to current mark
+// Mint: deposit USDC, receive equal YES + NO tokens 1:1 (Polymarket-style).
+// currentMark is the CLOB price of YES — it determines funding accrual and
+// display, but NOT the mint ratio. Users take directional positions by selling
+// the unwanted side on the CLOB after minting.
 function mint(uint256 usdcAmount) external {
-    uint256 yesAmount = usdcAmount * currentMark / 1e18;
-    uint256 noAmount  = usdcAmount * (1e18 - currentMark) / 1e18;
     USDC.transferFrom(msg.sender, address(this), usdcAmount);
-    YES.mint(msg.sender, yesAmount);
-    NO.mint(msg.sender, noAmount);
+    YES.mint(msg.sender, usdcAmount);
+    NO.mint(msg.sender, usdcAmount);
     _syncFunding(msg.sender);
 }
 
@@ -404,11 +405,12 @@ as it nears zero, since that is the user's only early-warning signal before liqu
 
 ## Core Math
 
-**Mint (deposit USDC, receive YES + NO tokens):**
+**Mint (deposit USDC, receive YES + NO tokens 1:1):**
 ```
-yesAmount = usdcIn × currentMark / 1e18
-noAmount  = usdcIn × (1e18 − currentMark) / 1e18
-invariant: yesAmount + noAmount = usdcIn  (fully collateralized)
+yesAmount = usdcIn   (always — mark does not affect mint ratio)
+noAmount  = usdcIn   (always)
+invariant: YES.totalSupply() == NO.totalSupply() always (every mint/redeem moves both equally)
+collateral: usdcIn held 1:1 against YES supply (pays out on credit event)
 ```
 
 **Redeem (burn 1 YES + 1 NO, receive 1 USDC — pre-settlement only):**
@@ -497,7 +499,7 @@ Each task = one bounded Claude Code session. Work in order.
    succeeds, direct wallet-to-wallet transfer reverts.
 
 3. CreditMarket.sol — mint() and redeem() only, no funding yet.
-   Tests: correct YES+NO amounts at different marks, redeem 1:1 invariant holds,
+   Tests: mint gives equal YES+NO regardless of mark, redeem 1:1 invariant holds,
    USDC balances correct, token balances correct.
 
 4. Add _accrueFunding() and fundingSnapshot tracking to CreditMarket.sol.
