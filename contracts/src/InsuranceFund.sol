@@ -36,6 +36,8 @@ contract InsuranceFund is AccessControl, ReentrancyGuard {
         uint256 amount
     );
 
+    bytes32 public constant LIQUIDATOR_ROLE = keccak256("LIQUIDATOR_ROLE");
+
     error TimelockNotExpired(uint256 executeAfter);
     error AlreadyExecuted();
     error InvalidWithdrawalId();
@@ -81,6 +83,14 @@ contract InsuranceFund is AccessControl, ReentrancyGuard {
         w.executed = true;
         IERC20(usdc).safeTransfer(w.recipient, w.amount);
         emit WithdrawalExecuted(withdrawalId, w.recipient, w.amount);
+    }
+
+    // Called by LiquidationEngine in tail-case claims to top up NO accretion shortfall.
+    function coverShortfall(uint256 amount, address recipient)
+        external
+        onlyRole(LIQUIDATOR_ROLE)
+    {
+        IERC20(usdc).safeTransfer(recipient, amount);
     }
 
     function getBalance() external view returns (uint256) {

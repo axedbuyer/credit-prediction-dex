@@ -15,16 +15,18 @@ interface IRestrictedToken {
 contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     using SafeERC20 for IERC20;
 
-    bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
-    bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
-    bytes32 public constant CLOB_ROLE   = keccak256("CLOB_ROLE");
+    bytes32 public constant ORACLE_ROLE      = keccak256("ORACLE_ROLE");
+    bytes32 public constant KEEPER_ROLE     = keccak256("KEEPER_ROLE");
+    bytes32 public constant PAUSER_ROLE     = keccak256("PAUSER_ROLE");
+    bytes32 public constant CLOB_ROLE       = keccak256("CLOB_ROLE");
+    bytes32 public constant LIQUIDATOR_ROLE = keccak256("LIQUIDATOR_ROLE");
 
     address public usdc;
     address public yesToken;
     address public noToken;
     uint256 public currentMark;
     bool public creditEventConfirmed;
+    bool public motionPending; // true while a credit-event determination is in progress
 
     uint256 public cumulativeFundingPerYES; // 1e18-scaled; rises monotonically
     uint256 public cumFundingPerNO;         // always equals cumulativeFundingPerYES (complete-set invariant)
@@ -48,6 +50,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     error CreditEventNotConfirmed();
     error PositionNotSeizable();
     error AlreadyFlagged();
+    error MotionInProgress();
 
     constructor(
         address admin,
@@ -198,12 +201,36 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // KEEPER_ROLE: flag a seizable position as claimable and freeze its per-unit f_now.
     // After flagging, _syncUserFunding skips this user — no further accrual until claimed.
     function flagClaimable(address user) external onlyRole(KEEPER_ROLE) {
+        if (motionPending) revert MotionInProgress();
         if (!isSeizable(user)) revert PositionNotSeizable();
         if (claimable[user]) revert AlreadyFlagged();
         _accrueFunding(); // update global index before snapshotting frozen value
         claimable[user]      = true;
         frozenFunding[user]  = cumulativeFundingPerYES - fundingSnapshot[user];
         emit FlaggedClaimable(user, frozenFunding[user], block.timestamp);
+    }
+
+    // ORACLE_ROLE: raise or lower the motion-pending flag to freeze liquidation activity
+    // during a credit-event determination window.
+    function setMotionPending(bool pending) external onlyRole(ORACLE_ROLE) {
+        motionPending = pending;
+    }
+
+    // LIQUIDATOR_ROLE: called by LiquidationEngine after verifying payment and transfer.
+    // Syncs the liquidator's existing YES position first (no back-funding on seized tokens),
+    // then clears all frozen state for the original holder.
+    function clearLiquidatedPosition(address originalHolder, address liquidator)
+        external
+        onlyRole(LIQUIDATOR_ROLE)
+    {
+        _accrueFunding();
+        _syncUserFunding(liquidator); // settle liquidator's pre-existing YES debt
+
+        claimable[originalHolder]       = false;
+        frozenFunding[originalHolder]   = 0;
+        fundingDebt[originalHolder]     = 0;
+        fundingSnapshot[originalHolder] = cumulativeFundingPerYES;
+        snapNO[originalHolder]          = cumFundingPerNO;
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {

@@ -23,6 +23,12 @@ contract YESToken is ERC20, AccessControl {
         _burn(from, amount);
     }
 
+    // Transfer without approval — only callable by CLOB_ROLE (e.g., LiquidationEngine
+    // seizing a flagged position without holder consent).
+    function forcedTransfer(address from, address to, uint256 amount) external onlyRole(CLOB_ROLE) {
+        _transfer(from, to, amount);
+    }
+
     // Only mints (from==0), burns (to==0), or CLOB_ROLE callers may move tokens.
     function _update(address from, address to, uint256 value) internal override {
         if (from != address(0) && to != address(0) && !hasRole(CLOB_ROLE, msg.sender)) {
