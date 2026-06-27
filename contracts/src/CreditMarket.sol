@@ -29,9 +29,11 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     uint256 public cumulativeFundingPerYES; // 1e18-scaled; rises monotonically
     uint256 public cumFundingPerNO;         // always equals cumulativeFundingPerYES (complete-set invariant)
     uint256 public lastFundingTime;
+    uint256 public epochLength;             // seconds per epoch (used for epochsToExpire)
     mapping(address => uint256) public fundingSnapshot; // YES snapshot per holder
     mapping(address => uint256) public snapNO;          // NO snapshot per holder
     mapping(address => uint256) public fundingDebt;
+    mapping(address => uint256) public costBasis;       // 1e18-scaled entry mark (weighted avg)
 
     event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
@@ -47,13 +49,15 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         address _usdc,
         address _yesToken,
         address _noToken,
-        uint256 _initialMark
+        uint256 _initialMark,
+        uint256 _epochLength
     ) {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         usdc = _usdc;
         yesToken = _yesToken;
         noToken = _noToken;
         currentMark = _initialMark;
+        epochLength = _epochLength;
         lastFundingTime = block.timestamp;
     }
 
@@ -85,7 +89,12 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     function mint(uint256 usdcAmount) external nonReentrant whenNotPaused {
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), usdcAmount);
         _accrueFunding();
+        // Read pre-mint balance before sync so cost basis uses the same snapshot.
+        uint256 prevBalance = IERC20(yesToken).balanceOf(msg.sender);
         _syncUserFunding(msg.sender); // sync before balance increases
+        // Weighted-average cost basis: must use pre-mint balance (read above).
+        uint256 newBalance = prevBalance + usdcAmount;
+        costBasis[msg.sender] = (costBasis[msg.sender] * prevBalance + currentMark * usdcAmount) / newBalance;
         IRestrictedToken(yesToken).mint(msg.sender, usdcAmount);
         IRestrictedToken(noToken).mint(msg.sender, usdcAmount);
         emit TokensMinted(msg.sender, usdcAmount);
@@ -130,6 +139,39 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
 
     function noFundingCredit(address user) public view returns (uint256) {
         return IERC20(noToken).balanceOf(user) * (cumFundingPerNO - snapNO[user]) / 1e18;
+    }
+
+    // ─── v1b display-layer views (1e18-scaled, per unit of YES held) ────────────
+
+    // m − f_now (unsettled per-unit funding since last sync); floors at 0 for display safety.
+    function equity(address user) public view returns (uint256) {
+        if (IERC20(yesToken).balanceOf(user) == 0) return 0;
+        uint256 fPerUnit = cumulativeFundingPerYES - fundingSnapshot[user];
+        return currentMark > fPerUnit ? currentMark - fPerUnit : 0;
+    }
+
+    // equity − costBasis; negative when mark has fallen or funding has accumulated.
+    function pnl(address user) public view returns (int256) {
+        return int256(equity(user)) - int256(costBasis[user]);
+    }
+
+    // Mark needed so that P&L = 0: costBasis + f_now.
+    function breakevenMark(address user) public view returns (uint256) {
+        return costBasis[user] + (cumulativeFundingPerYES - fundingSnapshot[user]);
+    }
+
+    // Epochs of runway before the seizure trigger fires, holding mark constant.
+    // Returns type(uint256).max when already at/past trigger (UI should show "0" / warning).
+    function epochsToExpire(address user) public view returns (uint256) {
+        if (IERC20(yesToken).balanceOf(user) == 0) return 0;
+        uint256 fPerUnit = cumulativeFundingPerYES - fundingSnapshot[user];
+        // m/1.03 via integer arithmetic (*100/103).
+        uint256 mDiv103 = currentMark * 100 / 103;
+        if (fPerUnit >= mDiv103) return type(uint256).max;
+        uint256 numerator = mDiv103 - fPerUnit;
+        uint256 deltaF = currentMark * epochLength / 365 days;
+        if (deltaF == 0) return type(uint256).max;
+        return numerator / deltaF;
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {

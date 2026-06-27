@@ -46,7 +46,7 @@ contract IntegrationTest is Test {
         yesToken = new YESToken(admin);
         noToken  = new NOToken(admin);
         market   = new CreditMarket(
-            admin, address(usdc), address(yesToken), address(noToken), MARK
+            admin, address(usdc), address(yesToken), address(noToken), MARK, 1 days
         );
         clob   = new CLOBSettlement(address(market));
         router = new OracleRouter(admin, address(market));

@@ -39,7 +39,7 @@ contract CLOBSettlementTest is Test {
         yesToken = new YESToken(admin);
         noToken  = new NOToken(admin);
         market   = new CreditMarket(
-            admin, address(usdc), address(yesToken), address(noToken), 0.23e18
+            admin, address(usdc), address(yesToken), address(noToken), 0.23e18, 1 days
         );
         clob = new CLOBSettlement(address(market));
 

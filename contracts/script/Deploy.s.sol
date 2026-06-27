@@ -41,7 +41,7 @@ contract Deploy is Script {
 
         // ── 2. core market ────────────────────────────────────────────────────
         CreditMarket market = new CreditMarket(
-            deployer, usdc, address(yesToken), address(noToken), INITIAL_MARK
+            deployer, usdc, address(yesToken), address(noToken), INITIAL_MARK, 1 days
         );
 
         // ── 3. CLOB settlement ────────────────────────────────────────────────

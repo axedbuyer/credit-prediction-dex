@@ -46,7 +46,8 @@ contract CreditMarketTest is Test {
             address(mockUsdc),
             address(yesToken),
             address(noToken),
-            mark
+            mark,
+            1 days
         );
         yesToken.grantRole(yesToken.MINTER_ROLE(), address(m));
         yesToken.grantRole(yesToken.BURNER_ROLE(), address(m));
@@ -276,6 +277,98 @@ contract CreditMarketTest is Test {
         uint256 bobCredit   = market.noFundingCredit(bob);
 
         assertEq(aliceCredit, 2 * bobCredit, "2x NO balance yields 2x credit");
+    }
+
+    // ─── v1b: display-layer view tests ────────────────────────────────────────
+
+    function test_CostBasis_SetAtMint() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+        assertEq(market.costBasis(alice), market.currentMark(), "cost basis = entry mark");
+    }
+
+    function test_CostBasis_WeightedAverage_OnSecondMint() public {
+        uint256 firstMint  = 1000e18;
+        uint256 secondMint = 1000e18;
+
+        vm.prank(alice);
+        market.mint(firstMint); // mark = 0.23e18
+
+        // Change mark before second mint.
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.50e18);
+
+        vm.prank(alice);
+        market.mint(secondMint); // mark = 0.50e18
+
+        // Weighted avg: (0.23e18 * 1000 + 0.50e18 * 1000) / 2000 = 0.365e18
+        uint256 expected = (uint256(0.23e18) * firstMint + uint256(0.50e18) * secondMint)
+                           / (firstMint + secondMint);
+        assertEq(market.costBasis(alice), expected, "weighted average cost basis");
+    }
+
+    function test_Equity_MatchesFormula() public {
+        vm.prank(alice);
+        market.mint(1000e18); // mark = 0.23e18, f_now = 0
+
+        // At entry f_now = 0, so equity = mark.
+        assertEq(market.equity(alice), market.currentMark(), "equity = mark at entry");
+
+        vm.warp(block.timestamp + 30 days);
+        market.accrueFunding();
+
+        uint256 fPerUnit  = market.cumulativeFundingPerYES() - market.fundingSnapshot(alice);
+        uint256 m         = market.currentMark();
+        uint256 expected  = m > fPerUnit ? m - fPerUnit : 0;
+        assertEq(market.equity(alice), expected, "equity = mark - f_now after 30 days");
+    }
+
+    function test_PnL_MatchesFormula() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        // At entry: pnl = equity - costBasis = mark - mark = 0.
+        assertEq(market.pnl(alice), 0, "pnl = 0 at entry");
+
+        vm.warp(block.timestamp + 30 days);
+        market.accrueFunding();
+
+        int256 expectedPnl = int256(market.equity(alice)) - int256(market.costBasis(alice));
+        assertEq(market.pnl(alice), expectedPnl, "pnl = equity - costBasis");
+        assertTrue(market.pnl(alice) < 0, "pnl is negative after funding accrues (no mark change)");
+    }
+
+    function test_BreakevenMark_MatchesFormula() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        // At entry f_now = 0, breakeven = costBasis.
+        assertEq(market.breakevenMark(alice), market.costBasis(alice), "breakeven = costBasis at entry");
+
+        vm.warp(block.timestamp + 30 days);
+        market.accrueFunding();
+
+        uint256 fPerUnit = market.cumulativeFundingPerYES() - market.fundingSnapshot(alice);
+        uint256 expected = market.costBasis(alice) + fPerUnit;
+        assertEq(market.breakevenMark(alice), expected, "breakeven = costBasis + f_now");
+    }
+
+    // Worked example: entry at 5% mark, daily epoch, f_now=0 → ≈354 epochs (±2).
+    // Δf = 0.05e18/365 ≈ 136986301369863; m/1.03 ≈ 48543689320388349; epochs ≈ 354.
+    function test_EpochsToExpire_MatchesWorkedExample() public {
+        CreditMarket m5 = _marketAt(0.05e18);
+
+        address bob = makeAddr("bob");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(m5), type(uint256).max);
+
+        vm.prank(bob);
+        m5.mint(100e18); // f_now = 0 at entry
+
+        uint256 epochs = m5.epochsToExpire(bob);
+        assertGe(epochs, 352, "epochs >= 352");
+        assertLe(epochs, 356, "epochs <= 356");
     }
 
     // Fuzz: at any valid mark and any elapsed time ≤ 1 year,
