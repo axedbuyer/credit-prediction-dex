@@ -9,6 +9,8 @@ import {NOToken} from "../src/NOToken.sol";
 import {CreditMarket} from "../src/CreditMarket.sol";
 import {CLOBSettlement} from "../src/CLOBSettlement.sol";
 import {OracleRouter} from "../src/OracleRouter.sol";
+import {LiquidationEngine} from "../src/LiquidationEngine.sol";
+import {InsuranceFund} from "../src/InsuranceFund.sol";
 
 contract MockUSDC is ERC20 {
     constructor() ERC20("USD Coin", "USDC") {}
@@ -123,8 +125,8 @@ contract IntegrationTest is Test {
     // Full happy-path: mint → become YES holder via CLOB → accrue carry → close.
     //
     // Steps:
-    //   1. Alice mints 1 000 USDC → 230 YES + 770 NO
-    //   2. Alice sells all 770 NO to Bob (CLOB trade 1: Bob pays 770 USDC)
+    //   1. Alice mints 230 USDC → 230 YES + 230 NO  (1:1 mint since v1b-1)
+    //   2. Alice sells all 230 NO to Bob (CLOB trade 1: Bob pays 230 USDC)
     //   3. vm.warp(30 days) — Alice holds 230 YES, funding accrues
     //   4. Bob sells 230 NO back to Alice (CLOB trade 2: Alice pays 230 USDC)
     //      ↳ CLOBSettlement calls syncUserFunding → fundingDebt[alice] is written
@@ -136,32 +138,32 @@ contract IntegrationTest is Test {
     // 0 NO, so a buyback trade is required before she can close via redeem().
     // This trade also triggers the funding sync, making fundingDebt readable.
     function test_FullLifecycle_NormalClose() public {
-        // ── 1. alice mints 1 000 USDC ──────────────────────────────────────
+        // ── 1. alice mints 230 USDC → 230 YES + 230 NO (1:1) ─────────────
         vm.prank(alice);
-        market.mint(1_000e18);
+        market.mint(230e18);
 
-        assertEq(yesToken.balanceOf(alice), 230e18,    "alice YES after mint");
-        assertEq(noToken.balanceOf(alice),  770e18,    "alice NO after mint");
-        assertEq(usdc.balanceOf(address(market)), 1_000e18, "market holds collateral");
+        assertEq(yesToken.balanceOf(alice), 230e18, "alice YES after mint");
+        assertEq(noToken.balanceOf(alice),  230e18, "alice NO after mint");
+        assertEq(usdc.balanceOf(address(market)), 230e18, "market holds collateral");
 
-        // ── 2. CLOB trade 1: alice sells 770 NO → bob sends 770 USDC ───────
+        // ── 2. CLOB trade 1: alice sells 230 NO → bob sends 230 USDC ───────
         // alice = maker (sells NO), bob = taker (buys NO with USDC)
         uint256 expiry1 = block.timestamp + 1 hours;
         CLOBSettlement.Order memory a1 = _order(
-            alice, address(noToken), address(usdc), 770e18, 770e18, expiry1, 0
+            alice, address(noToken), address(usdc), 230e18, 230e18, expiry1, 0
         );
         CLOBSettlement.Order memory b1 = _order(
-            bob,   address(usdc),    address(noToken), 770e18, 770e18, expiry1, 0
+            bob,   address(usdc),    address(noToken), 230e18, 230e18, expiry1, 0
         );
         clob.verifyAndSettle(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1));
 
         // post-trade-1 balances
-        assertEq(noToken.balanceOf(alice), 0,       "alice sold all NO");
-        assertEq(noToken.balanceOf(bob),   770e18,  "bob holds 770 NO");
-        assertEq(usdc.balanceOf(alice),    770e18,  "alice received USDC from bob");
-        assertEq(usdc.balanceOf(bob),      230e18,  "bob spent 770 USDC");
+        assertEq(noToken.balanceOf(alice), 0,         "alice sold all NO");
+        assertEq(noToken.balanceOf(bob),   230e18,    "bob holds 230 NO");
+        assertEq(usdc.balanceOf(alice),    1_000e18,  "alice received USDC from bob");
+        assertEq(usdc.balanceOf(bob),      770e18,    "bob spent 230 USDC");
         // CLOB is peer-to-peer — market USDC is untouched
-        assertEq(usdc.balanceOf(address(market)), 1_000e18, "market USDC unchanged");
+        assertEq(usdc.balanceOf(address(market)), 230e18, "market USDC unchanged");
 
         // ── 3. 30 days pass while alice holds 230 YES ─────────────────────
         vm.warp(block.timestamp + 30 days);
@@ -178,10 +180,10 @@ contract IntegrationTest is Test {
         );
         clob.verifyAndSettle(b2, _sign(bobKey, b2), a2, _sign(aliceKey, a2));
 
-        // alice: 230 YES + 230 NO + 540 USDC — fully balanced for redeem
-        assertEq(yesToken.balanceOf(alice), 230e18, "alice YES unchanged");
-        assertEq(noToken.balanceOf(alice),  230e18, "alice reacquired 230 NO");
-        assertEq(usdc.balanceOf(alice),     540e18, "alice USDC after buyback");
+        // alice: 230 YES + 230 NO + 770 USDC — fully balanced for redeem
+        assertEq(yesToken.balanceOf(alice), 230e18,   "alice YES unchanged");
+        assertEq(noToken.balanceOf(alice),  230e18,   "alice reacquired 230 NO");
+        assertEq(usdc.balanceOf(alice),     770e18,   "alice USDC after buyback");
 
         // ── 5. verify funding debt was written by trade-2 sync ─────────────
         // cumulative = 0.23e18 * 30 days / 365 days (integer math matches contract)
@@ -221,36 +223,36 @@ contract IntegrationTest is Test {
     // Credit event path: mint → become YES holder → credit event → settleYES at 1:1.
     //
     // Steps:
-    //   1. Alice mints 1 000 USDC → 230 YES + 770 NO
-    //   2. Alice sells all 770 NO to Bob (CLOB trade: Bob pays 770 USDC)
-    //      → alice: 230 YES  bob: 770 NO
+    //   1. Alice mints 230 USDC → 230 YES + 230 NO  (1:1 mint since v1b-1)
+    //   2. Alice sells all 230 NO to Bob (CLOB trade: Bob pays 230 USDC)
+    //      → alice: 230 YES  bob: 230 NO
     //   3. vm.warp(60 days)
     //   4. OracleRouter.confirmCreditEvent() — market paused, flag set
     //   5. mint() and redeem() both revert
     //   6. Alice calls settleYES(230) → receives 230 USDC at zero recovery
     //   7. Bob (NO holder) tries settleYES → reverts (no YES to burn)
-    //   8. Market retains 770 USDC (Bob's NO tokens are worthless)
+    //   8. Market holds 0 USDC (all collateral paid to YES holder; Bob's NO worthless)
     function test_FullLifecycle_CreditEvent() public {
-        // ── 1. alice mints 1 000 USDC ──────────────────────────────────────
+        // ── 1. alice mints 230 USDC → 230 YES + 230 NO (1:1) ─────────────
         vm.prank(alice);
-        market.mint(1_000e18);
+        market.mint(230e18);
 
-        // ── 2. CLOB trade: alice sells 770 NO → bob sends 770 USDC ─────────
+        // ── 2. CLOB trade: alice sells 230 NO → bob sends 230 USDC ─────────
         uint256 expiry = block.timestamp + 1 hours;
         CLOBSettlement.Order memory ao = _order(
-            alice, address(noToken), address(usdc),    770e18, 770e18, expiry, 0
+            alice, address(noToken), address(usdc),    230e18, 230e18, expiry, 0
         );
         CLOBSettlement.Order memory bo = _order(
-            bob,   address(usdc),    address(noToken), 770e18, 770e18, expiry, 0
+            bob,   address(usdc),    address(noToken), 230e18, 230e18, expiry, 0
         );
         clob.verifyAndSettle(ao, _sign(aliceKey, ao), bo, _sign(bobKey, bo));
 
-        // alice: 230 YES, 0 NO, 770 USDC
-        // bob:   0 YES, 770 NO, 230 USDC
+        // alice: 230 YES, 0 NO, 1 000 USDC
+        // bob:   0 YES, 230 NO, 770 USDC
         assertEq(yesToken.balanceOf(alice), 230e18, "alice holds YES");
-        assertEq(noToken.balanceOf(bob),    770e18, "bob holds NO");
+        assertEq(noToken.balanceOf(bob),    230e18, "bob holds NO");
         assertEq(yesToken.balanceOf(bob),   0,      "bob has no YES");
-        assertEq(usdc.balanceOf(address(market)), 1_000e18, "market USDC unchanged");
+        assertEq(usdc.balanceOf(address(market)), 230e18, "market USDC unchanged");
 
         // ── 3. 60 days pass ───────────────────────────────────────────────
         vm.warp(block.timestamp + 60 days);
@@ -273,7 +275,7 @@ contract IntegrationTest is Test {
         market.redeem(1e18);
 
         // ── 6. alice settleYES(230) → 230 USDC at zero recovery ───────────
-        uint256 aliceUsdcBefore = usdc.balanceOf(alice); // 770 + 1 from test setup above
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice); // 1 000 + 1 from test setup above
         vm.prank(alice);
         market.settleYES(230e18);
 
@@ -286,17 +288,361 @@ contract IntegrationTest is Test {
         vm.expectRevert(); // ERC20InsufficientBalance — bob has 0 YES to burn
         market.settleYES(1);
 
-        assertEq(noToken.balanceOf(bob), 770e18, "bob NO tokens still exist but worthless");
+        assertEq(noToken.balanceOf(bob), 230e18, "bob NO tokens still exist but worthless");
 
-        // ── 8. market holds 770 USDC: bob's NO position is unclaimable ────
-        // market started with 1 000 USDC; paid out 230 to alice's YES settlement
-        assertEq(usdc.balanceOf(address(market)), 770e18,
-            "770 USDC locked: corresponds to unclaimable NO collateral");
+        // ── 8. market holds 0 USDC: all collateral paid to YES holder ─────
+        // market started with 230 USDC (alice's mint); paid it all to alice's YES settlement
+        assertEq(usdc.balanceOf(address(market)), 0,
+            "market fully paid out: alice's YES settled, bob's NO worthless");
 
         // total USDC conservation: 1 000 (alice initial) + 1 000 (bob initial) + 1 (test mint) = 2 001
         uint256 total = usdc.balanceOf(alice)
                       + usdc.balanceOf(bob)
                       + usdc.balanceOf(address(market));
         assertEq(total, 2_001e18, "USDC invariant: total supply conserved through credit event");
+    }
+}
+
+// ─── v1b lifecycle integration tests ─────────────────────────────────────────
+//
+// Fresh fixture at 5% mark (the "worked example" mark from CLAUDE.md).
+// Tests cover: funding accrual, formulaic seizure trigger, liquidation claim,
+// and normal close — plus all conservation invariants from the spec.
+contract IntegrationV1bTest is Test {
+    MockUSDC          usdc;
+    YESToken          yesToken;
+    NOToken           noToken;
+    CreditMarket      market;
+    CLOBSettlement    clob;
+    LiquidationEngine liquidationEngine;
+    InsuranceFund     insuranceFund;
+
+    address admin  = address(this);
+    address keeper = makeAddr("keeper_v1b");
+
+    uint256 aliceKey = 0xA11CE;
+    uint256 bobKey   = 0xB0B;
+    uint256 carolKey = 0xCA501; // liquidator
+    address alice;
+    address bob;
+    address carol;
+
+    uint256 constant MARK_5PCT  = 0.05e18;
+    uint256 constant MARK_8PCT  = 0.08e18;
+    uint256 constant MARK_20PCT = 0.20e18;
+    uint256 constant NOTIONAL   = 100e18;
+
+    function setUp() public {
+        alice = vm.addr(aliceKey);
+        bob   = vm.addr(bobKey);
+        carol = vm.addr(carolKey);
+
+        // ── deploy ─────────────────────────────────────────────────────────
+        usdc              = new MockUSDC();
+        yesToken          = new YESToken(admin);
+        noToken           = new NOToken(admin);
+        market            = new CreditMarket(
+            admin, address(usdc), address(yesToken), address(noToken), MARK_5PCT, 1 days
+        );
+        clob              = new CLOBSettlement(address(market));
+        insuranceFund     = new InsuranceFund(admin, address(usdc));
+        liquidationEngine = new LiquidationEngine(address(market), address(insuranceFund));
+
+        // ── token roles ────────────────────────────────────────────────────
+        yesToken.grantRole(yesToken.MINTER_ROLE(), address(market));
+        yesToken.grantRole(yesToken.BURNER_ROLE(), address(market));
+        noToken.grantRole(noToken.MINTER_ROLE(),   address(market));
+        noToken.grantRole(noToken.BURNER_ROLE(),   address(market));
+
+        // ── CLOB roles ─────────────────────────────────────────────────────
+        yesToken.grantRole(yesToken.CLOB_ROLE(), address(clob));
+        noToken.grantRole(noToken.CLOB_ROLE(),   address(clob));
+        market.grantRole(market.CLOB_ROLE(), address(clob));
+
+        // ── LiquidationEngine roles ────────────────────────────────────────
+        yesToken.grantRole(yesToken.CLOB_ROLE(),      address(liquidationEngine)); // forcedTransfer
+        market.grantRole(market.LIQUIDATOR_ROLE(),     address(liquidationEngine)); // clearLiquidatedPosition
+        insuranceFund.grantRole(
+            insuranceFund.LIQUIDATOR_ROLE(), address(liquidationEngine)            // coverShortfall
+        );
+
+        // ── keeper ─────────────────────────────────────────────────────────
+        market.grantRole(market.KEEPER_ROLE(), keeper);
+
+        // ── fund actors ────────────────────────────────────────────────────
+        usdc.mint(alice, 1_000e18);
+        usdc.mint(bob,   1_000e18);
+        usdc.mint(carol, 10e18);                     // covers P ≈ 4.85 USDC at 5%/354d
+        usdc.mint(address(insuranceFund), 1_000e18); // pre-funded for tail-case coverage
+
+        // ── approvals ──────────────────────────────────────────────────────
+        vm.startPrank(alice);
+        usdc.approve(address(market), type(uint256).max);
+        usdc.approve(address(clob),   type(uint256).max);
+        yesToken.approve(address(clob), type(uint256).max);
+        noToken.approve(address(clob),  type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(clob),   type(uint256).max);
+        yesToken.approve(address(clob), type(uint256).max);
+        noToken.approve(address(clob),  type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(carol);
+        usdc.approve(address(liquidationEngine), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function _order(
+        address maker,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut,
+        uint256 expiry,
+        uint256 nonce
+    ) internal pure returns (CLOBSettlement.Order memory) {
+        return CLOBSettlement.Order({
+            maker:        maker,
+            tokenIn:      tokenIn,
+            tokenOut:     tokenOut,
+            amountIn:     amountIn,
+            minAmountOut: minAmountOut,
+            expiry:       expiry,
+            nonce:        nonce
+        });
+    }
+
+    function _sign(uint256 key, CLOBSettlement.Order memory order)
+        internal view returns (bytes memory)
+    {
+        bytes32 digest = clob.hashOrder(order);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    // Liquidation lifecycle at the 5% worked example.
+    //
+    // Acceleration: warp 354 days in one vm.warp + one accrueFunding() call.
+    // _accrueFunding() integrates elapsed time, so a single call is identical to
+    // 354 daily calls. At m=5%, 354 days crosses the seizure threshold
+    // (m/1.03 − Δf ≈ 4.840e−2 per unit; 354d accrual ≈ 4.849e−2).
+    function test_v1b_FullLifecycle_LiquidationPath() public {
+        // ── 1. Alice mints $100 at 5% mark → 100 YES + 100 NO ─────────────
+        vm.prank(alice);
+        market.mint(NOTIONAL);
+
+        assertEq(yesToken.balanceOf(alice), NOTIONAL,  "alice YES after mint");
+        assertEq(noToken.balanceOf(alice),  NOTIONAL,  "alice NO after mint");
+        assertEq(market.costBasis(alice),   MARK_5PCT, "costBasis == 5% entry mark");
+
+        // ── 2. Alice sells 100 NO to Bob (Bob pays 100 USDC, 1:1) ──────────
+        // Alice becomes a pure YES holder; Bob holds the matching NO.
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory a1 = _order(
+            alice, address(noToken), address(usdc), NOTIONAL, NOTIONAL, expiry, 0
+        );
+        CLOBSettlement.Order memory b1 = _order(
+            bob,   address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry, 0
+        );
+        clob.verifyAndSettle(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1));
+
+        assertEq(noToken.balanceOf(alice),  0,        "alice sold all NO");
+        assertEq(noToken.balanceOf(bob),    NOTIONAL, "bob holds 100 NO");
+        assertEq(yesToken.balanceOf(alice), NOTIONAL, "alice holds 100 YES");
+
+        // ── 3. Warp 354 days; accumulate all carry in one call ─────────────
+        vm.warp(block.timestamp + 354 days);
+        market.accrueFunding();
+
+        assertTrue(market.isSeizable(alice), "alice seizable after 354 days bleed at 5%");
+        assertFalse(market.isSeizable(bob),  "bob (NO holder, zero YES balance) never seizable");
+
+        // ── 4. Keeper flags Alice's position ───────────────────────────────
+        vm.prank(keeper);
+        market.flagClaimable(alice);
+
+        assertTrue(market.claimable(alice), "alice flagged claimable");
+
+        // No intermediate sync → frozenFunding == full 354-day cumulative per unit.
+        uint256 frozenPerUnit = market.frozenFunding(alice);
+        assertEq(frozenPerUnit, market.cumulativeFundingPerYES(),
+            "frozenFunding == 354-day cumulative (fundingSnapshot was 0 at mint, no mid-sync)");
+        assertGt(frozenPerUnit, 0, "frozen funding non-zero");
+
+        // ── 5. Carol claims the flagged position ───────────────────────────
+        uint256 aliceYesBefore  = yesToken.balanceOf(alice); // 100e18
+        uint256 bobNoBefore     = noToken.balanceOf(bob);    // 100e18
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        uint256 carolUsdcBefore = usdc.balanceOf(carol);
+
+        // P = prevDebt(0) + frozenPerUnit × Q / 1e18 (normal case: P < tokenValue)
+        uint256 P          = frozenPerUnit * NOTIONAL / 1e18;
+        uint256 tokenValue = NOTIONAL * market.currentMark() / 1e18; // 100 × 0.05 = 5 USDC
+        assertLt(P, tokenValue, "pre-claim: funding owed < token value (normal case confirmed)");
+
+        vm.prank(carol);
+        liquidationEngine.claim(alice);
+
+        // ── 6. Assertions ──────────────────────────────────────────────────
+
+        // (a) YES transferred to Carol — never burned
+        assertEq(yesToken.balanceOf(carol), aliceYesBefore,
+            "carol holds alice's YES tokens after claim");
+
+        // (b) Alice: YES balance zero; received no USDC (residual goes to liquidator as profit)
+        assertEq(yesToken.balanceOf(alice), 0,               "alice YES zero post-claim");
+        assertEq(usdc.balanceOf(alice),     aliceUsdcBefore, "alice received no USDC from claim");
+
+        // (c) Bob's NO balance untouched (NO holders unaffected by liquidation)
+        assertEq(noToken.balanceOf(bob), bobNoBefore, "bob NO balance unchanged");
+
+        // (d) Complete-set invariant: YES and NO supply must remain equal
+        assertEq(yesToken.totalSupply(), noToken.totalSupply(),
+            "complete-set invariant: YES.totalSupply() == NO.totalSupply()");
+        assertEq(yesToken.totalSupply(), NOTIONAL,
+            "YES supply unchanged (forcedTransfer, not burn)");
+
+        // (e) NO accretion: noFundingCredit(bob) == P
+        //     P   = frozenPerUnit × 100e18 / 1e18 = frozenPerUnit × 100
+        //     noFundingCredit(bob) = 100e18 × (cumFundingPerNO − snapNO[bob]) / 1e18
+        //       where snapNO[bob] = 0 (set at initial CLOB trade when cumFundingPerNO = 0)
+        //     Since cumFundingPerNO == frozenPerUnit (no time elapsed between flag and claim),
+        //     both equal frozenPerUnit × 100. ✓
+        assertEq(market.noFundingCredit(bob), P,
+            "bob noFundingCredit == P (liquidator payment replenishes NO accretion pool)");
+
+        // (f) Liquidator sliver ≈ 3% of token value (the seizure buffer is the profit incentive)
+        uint256 sliver = tokenValue - P;
+        assertGt(sliver, tokenValue * 29 / 1000, "sliver > 2.9% of token value");
+        assertLt(sliver, tokenValue * 31 / 1000, "sliver < 3.1% of token value");
+
+        // (g) Carol paid exactly P USDC
+        assertEq(usdc.balanceOf(carol), carolUsdcBefore - P, "carol's USDC decreased by P");
+
+        // (h) USDC conservation across all parties
+        // carol(P) → market; everything else unchanged. Total = initial sum = 3 010.
+        uint256 total = usdc.balanceOf(alice)
+                      + usdc.balanceOf(bob)
+                      + usdc.balanceOf(carol)
+                      + usdc.balanceOf(address(market))
+                      + usdc.balanceOf(address(insuranceFund));
+        assertEq(total, 1_000e18 + 1_000e18 + 10e18 + 1_000e18,
+            "USDC conservation: total supply unchanged across all parties");
+    }
+
+    // Normal close (mark appreciation, no liquidation).
+    //
+    // Mark path: 5% → 8% (at 30d) → 20% (at 60d), close at 90d.
+    // setMark() accrues at the old mark first, so each leg's carry is exact.
+    // Alice closes via redeem well before the seizure trigger fires.
+    function test_v1b_FullLifecycle_NormalClose() public {
+        // ── 1. Alice mints $100 at 5% mark → 100 YES + 100 NO ─────────────
+        vm.prank(alice);
+        market.mint(NOTIONAL);
+
+        assertEq(market.costBasis(alice), MARK_5PCT, "costBasis == 5% entry mark");
+
+        // ── 2. Alice sells 100 NO to Bob (Bob pays 100 USDC) ───────────────
+        uint256 expiry1 = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory a1 = _order(
+            alice, address(noToken), address(usdc), NOTIONAL, NOTIONAL, expiry1, 0
+        );
+        CLOBSettlement.Order memory b1 = _order(
+            bob,   address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry1, 0
+        );
+        clob.verifyAndSettle(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1));
+
+        assertEq(noToken.balanceOf(bob),    NOTIONAL, "bob holds 100 NO");
+        assertEq(yesToken.balanceOf(alice), NOTIONAL, "alice holds 100 YES");
+
+        // ── 3. Mark path: 5% → 8% → 20% over 90 days ─────────────────────
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(keeper);
+        market.setMark(MARK_8PCT);  // accrues 30d at 5%, then changes mark
+
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(keeper);
+        market.setMark(MARK_20PCT); // accrues 30d at 8%, then changes mark
+
+        vm.warp(block.timestamp + 30 days);
+        market.accrueFunding();     // accrues 30d at 20%
+
+        // cumFundingPerYES after 90 days ≈ (1.5 + 2.4 + 6.0) / 365 × 1e18 ≈ 2.712e16
+        // At mark 20%, seizure needs f_now ≈ 19.4e16 — far from triggered.
+        assertFalse(market.isSeizable(alice),
+            "no seizure: rising mark leaves abundant equity after 90 days");
+
+        // ── 4. Capture display-layer values BEFORE the closing CLOB trade ──
+        // syncUserFunding fires during the buyback, resetting fundingSnapshot[alice]
+        // and driving fPerUnit to zero — must read before that happens.
+        uint256 aliceEquity    = market.equity(alice);
+        uint256 aliceCostBasis = market.costBasis(alice);
+        int256  alicePnl       = market.pnl(alice);
+
+        // Conservation snapshot: NO credit (bob) == YES funding owed (alice).
+        // Both equal 100e18 × cumFundingPerYES / 1e18 since both snapshots are 0.
+        uint256 bobNoCredit  = market.noFundingCredit(bob);
+        uint256 aliceYesOwed = market.yesFundingOwed(alice);
+
+        // P&L formula: pnl = equity − costBasis
+        assertEq(alicePnl, int256(aliceEquity) - int256(aliceCostBasis),
+            "pnl == equity - costBasis (display-layer formula)");
+
+        // Positive P&L: mark rose 5% → 20%, funding ≈ 2.7% (well below the 15% MTM gain)
+        assertGt(alicePnl, 0, "alice P&L positive after mark appreciation");
+
+        // Equity is mark minus accumulated funding
+        assertLt(aliceEquity, market.currentMark(), "equity < mark (carry deducted)");
+        assertGt(aliceEquity, 0,                    "equity positive (not underwater)");
+
+        // Conservation: YES funding owed == NO funding credited (same index, same balance)
+        assertEq(bobNoCredit, aliceYesOwed,
+            "conservation: NO credit == YES funding owed (cumFundingPerNO == cumFundingPerYES)");
+
+        // ── 5. Close: Alice buys back 100 NO from Bob, then redeems ────────
+        // Buyback triggers syncUserFunding for both parties, settling Alice's debt.
+        uint256 expiry2 = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory b2 = _order(
+            bob,   address(noToken), address(usdc), NOTIONAL, NOTIONAL, expiry2, 1
+        );
+        CLOBSettlement.Order memory a2 = _order(
+            alice, address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry2, 1
+        );
+        clob.verifyAndSettle(b2, _sign(bobKey, b2), a2, _sign(aliceKey, a2));
+
+        // Funding debt is now settled into fundingDebt[alice] by the sync.
+        uint256 aliceUsdcBeforeRedeem = usdc.balanceOf(alice);
+        uint256 fundingDebtAtClose    = market.fundingDebt(alice);
+
+        // The debt set by sync == aliceYesOwed captured above (same formula, no elapsed time).
+        assertEq(fundingDebtAtClose, aliceYesOwed,
+            "funding debt at close == pre-sync YES funding owed (same cumulative, same balance)");
+
+        vm.prank(alice);
+        market.redeem(NOTIONAL);
+
+        assertEq(yesToken.balanceOf(alice), 0, "YES burned on redeem");
+        assertEq(noToken.balanceOf(alice),  0, "NO burned on redeem");
+        assertEq(market.fundingDebt(alice), 0, "funding debt cleared on redeem");
+
+        // Payout = notional − funding debt
+        assertEq(
+            usdc.balanceOf(alice),
+            aliceUsdcBeforeRedeem + NOTIONAL - fundingDebtAtClose,
+            "alice receives notional minus accrued carry"
+        );
+        assertLt(fundingDebtAtClose, NOTIONAL, "funding debt < full notional (position solvent)");
+
+        // ── 6. USDC conservation ────────────────────────────────────────────
+        // alice: 1000 − 100 (mint) + 100 (NO sale) − 100 (NO buyback) + (100 − debt) = 1000 − debt
+        // bob:   1000 − 100 (NO purchase) + 100 (NO sale) = 1000
+        // market: +100 (mint) − (100 − debt) (redeem payout) = debt
+        // Total: 2 000 (alice and bob's initial USDC)
+        uint256 total = usdc.balanceOf(alice)
+                      + usdc.balanceOf(bob)
+                      + usdc.balanceOf(address(market));
+        assertEq(total, 2_000e18, "USDC conservation: total unchanged");
     }
 }
