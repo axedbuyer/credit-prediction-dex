@@ -371,6 +371,145 @@ contract CreditMarketTest is Test {
         assertLe(epochs, 356, "epochs <= 356");
     }
 
+    // ─── v1b: seizure trigger tests ───────────────────────────────────────────
+
+    // Fuzz: isSeizable must return the same value as the manually computed formula.
+    function test_IsSeizable_FiresAtBoundary(uint256 markPct, uint256 warpSecs) public {
+        markPct  = bound(markPct,  1,  99);
+        warpSecs = bound(warpSecs, 1,  180 days);
+
+        uint256 m   = markPct * 1e16;
+        CreditMarket mkt = _marketAt(m);
+
+        address bob = makeAddr("bob-boundary");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18);
+
+        vm.warp(block.timestamp + warpSecs);
+        mkt.accrueFunding();
+
+        uint256 fNow   = mkt.cumulativeFundingPerYES() - mkt.fundingSnapshot(bob);
+        uint256 deltaF = m * 1 days / 365 days; // epochLength == 1 days
+        uint256 fNext  = fNow + deltaF;
+        bool expected  = m <= (fNext * 103) / 100;
+
+        assertEq(mkt.isSeizable(bob), expected, "isSeizable matches manual boundary formula");
+    }
+
+    // Two holders with identical fNow and mark but different costBasis must yield
+    // the same isSeizable result — cost basis must not appear in the trigger path.
+    function test_IsSeizable_CostBasisIndependent() public {
+        CreditMarket mkt = _marketAt(0.5e18);
+
+        address bob = makeAddr("bob-cb");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(alice);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+
+        // alice mints at mark=0.5 → costBasis[alice] = 0.5e18
+        vm.prank(alice);
+        mkt.mint(100e18);
+
+        // change mark to 0.05 in the same block (no time elapsed → _accrueFunding no-op)
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.setMark(0.05e18);
+
+        // bob mints at mark=0.05 → costBasis[bob] = 0.05e18; same fundingSnapshot = 0
+        vm.prank(bob);
+        mkt.mint(100e18);
+
+        assertFalse(mkt.costBasis(alice) == mkt.costBasis(bob), "cost bases must differ");
+        assertEq(mkt.fundingSnapshot(alice), mkt.fundingSnapshot(bob), "snapshots equal (both 0)");
+
+        // warp past seizure threshold (5% mark, daily epoch: ~354 day runway)
+        vm.warp(block.timestamp + 358 days);
+        mkt.accrueFunding();
+
+        // both have identical fNow and m — isSeizable result must be the same
+        assertEq(mkt.isSeizable(alice), mkt.isSeizable(bob), "cost basis must not affect seizure trigger");
+    }
+
+    // A holder deeply underwater on mark (large negative P&L) but with small fNow
+    // relative to m must NOT trigger seizure — negative MTM alone is never a trigger.
+    function test_NegativeMTM_AloneDoesNotTrigger() public {
+        // mint at high mark to bake in a high cost basis
+        CreditMarket mkt = _marketAt(0.8e18);
+
+        address bob = makeAddr("bob-mtm");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18); // costBasis = 0.8e18
+
+        // mark collapses to 0.05 in same block (no accrual)
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.setMark(0.05e18);
+
+        // only 1 day passes → fNow ≈ 0.05/365 ≈ 1.37e14, far below m=0.05e18
+        vm.warp(block.timestamp + 1 days);
+        mkt.accrueFunding();
+
+        assertFalse(mkt.isSeizable(bob), "negative MTM alone must not trigger seizure");
+        assertTrue(mkt.pnl(bob) < 0, "position is underwater (sanity check)");
+    }
+
+    // After flagClaimable, frozenFunding must stay constant even as the global
+    // cumulativeFundingPerYES index keeps rising.
+    function test_FlagClaimable_FreezesFunding() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+
+        address bob = makeAddr("bob-freeze");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18);
+
+        // 5% mark, daily epoch: seizure fires at ~354 days; 356 days is safely past it
+        vm.warp(block.timestamp + 356 days);
+        mkt.accrueFunding();
+        assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
+
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.flagClaimable(bob);
+
+        assertTrue(mkt.claimable(bob), "claimable flag is set");
+        uint256 frozen = mkt.frozenFunding(bob);
+
+        // continue accruing — frozenFunding must not change
+        vm.warp(block.timestamp + 30 days);
+        mkt.accrueFunding();
+
+        assertEq(mkt.frozenFunding(bob), frozen, "frozenFunding must not change after flagging");
+    }
+
+    // flagClaimable must revert when the position is not yet seizable.
+    function test_FlagClaimable_RequiresSeizable() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+
+        address bob = makeAddr("bob-notsz");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18);
+
+        // 1 day — nowhere near the seizure threshold
+        vm.warp(block.timestamp + 1 days);
+        mkt.accrueFunding();
+        assertFalse(mkt.isSeizable(bob), "must not be seizable after 1 day");
+
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        vm.expectRevert(CreditMarket.PositionNotSeizable.selector);
+        mkt.flagClaimable(bob);
+    }
+
     // Fuzz: at any valid mark and any elapsed time ≤ 1 year,
     // the USDC payout after funding deduction is always >= 0.
     function test_Funding_NeverExceedsCollateral(uint256 markPct, uint256 warpSecs) public {

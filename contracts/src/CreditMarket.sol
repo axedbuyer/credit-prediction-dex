@@ -34,15 +34,20 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     mapping(address => uint256) public snapNO;          // NO snapshot per holder
     mapping(address => uint256) public fundingDebt;
     mapping(address => uint256) public costBasis;       // 1e18-scaled entry mark (weighted avg)
+    mapping(address => bool)    public claimable;       // true once keeper flags position
+    mapping(address => uint256) public frozenFunding;   // per-unit index delta frozen at flag time
 
     event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
     event YESSettled(address indexed user, uint256 amount);
     event CreditEventTriggered();
     event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp);
+    event FlaggedClaimable(address indexed user, uint256 frozenFundingPerUnit, uint256 timestamp);
 
     error CreditEventAlreadyConfirmed();
     error CreditEventNotConfirmed();
+    error PositionNotSeizable();
+    error AlreadyFlagged();
 
     constructor(
         address admin,
@@ -73,6 +78,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     }
 
     function _syncUserFunding(address user) internal {
+        if (claimable[user]) return; // position frozen pending liquidation claim
         uint256 delta = cumulativeFundingPerYES - fundingSnapshot[user];
         if (delta > 0) {
             uint256 balance = IERC20(yesToken).balanceOf(user);
@@ -172,6 +178,32 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 deltaF = currentMark * epochLength / 365 days;
         if (deltaF == 0) return type(uint256).max;
         return numerator / deltaF;
+    }
+
+    // ─── v1b: seizure trigger ────────────────────────────────────────────────────
+
+    // Returns true when equity is thin enough to warrant seizure.
+    // Trigger: m <= 1.03 * f_next, where f_next = f_now + one epoch of accrual.
+    // Cost basis is intentionally absent — two holders with the same funding/mark
+    // exposure must be equally seizable regardless of their entry price.
+    function isSeizable(address user) public view returns (bool) {
+        if (IERC20(yesToken).balanceOf(user) == 0) return false;
+        uint256 fNow   = cumulativeFundingPerYES - fundingSnapshot[user]; // per-unit, 1e18-scaled
+        uint256 m      = currentMark;
+        uint256 deltaF = m * epochLength / 365 days;
+        uint256 fNext  = fNow + deltaF;
+        return m <= (fNext * 103) / 100;
+    }
+
+    // KEEPER_ROLE: flag a seizable position as claimable and freeze its per-unit f_now.
+    // After flagging, _syncUserFunding skips this user — no further accrual until claimed.
+    function flagClaimable(address user) external onlyRole(KEEPER_ROLE) {
+        if (!isSeizable(user)) revert PositionNotSeizable();
+        if (claimable[user]) revert AlreadyFlagged();
+        _accrueFunding(); // update global index before snapshotting frozen value
+        claimable[user]      = true;
+        frozenFunding[user]  = cumulativeFundingPerYES - fundingSnapshot[user];
+        emit FlaggedClaimable(user, frozenFunding[user], block.timestamp);
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {
