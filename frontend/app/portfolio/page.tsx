@@ -9,6 +9,14 @@ import { wagmiConfig } from '@/lib/wagmi'
 import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
 import { TradePanel } from '@/components/TradePanel'
 import { MSTR_MARKET } from '@/lib/constants'
+import {
+  PositionCard,
+  DEV_YES_HEALTHY,
+  DEV_YES_AMBER,
+  DEV_YES_RED,
+  DEV_YES_SEIZABLE,
+  DEV_NO_HEALTHY,
+} from '@/components/PositionCard'
 
 // ── ABIs ─────────────────────────────────────────────────────────────────────
 
@@ -208,6 +216,34 @@ export default function PortfolioPage() {
         <div className="mt-8 rounded-lg border border-slate-800 bg-slate-900 p-10 text-center">
           <p className="text-slate-400">Connect your wallet to view positions.</p>
         </div>
+        {/* Dev preview — all PositionCard states (only in development) */}
+        {process.env.NODE_ENV === 'development' && (
+          <div className="mt-10 border-t border-dashed border-slate-700 pt-6 space-y-4">
+            <p className="text-[10px] font-mono uppercase tracking-widest text-slate-600">
+              ↓ dev preview — position card states
+            </p>
+            <PositionCard side="YES" _dev={DEV_YES_HEALTHY}
+              userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+              yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+              onSell={() => {}} />
+            <PositionCard side="YES" _dev={DEV_YES_AMBER}
+              userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+              yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+              onSell={() => {}} />
+            <PositionCard side="YES" _dev={DEV_YES_RED}
+              userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+              yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+              onSell={() => {}} />
+            <PositionCard side="YES" _dev={DEV_YES_SEIZABLE}
+              userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+              yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+              onSell={() => {}} />
+            <PositionCard side="NO" _dev={DEV_NO_HEALTHY}
+              userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+              yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+              onSell={() => {}} />
+          </div>
+        )}
       </div>
     )
   }
@@ -250,85 +286,29 @@ export default function PortfolioPage() {
       {!isLoading && (hasYES || hasNO) && (
         <div className="mt-6 space-y-4">
 
-          {/* YES card */}
           {hasYES && (
-            <div className="rounded-lg border border-emerald-900/50 bg-slate-900 p-5">
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                  YES Position
-                </span>
-                {creditConfirmed && (
-                  <span className="rounded-full border border-emerald-700/50 bg-emerald-900/60 px-2 py-0.5 text-xs text-emerald-300">
-                    Credit event confirmed
-                  </span>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-x-6 gap-y-3 mb-5">
-                <Stat label="Tokens" value={`${tokenDisplay(yesRaw)} YES`} />
-                <Stat label="Current value" value={usdcDisplay(yesValue)} />
-                <Stat
-                  label="Accrued funding owed"
-                  value={usdcDisplay(debtRaw)}
-                  dim={debtRaw === 0n}
-                  warn={debtRaw > 0n}
-                />
-                <Stat
-                  label="Net value"
-                  value={usdcDisplay(yesNetValue)}
-                  highlight
-                />
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setTradeModal('YES')}
-                  className="flex-1 rounded-lg border border-slate-700 bg-slate-800 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 transition-colors"
-                >
-                  Sell YES
-                </button>
-                {creditConfirmed && (
-                  <button
-                    onClick={handleSettleYES}
-                    disabled={settleStatus === 'pending'}
-                    className="flex-1 rounded-lg bg-emerald-600 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
-                  >
-                    {settleStatus === 'pending'
-                      ? 'Settling…'
-                      : `Settle for ${usdcDisplay(yesRaw)}`}
-                  </button>
-                )}
-              </div>
-
-              {settleStatus === 'success' && (
-                <p className="mt-2 text-xs text-emerald-400">YES tokens settled for USDC.</p>
-              )}
-            </div>
+            <PositionCard
+              side="YES"
+              userAddress={userAddr}
+              creditMarketAddress={addrs.creditMarket}
+              yesTokenAddress={addrs.yesToken}
+              noTokenAddress={addrs.noToken}
+              creditEventConfirmed={creditConfirmed ?? false}
+              onSell={() => setTradeModal('YES')}
+              onSettle={handleSettleYES}
+              settleStatus={settleStatus}
+            />
           )}
 
-          {/* NO card */}
           {hasNO && (
-            <div className="rounded-lg border border-red-900/50 bg-slate-900 p-5">
-              <div className="mb-4">
-                <span className="text-xs font-semibold uppercase tracking-wider text-red-400">
-                  NO Position
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-x-6 gap-y-3 mb-5">
-                <Stat label="Tokens" value={`${tokenDisplay(noRaw)} NO`} />
-                <Stat label="Current value" value={usdcDisplay(noValue)} />
-                <Stat label="Accrued funding earned" value="—" dim />
-                <Stat label="Net value" value={usdcDisplay(noNetValue)} highlight />
-              </div>
-
-              <button
-                onClick={() => setTradeModal('NO')}
-                className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 transition-colors"
-              >
-                Sell NO
-              </button>
-            </div>
+            <PositionCard
+              side="NO"
+              userAddress={userAddr}
+              creditMarketAddress={addrs.creditMarket}
+              yesTokenAddress={addrs.yesToken}
+              noTokenAddress={addrs.noToken}
+              onSell={() => setTradeModal('NO')}
+            />
           )}
 
           {/* Redeem section */}
@@ -364,6 +344,35 @@ export default function PortfolioPage() {
           {txError && (
             <p className="text-center text-xs text-red-400">{txError}</p>
           )}
+        </div>
+      )}
+
+      {/* Dev preview — all PositionCard states (only in development) */}
+      {process.env.NODE_ENV === 'development' && (
+        <div className="mt-10 border-t border-dashed border-slate-700 pt-6 space-y-4">
+          <p className="text-[10px] font-mono uppercase tracking-widest text-slate-600">
+            ↓ dev preview — position card states
+          </p>
+          <PositionCard side="YES" _dev={DEV_YES_HEALTHY}
+            userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+            yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            onSell={() => {}} />
+          <PositionCard side="YES" _dev={DEV_YES_AMBER}
+            userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+            yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            onSell={() => {}} />
+          <PositionCard side="YES" _dev={DEV_YES_RED}
+            userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+            yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            onSell={() => {}} />
+          <PositionCard side="YES" _dev={DEV_YES_SEIZABLE}
+            userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+            yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            onSell={() => {}} />
+          <PositionCard side="NO" _dev={DEV_NO_HEALTHY}
+            userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+            yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            onSell={() => {}} />
         </div>
       )}
 
