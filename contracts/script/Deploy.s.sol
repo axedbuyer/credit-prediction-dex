@@ -11,6 +11,7 @@ import {CreditMarket} from "../src/CreditMarket.sol";
 import {CLOBSettlement} from "../src/CLOBSettlement.sol";
 import {OracleRouter} from "../src/OracleRouter.sol";
 import {InsuranceFund} from "../src/InsuranceFund.sol";
+import {LiquidationEngine} from "../src/LiquidationEngine.sol";
 
 contract Deploy is Script {
     using stdJson for string;
@@ -53,7 +54,17 @@ contract Deploy is Script {
         // ── 5. insurance fund ─────────────────────────────────────────────────
         InsuranceFund insuranceFund = new InsuranceFund(deployer, usdc);
 
-        // ── 6. role grants ────────────────────────────────────────────────────
+        // ── 6. liquidation engine (v1b) ───────────────────────────────────────
+        // Migration note: cumFundingPerNO, costBasis, claimable, and frozenFunding
+        // all start at zero/false for every holder in a fresh deployment.
+        // costBasis will be 0 for any position opened before this contract was
+        // present — a known MVP gap; acceptable for the single-market case.
+        LiquidationEngine liquidationEngine = new LiquidationEngine(
+            address(market),
+            address(insuranceFund)
+        );
+
+        // ── 7. role grants ────────────────────────────────────────────────────
 
         // CreditMarket can mint and burn YES/NO tokens
         yesToken.grantRole(yesToken.MINTER_ROLE(), address(market));
@@ -69,21 +80,29 @@ contract Deploy is Script {
         // OracleRouter can trigger a credit event on CreditMarket
         market.grantRole(market.ORACLE_ROLE(), address(oracleRouter));
 
+        // LiquidationEngine: CLOB_ROLE for forced YES transfer; LIQUIDATOR_ROLE
+        // on CreditMarket and InsuranceFund for claim settlement
+        yesToken.grantRole(yesToken.CLOB_ROLE(),                  address(liquidationEngine));
+        market.grantRole(market.LIQUIDATOR_ROLE(),                 address(liquidationEngine));
+        insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(),   address(liquidationEngine));
+
         vm.stopBroadcast();
 
         // ── 7. log & persist ──────────────────────────────────────────────────
-        console.log("YESToken      :", address(yesToken));
-        console.log("NOToken       :", address(noToken));
-        console.log("CreditMarket  :", address(market));
-        console.log("CLOBSettlement:", address(clob));
-        console.log("OracleRouter  :", address(oracleRouter));
-        console.log("InsuranceFund :", address(insuranceFund));
+        console.log("YESToken          :", address(yesToken));
+        console.log("NOToken           :", address(noToken));
+        console.log("CreditMarket      :", address(market));
+        console.log("CLOBSettlement    :", address(clob));
+        console.log("OracleRouter      :", address(oracleRouter));
+        console.log("InsuranceFund     :", address(insuranceFund));
+        console.log("LiquidationEngine :", address(liquidationEngine));
         console.log("=== Roles granted ===");
 
         _writeDeployment(
             deployer, usdc,
             address(yesToken), address(noToken), address(market),
-            address(clob), address(oracleRouter), address(insuranceFund)
+            address(clob), address(oracleRouter), address(insuranceFund),
+            address(liquidationEngine)
         );
     }
 
@@ -95,19 +114,21 @@ contract Deploy is Script {
         address market,
         address clob,
         address oracleRouter,
-        address insuranceFund
+        address insuranceFund,
+        address liquidationEngine
     ) internal {
         // Ensure the output directory exists.
         vm.createDir("deployments", true);
 
         string memory obj = "deployment";
-        vm.serializeAddress(obj, "deployer",       deployer);
-        vm.serializeAddress(obj, "usdc",           usdc);
-        vm.serializeAddress(obj, "yesToken",       yesToken);
-        vm.serializeAddress(obj, "noToken",        noToken);
-        vm.serializeAddress(obj, "clobSettlement", clob);
-        vm.serializeAddress(obj, "oracleRouter",   oracleRouter);
-        vm.serializeAddress(obj, "insuranceFund",  insuranceFund);
+        vm.serializeAddress(obj, "deployer",           deployer);
+        vm.serializeAddress(obj, "usdc",               usdc);
+        vm.serializeAddress(obj, "yesToken",           yesToken);
+        vm.serializeAddress(obj, "noToken",            noToken);
+        vm.serializeAddress(obj, "clobSettlement",     clob);
+        vm.serializeAddress(obj, "oracleRouter",       oracleRouter);
+        vm.serializeAddress(obj, "insuranceFund",      insuranceFund);
+        vm.serializeAddress(obj, "liquidationEngine",  liquidationEngine);
         vm.serializeUint(obj, "initialMark", INITIAL_MARK);
         vm.serializeUint(obj, "chainId",     block.chainid);
         // creditMarket is serialized last so its return is the fully-built JSON object.

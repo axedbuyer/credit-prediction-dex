@@ -11,6 +11,7 @@ import {CreditMarket} from "../src/CreditMarket.sol";
 import {CLOBSettlement} from "../src/CLOBSettlement.sol";
 import {OracleRouter} from "../src/OracleRouter.sol";
 import {InsuranceFund} from "../src/InsuranceFund.sol";
+import {LiquidationEngine} from "../src/LiquidationEngine.sol";
 
 // Minimal 6-decimal USDC mock matching real USDC decimals.
 contract MockUSDC is ERC20 {
@@ -68,7 +69,13 @@ contract DeployLocal is Script {
         // ── 5. insurance fund ─────────────────────────────────────────────────
         InsuranceFund insuranceFund = new InsuranceFund(deployer, address(usdc));
 
-        // ── 6. role grants ────────────────────────────────────────────────────
+        // ── 6. liquidation engine (v1b) ───────────────────────────────────────
+        LiquidationEngine liquidationEngine = new LiquidationEngine(
+            address(market),
+            address(insuranceFund)
+        );
+
+        // ── 7. role grants ────────────────────────────────────────────────────
         yesToken.grantRole(yesToken.MINTER_ROLE(), address(market));
         yesToken.grantRole(yesToken.BURNER_ROLE(), address(market));
         noToken.grantRole(noToken.MINTER_ROLE(),   address(market));
@@ -80,15 +87,20 @@ contract DeployLocal is Script {
 
         market.grantRole(market.ORACLE_ROLE(), address(oracleRouter));
 
+        yesToken.grantRole(yesToken.CLOB_ROLE(),                  address(liquidationEngine));
+        market.grantRole(market.LIQUIDATOR_ROLE(),                 address(liquidationEngine));
+        insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(),   address(liquidationEngine));
+
         vm.stopBroadcast();
 
-        // ── 7. summary ────────────────────────────────────────────────────────
-        console.log("YESToken      :", address(yesToken));
-        console.log("NOToken       :", address(noToken));
-        console.log("CreditMarket  :", address(market));
-        console.log("CLOBSettlement:", address(clob));
-        console.log("OracleRouter  :", address(oracleRouter));
-        console.log("InsuranceFund :", address(insuranceFund));
+        // ── 8. summary ────────────────────────────────────────────────────────
+        console.log("YESToken          :", address(yesToken));
+        console.log("NOToken           :", address(noToken));
+        console.log("CreditMarket      :", address(market));
+        console.log("CLOBSettlement    :", address(clob));
+        console.log("OracleRouter      :", address(oracleRouter));
+        console.log("InsuranceFund     :", address(insuranceFund));
+        console.log("LiquidationEngine :", address(liquidationEngine));
         console.log("=== Roles granted. Local deployment complete. ===");
     }
 }
