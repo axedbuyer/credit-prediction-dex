@@ -12,15 +12,33 @@ import {
 
 const CREDIT_MARKET = '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0' as const
 const KEEPER_ADDR   = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
+const HOLDER_ADDR   = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as const
 const TX_HASH       = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
+const FLAG_TX_HASH  = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const
 
-const CONFIG: KeeperConfig = { creditMarketAddress: CREDIT_MARKET }
+const CONFIG: KeeperConfig = { creditMarketAddress: CREDIT_MARKET, trackedHolders: [] }
+const CONFIG_WITH_HOLDER: KeeperConfig = {
+  creditMarketAddress: CREDIT_MARKET,
+  trackedHolders: [HOLDER_ADDR],
+}
+
+// Default readContract dispatch: handles all function names used by the keeper.
+function defaultReadContract(args: { functionName: string }): Promise<unknown> {
+  switch (args.functionName) {
+    case 'cumulativeFundingPerYES': return Promise.resolve(5_000_000_000_000_000n)
+    case 'cumFundingPerNO':         return Promise.resolve(5_000_000_000_000_000n)
+    case 'claimable':               return Promise.resolve(false)
+    case 'isSeizable':              return Promise.resolve(false)
+    case 'frozenFunding':           return Promise.resolve(0n)
+    default:                        return Promise.resolve(0n)
+  }
+}
 
 function makeMocks(overrides: {
   estimateContractGas?: () => Promise<bigint>
-  writeContract?: () => Promise<string>
+  writeContract?: (args: { functionName: string }) => Promise<string>
   waitForTransactionReceipt?: () => Promise<{ status: 'success' | 'reverted' }>
-  readContract?: () => Promise<unknown>
+  readContract?: (args: { functionName: string }) => Promise<unknown>
 } = {}) {
   const publicClient: IPublicClient = {
     estimateContractGas: vi.fn().mockImplementation(
@@ -31,12 +49,14 @@ function makeMocks(overrides: {
         (() => Promise.resolve({ status: 'success' as const })),
     ),
     readContract: vi.fn().mockImplementation(
-      overrides.readContract ?? (() => Promise.resolve(5_000_000_000_000_000n)),
+      overrides.readContract ?? defaultReadContract,
     ),
   }
   const walletClient: IWalletClient = {
     writeContract: vi.fn().mockImplementation(
-      overrides.writeContract ?? (() => Promise.resolve(TX_HASH)),
+      overrides.writeContract ?? (({ functionName }) =>
+        Promise.resolve(functionName === 'flagClaimable' ? FLAG_TX_HASH : TX_HASH)
+      ),
     ),
     account: { address: KEEPER_ADDR },
   }
@@ -107,9 +127,18 @@ describe('FundingKeeper — successful accrual', () => {
 
   it('reads cumulativeFundingPerYES after the tx succeeds', async () => {
     await fire()
-    const readArgs = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(readArgs.functionName).toBe('cumulativeFundingPerYES')
-    expect(readArgs.address).toBe(CREDIT_MARKET)
+    const calls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const yesCall = calls.find((c: unknown[]) => (c[0] as { functionName: string }).functionName === 'cumulativeFundingPerYES')
+    expect(yesCall).toBeDefined()
+    expect(yesCall[0].address).toBe(CREDIT_MARKET)
+  })
+
+  it('reads cumFundingPerNO after the tx succeeds', async () => {
+    await fire()
+    const calls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const noCall = calls.find((c: unknown[]) => (c[0] as { functionName: string }).functionName === 'cumFundingPerNO')
+    expect(noCall).toBeDefined()
+    expect(noCall[0].address).toBe(CREDIT_MARKET)
   })
 
   it('updates lastRunAt on success', async () => {
@@ -168,6 +197,143 @@ describe('FundingKeeper — error handling', () => {
 
     await expect(fire()).resolves.not.toThrow()
     // tx succeeded, so lastRunAt IS updated even when readContract fails
+    expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+  })
+})
+
+// ─── Seizure checks ───────────────────────────────────────────────────────────
+
+describe('FundingKeeper — seizure checks', () => {
+  it('checks isSeizable for each tracked holder after accrual', async () => {
+    const { publicClient, walletClient } = makeMocks()
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    keeper.start(scheduler)
+
+    await fire()
+
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
+        (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
+    )
+    expect(isSeizableCall).toBeDefined()
+  })
+
+  it('calls flagClaimable for a holder that is seizable and not already claimable', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable')   return Promise.resolve(false)
+        if (functionName === 'isSeizable')  return Promise.resolve(true)
+        if (functionName === 'frozenFunding') return Promise.resolve(4_500_000_000_000_000n)
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    keeper.start(scheduler)
+
+    await fire()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeDefined()
+    expect(flagCall[0].args).toEqual([HOLDER_ADDR])
+    expect(flagCall[0].address).toBe(CREDIT_MARKET)
+  })
+
+  it('does not call flagClaimable for a holder that is already claimable', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable') return Promise.resolve(true)  // already flagged
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    keeper.start(scheduler)
+
+    await fire()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeUndefined()
+
+    // isSeizable should not be called either (early exit after claimable check)
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'isSeizable',
+    )
+    expect(isSeizableCall).toBeUndefined()
+  })
+
+  it('does not call flagClaimable for a holder that is not seizable', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable')  return Promise.resolve(false)
+        if (functionName === 'isSeizable') return Promise.resolve(false)  // not seizable
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    keeper.start(scheduler)
+
+    await fire()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeUndefined()
+  })
+
+  it('uses the 20% gas buffer for flagClaimable', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable')  return Promise.resolve(false)
+        if (functionName === 'isSeizable') return Promise.resolve(true)
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    keeper.start(scheduler)
+
+    await fire()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    const estimatedGas = 150_000n
+    expect(flagCall[0].gas).toBe((estimatedGas * 120n) / 100n)
+  })
+
+  it('still updates lastRunAt even when a holder flagClaimable tx reverts', async () => {
+    // accrueFunding succeeds; flagClaimable reverts
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable')  return Promise.resolve(false)
+        if (functionName === 'isSeizable') return Promise.resolve(true)
+        return defaultReadContract({ functionName })
+      },
+      waitForTransactionReceipt: vi.fn()
+        .mockResolvedValueOnce({ status: 'success' })   // accrueFunding receipt
+        .mockResolvedValueOnce({ status: 'reverted' })  // flagClaimable receipt
+        .getMockImplementation() ?? (() => Promise.resolve({ status: 'success' as const })),
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    keeper.start(scheduler)
+
+    await fire()
+
+    // Accrual succeeded, so lastRunAt is set regardless of flag outcome
     expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
   })
 })

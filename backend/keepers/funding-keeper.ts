@@ -24,6 +24,41 @@ export const CREDIT_MARKET_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  {
+    name: 'cumFundingPerNO',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'isSeizable',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{ name: 'user', type: 'address' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    name: 'claimable',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{ name: 'user', type: 'address' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    name: 'flagClaimable',
+    type: 'function' as const,
+    stateMutability: 'nonpayable' as const,
+    inputs: [{ name: 'user', type: 'address' }],
+    outputs: [],
+  },
+  {
+    name: 'frozenFunding',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{ name: 'user', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
 ] as const
 
 // ─── Narrow client interfaces ─────────────────────────────────────────────────
@@ -62,6 +97,7 @@ export interface IWalletClient {
 
 export interface KeeperConfig {
   creditMarketAddress: Address
+  trackedHolders: Address[]
 }
 
 // ─── Scheduler interface (injected for testability) ───────────────────────────
@@ -101,8 +137,9 @@ export class FundingKeeper {
    *  1. Estimate gas (+20% buffer)
    *  2. Call accrueFunding()
    *  3. Wait for receipt
-   *  4. Read cumulativeFundingPerYES and log
+   *  4. Read cumulativeFundingPerYES and cumFundingPerNO and log
    *  5. Update lastRunAt
+   *  6. Check each tracked YES holder for seizure; flag newly-seizable ones
    *
    * Any failure is logged and swallowed — the keeper stays alive and will retry
    * at the next scheduled tick.
@@ -161,26 +198,128 @@ export class FundingKeeper {
       return
     }
 
-    // 4. Read updated cumulativeFundingPerYES
+    // 4. Read updated indices
     try {
-      const cumFunding = await this.publicClient.readContract({
+      const cumFundingYES = await this.publicClient.readContract({
         address:      this.config.creditMarketAddress,
         abi:          CREDIT_MARKET_ABI,
         functionName: 'cumulativeFundingPerYES',
         args:         [],
       }) as bigint
 
+      const cumFundingNO = await this.publicClient.readContract({
+        address:      this.config.creditMarketAddress,
+        abi:          CREDIT_MARKET_ABI,
+        functionName: 'cumFundingPerNO',
+        args:         [],
+      }) as bigint
+
       console.log(
         `[keeper] ${ts} — accrueFunding OK  tx=${txHash}` +
-        `  cumulativeFundingPerYES=${cumFunding.toString()}`,
+        `  cumulativeFundingPerYES=${cumFundingYES.toString()}` +
+        `  cumFundingPerNO=${cumFundingNO.toString()}`,
       )
     } catch (err) {
       // Non-fatal: tx succeeded, just couldn't read the updated value
-      console.error(`[keeper] ${ts} — could not read cumulativeFundingPerYES:`, err)
+      console.error(`[keeper] ${ts} — could not read funding indices:`, err)
     }
 
     // 5. Record last successful run
     this.lastRunAt = new Date()
+
+    // 6. Seizure check for tracked YES holders
+    for (const holder of this.config.trackedHolders) {
+      await this.checkAndFlagHolder(holder, ts)
+    }
+  }
+
+  /**
+   * Check one holder for seizure eligibility and flag them claimable if:
+   *   - not already claimable (would revert on-chain anyway, but skip to save gas)
+   *   - isSeizable() returns true
+   */
+  private async checkAndFlagHolder(holder: Address, ts: string): Promise<void> {
+    try {
+      // Skip if already flagged claimable
+      const alreadyClaimable = await this.publicClient.readContract({
+        address:      this.config.creditMarketAddress,
+        abi:          CREDIT_MARKET_ABI,
+        functionName: 'claimable',
+        args:         [holder],
+      }) as boolean
+
+      if (alreadyClaimable) {
+        console.log(`[keeper] ${ts} — ${holder}: already claimable, skipping`)
+        return
+      }
+
+      // Check seizure trigger
+      const seizable = await this.publicClient.readContract({
+        address:      this.config.creditMarketAddress,
+        abi:          CREDIT_MARKET_ABI,
+        functionName: 'isSeizable',
+        args:         [holder],
+      }) as boolean
+
+      if (!seizable) return
+
+      // Flag claimable (freezes f_now for this holder)
+      console.log(`[keeper] ${ts} — ${holder}: seizable — flagging claimable…`)
+
+      const account = this.walletClient.account!.address
+      let flagGas: bigint
+      try {
+        flagGas = await this.publicClient.estimateContractGas({
+          address:      this.config.creditMarketAddress,
+          abi:          CREDIT_MARKET_ABI,
+          functionName: 'flagClaimable',
+          args:         [holder],
+          account,
+        })
+      } catch (err) {
+        console.error(`[keeper] ${ts} — gas estimation for flagClaimable(${holder}) failed:`, err)
+        return
+      }
+
+      let flagHash: Hash
+      try {
+        flagHash = await this.walletClient.writeContract({
+          address:      this.config.creditMarketAddress,
+          abi:          CREDIT_MARKET_ABI,
+          functionName: 'flagClaimable',
+          args:         [holder],
+          gas:          (flagGas * 120n) / 100n,
+        })
+      } catch (err) {
+        console.error(`[keeper] ${ts} — flagClaimable(${holder}) tx failed:`, err)
+        return
+      }
+
+      const flagReceipt = await this.publicClient.waitForTransactionReceipt({ hash: flagHash })
+      if (flagReceipt.status !== 'success') {
+        console.error(`[keeper] ${ts} — flagClaimable(${holder}) REVERTED: ${flagHash}`)
+        return
+      }
+
+      // Log frozen funding after successful flag
+      try {
+        const frozen = await this.publicClient.readContract({
+          address:      this.config.creditMarketAddress,
+          abi:          CREDIT_MARKET_ABI,
+          functionName: 'frozenFunding',
+          args:         [holder],
+        }) as bigint
+
+        console.log(
+          `[keeper] ${ts} — flagged ${holder}  tx=${flagHash}` +
+          `  frozenFunding=${frozen.toString()}`,
+        )
+      } catch (err) {
+        console.error(`[keeper] ${ts} — could not read frozenFunding(${holder}):`, err)
+      }
+    } catch (err) {
+      console.error(`[keeper] ${ts} — unexpected error for holder ${holder}:`, err)
+    }
   }
 
   getLastRunAt(): Date | null {
@@ -234,6 +373,12 @@ function main(): void {
     creditMarketAddress = deployments.creditMarket
   }
 
+  // TRACKED_HOLDERS env var: comma-separated list of YES holder addresses to monitor
+  const trackedHolders: Address[] = (process.env.TRACKED_HOLDERS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0) as Address[]
+
   const account   = privateKeyToAccount(privateKey as `0x${string}`)
   const transport = viemHttp(rpcUrl)
 
@@ -249,7 +394,7 @@ function main(): void {
   const keeper = new FundingKeeper(
     publicClient  as unknown as IPublicClient,
     walletClient  as unknown as IWalletClient,
-    { creditMarketAddress: creditMarketAddress as Address },
+    { creditMarketAddress: creditMarketAddress as Address, trackedHolders },
   )
 
   keeper.start()
