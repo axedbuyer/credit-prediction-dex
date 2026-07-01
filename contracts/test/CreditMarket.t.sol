@@ -536,4 +536,149 @@ contract CreditMarketTest is Test {
         // Funding deduction is capped at tokenAmount → transfer amount ≥ 0.
         assertGe(mockUsdc.balanceOf(alice), aliceUsdcBefore, "USDC never goes negative");
     }
+
+    // ─── v1b: CLOB funding settlement hook tests ──────────────────────────────
+
+    function test_SettleFundingOnSale_YES_ReturnsDebit() public {
+        vm.prank(alice);
+        market.mint(1000e18); // mark = 0.23e18, fundingSnapshot[alice] = 0
+
+        vm.warp(block.timestamp + 30 days);
+
+        address clob = makeAddr("clob-1");
+        address bob  = makeAddr("bob-1");
+        market.grantRole(market.CLOB_ROLE(), clob);
+
+        uint256 amount       = 500e18;
+        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedOwed = amount * expectedCum / 1e18;
+
+        vm.prank(clob);
+        (uint256 sellerAdjustment, bool isCredit) =
+            market.settleFundingOnSale(alice, bob, true, amount, expectedOwed);
+
+        assertEq(sellerAdjustment, expectedOwed, "owed computed correctly (total, not per-unit)");
+        assertFalse(isCredit, "YES sale returns a debit");
+    }
+
+    function test_SettleFundingOnSale_NO_ReturnsCredit() public {
+        address bob  = makeAddr("bob-2");
+        address clob = makeAddr("clob-2");
+        mockUsdc.mint(bob, 10_000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(market), type(uint256).max);
+
+        // Bob mints a much larger balance so a prior YES-side settlement (below)
+        // funds the accretion pool enough to cover alice's smaller NO credit.
+        vm.prank(bob);
+        market.mint(5000e18);
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+        market.grantRole(market.CLOB_ROLE(), clob);
+
+        // Fund the pool first via bob's (larger) YES-side settlement.
+        vm.prank(clob);
+        market.settleFundingOnSale(bob, alice, true, 5000e18, type(uint256).max / 2);
+
+        uint256 expectedCum    = market.cumFundingPerNO() - market.snapNO(alice);
+        uint256 amount         = 1000e18;
+        uint256 expectedCredit = amount * expectedCum / 1e18;
+
+        vm.prank(clob);
+        (uint256 sellerAdjustment, bool isCredit) =
+            market.settleFundingOnSale(alice, bob, false, amount, 0);
+
+        assertEq(sellerAdjustment, expectedCredit, "credit computed correctly (total, not per-unit)");
+        assertTrue(isCredit, "NO sale returns a credit");
+    }
+
+    function test_SettleFundingOnSale_YES_BelowOwed_Reverts() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+
+        address clob = makeAddr("clob-3");
+        address bob  = makeAddr("bob-3");
+        market.grantRole(market.CLOB_ROLE(), clob);
+
+        uint256 amount       = 500e18;
+        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedOwed = amount * expectedCum / 1e18;
+
+        vm.prank(clob);
+        vm.expectRevert(CreditMarket.FundingShortfall.selector);
+        market.settleFundingOnSale(alice, bob, true, amount, expectedOwed - 1);
+    }
+
+    function test_SettleFundingOnSale_ResetsBothSnapshots() public {
+        address bob  = makeAddr("bob-4");
+        address clob = makeAddr("clob-4");
+        mockUsdc.mint(bob, 10_000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(market), type(uint256).max);
+
+        vm.prank(alice);
+        market.mint(1000e18);
+        vm.prank(bob);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+        market.grantRole(market.CLOB_ROLE(), clob);
+
+        uint256 amount      = 500e18;
+        uint256 expectedCum = uint256(0.23e18) * 30 days / 365 days;
+        uint256 owed        = amount * expectedCum / 1e18;
+
+        vm.prank(clob);
+        market.settleFundingOnSale(alice, bob, true, amount, owed);
+
+        assertEq(market.fundingSnapshot(alice), market.cumulativeFundingPerYES(), "seller YES snapshot reset");
+        assertEq(market.fundingSnapshot(bob),   market.cumulativeFundingPerYES(), "buyer YES snapshot reset");
+
+        // NO-side snapshots reset symmetrically (amount=0 avoids touching the accretion pool).
+        vm.prank(clob);
+        market.settleFundingOnSale(bob, alice, false, 0, 0);
+
+        assertEq(market.snapNO(bob),   market.cumFundingPerNO(), "seller NO snapshot reset");
+        assertEq(market.snapNO(alice), market.cumFundingPerNO(), "buyer NO snapshot reset");
+    }
+
+    function test_SettleFundingOnSale_OnlyCLOBRole() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+
+        address bob   = makeAddr("bob-5");
+        address rando = makeAddr("rando-5");
+
+        vm.prank(rando);
+        vm.expectRevert();
+        market.settleFundingOnSale(alice, bob, true, 500e18, type(uint256).max / 2);
+    }
+
+    function test_SettleFundingOnSale_RoutesToNOAccretion() public {
+        vm.prank(alice);
+        market.mint(1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+
+        address clob = makeAddr("clob-6");
+        address bob  = makeAddr("bob-6");
+        market.grantRole(market.CLOB_ROLE(), clob);
+
+        uint256 amount      = 500e18;
+        uint256 expectedCum = uint256(0.23e18) * 30 days / 365 days;
+        uint256 owed        = amount * expectedCum / 1e18;
+
+        uint256 poolBefore = market.noAccretionPool();
+
+        vm.prank(clob);
+        market.settleFundingOnSale(alice, bob, true, amount, owed);
+
+        assertEq(market.noAccretionPool(), poolBefore + owed, "YES sale routes owed to NO accretion pool");
+    }
 }

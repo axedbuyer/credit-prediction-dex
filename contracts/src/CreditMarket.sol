@@ -38,6 +38,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     mapping(address => uint256) public costBasis;       // 1e18-scaled entry mark (weighted avg)
     mapping(address => bool)    public claimable;       // true once keeper flags position
     mapping(address => uint256) public frozenFunding;   // per-unit index delta frozen at flag time
+    uint256 public noAccretionPool;                     // total USDC credited to NO holders, unclaimed
 
     event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
@@ -45,12 +46,21 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     event CreditEventTriggered();
     event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp);
     event FlaggedClaimable(address indexed user, uint256 frozenFundingPerUnit, uint256 timestamp);
+    event FundingSettledOnSale(
+        address indexed seller,
+        address indexed buyer,
+        bool    isYesSale,
+        uint256 amount,
+        uint256 sellerAdjustment,
+        bool    isCredit
+    );
 
     error CreditEventAlreadyConfirmed();
     error CreditEventNotConfirmed();
     error PositionNotSeizable();
     error AlreadyFlagged();
     error MotionInProgress();
+    error FundingShortfall();
 
     constructor(
         address admin,
@@ -256,5 +266,45 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     function syncUserFunding(address user) external onlyRole(CLOB_ROLE) {
         _accrueFunding();
         _syncUserFunding(user);
+    }
+
+    // ─── v1b: CLOB funding settlement hook (Model 1) ────────────────────────────
+    // On every CLOB sale, accrued funding settles to/from the SELLER and both
+    // parties' snapshots reset to now. NO sale credits the seller (paid from the
+    // accretion pool); YES sale debits the seller (owed routes to NO accretion).
+    // amount/tradePrice/owed/credit are all TOTAL USDC amounts, never per-unit.
+
+    function _creditNOAccretion(uint256 amount) internal {
+        noAccretionPool += amount;
+    }
+
+    function _debitNOAccretion(uint256 amount) internal {
+        noAccretionPool -= amount;
+    }
+
+    function settleFundingOnSale(
+        address seller,
+        address buyer,
+        bool    isYesSale,
+        uint256 amount,
+        uint256 tradePrice
+    ) external onlyRole(CLOB_ROLE) returns (uint256 sellerAdjustment, bool isCredit) {
+        _accrueFunding();
+        if (isYesSale) {
+            uint256 owed = amount * (cumulativeFundingPerYES - fundingSnapshot[seller]) / 1e18;
+            if (tradePrice < owed) revert FundingShortfall();
+            _creditNOAccretion(owed);
+            fundingSnapshot[seller] = cumulativeFundingPerYES;
+            fundingSnapshot[buyer]  = cumulativeFundingPerYES;
+            emit FundingSettledOnSale(seller, buyer, true, amount, owed, false);
+            return (owed, false);
+        } else {
+            uint256 credit = amount * (cumFundingPerNO - snapNO[seller]) / 1e18;
+            _debitNOAccretion(credit);
+            snapNO[seller] = cumFundingPerNO;
+            snapNO[buyer]  = cumFundingPerNO;
+            emit FundingSettledOnSale(seller, buyer, false, amount, credit, true);
+            return (credit, true);
+        }
     }
 }
