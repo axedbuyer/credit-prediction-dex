@@ -108,14 +108,13 @@ of a buffer-exhaustion trigger. v1b's trigger and price are both purely formulai
 ### Token Model (CreditMarket.sol)
 
 ```solidity
-// Mint: deposit USDC, receive equal YES + NO tokens 1:1 (Polymarket-style).
-// currentMark is the CLOB price of YES — it determines funding accrual and
-// display, but NOT the mint ratio. Users take directional positions by selling
-// the unwanted side on the CLOB after minting.
+// Mint: deposit USDC, receive YES + NO tokens in proportion to current mark
 function mint(uint256 usdcAmount) external {
+    uint256 yesAmount = usdcAmount * currentMark / 1e18;
+    uint256 noAmount  = usdcAmount * (1e18 - currentMark) / 1e18;
     USDC.transferFrom(msg.sender, address(this), usdcAmount);
-    YES.mint(msg.sender, usdcAmount);
-    NO.mint(msg.sender, usdcAmount);
+    YES.mint(msg.sender, yesAmount);
+    NO.mint(msg.sender, noAmount);
     _syncFunding(msg.sender);
 }
 
@@ -255,6 +254,62 @@ similar to a normal CLOB sale (funding is synced, snapshot resets) except the pr
 differently: in a normal sale, the seller keeps `m − f_now`; in a liquidation, the liquidator
 keeps it instead, as payment for performing the seizure the original holder failed to avoid.
 
+### Funding settlement points (Model 1 — settle to seller on transfer)
+
+Funding accrues as a number via the indices, but **cash moves only at these points**. The
+critical rule: **on every CLOB sale, accrued funding is settled to/from the SELLER and both
+parties' snapshots reset to now** (Model 1 — funding accrues to whoever bore the risk during
+each moment of holding). Without this, secondary-market trades silently leak accrued funding.
+
+```
+mint:        snapshots set to current indices for the minter
+redeem:      pair burned — YES owed deducted, NO credit added, net USDC out adjusted
+settleYES:   (credit event) YES gets notional − funding owed
+liquidation: seized YES holder's owed → NO accretion; YES transfers (see liquidation math)
+
+CLOB sale — NO side (seller selling NO tokens):
+  _accrueFunding()
+  credit = noFundingCredit(seller)              // total, on the amount being sold
+  seller receives:  tradePrice + credit         // funding is a CREDIT (+) — paid from
+                                                //   the accretion pool
+  snapNO[seller] = snapNO[buyer] = cumFundingPerNO   // buyer starts earning fresh
+
+CLOB sale — YES side (seller selling YES tokens):
+  _accrueFunding()
+  owed = yesFundingOwed(seller)                 // total, on the amount being sold
+  require tradePrice ≥ owed                      // ── OPTION B SAFEGUARD ──
+                                                //   if the fill would clear below accrued
+                                                //   funding, REVERT. Position is UNCHANGED.
+                                                //   Do NOT route to liquidation (it's still
+                                                //   above the seizure trigger and solvent).
+  seller receives:  tradePrice − owed           // funding is a DEBIT (−)
+  owed → NO accretion pool                       // funding lands with the NO holders owed it
+  snapYES[seller] = snapYES[buyer] = cumFundingPerYES   // buyer owes funding from now
+```
+
+**Worked examples:**
+```
+NO sells at $95 with $25 accrued → seller nets $95 + $25 = $120; buyer snapshot resets.
+YES sells at $30 with $8 accrued → seller nets $30 − $8 = $22; $8 → NO accretion;
+                                    buyer snapshot resets (owes funding from purchase).
+YES tries to market-sell at $5 with $8 accrued → REVERT (fill < owed). Seller keeps the
+                                    position unchanged; must place a limit sell ≥ $8, or
+                                    hold. NOT liquidated (still above trigger).
+```
+
+**The Option B edge case is narrow:** the shortfall (tradePrice < owed) requires BOTH (a) thin
+equity — f_now close to m but still above the 3% seizure trigger band, AND (b) low bid-side
+liquidity, so a market sell walks the book below f_now. A healthy position, or any position
+selling into a deep book, never hits it. When it does hit, the safeguard is a pure no-op
+revert: the seller chooses to (1) limit-sell at a price that covers funding, or (2) do
+nothing and keep holding. The position is never thrown into liquidation by a failed sell —
+liquidation is reached ONLY by funding accrual crossing the trigger, never by a sale attempt.
+
+**Off-chain pre-filter (UX):** the order book server should pre-filter YES sell orders that
+cannot clear above the seller's accrued funding, surfacing "minimum sell price to cover
+funding = X" in the UI. The on-chain `require` is the backstop; the off-chain filter is the
+user-facing guidance so sellers see the constraint before submitting.
+
 ### Critical invariants (enforce in code AND tests)
 
 ```
@@ -269,6 +324,13 @@ keeps it instead, as payment for performing the seizure the original holder fail
 6. Liquidation claims are permissionless and first-come — no single liquidator is
    load-bearing. (Known MVP limitation: first-valid-tx-wins has MEV/front-run exposure;
    acceptable for MVP, revisit with private relay if it becomes a problem.)
+7. EVERY CLOB sale settles accrued funding to/from the SELLER and resets BOTH snapshots
+   (Model 1). NO sale credits the seller (+funding); YES sale debits the seller (−funding,
+   routed to NO accretion). Funding is never silently lost on a transfer.
+8. A YES sale that would clear BELOW the seller's accrued funding REVERTS and leaves the
+   position completely unchanged. It is NEVER force-liquidated by a failed sale — the
+   position is still above the seizure trigger and solvent. Liquidation is reached only by
+   the trigger, never by a sale attempt.
 ```
 
 ### What stays the same as v1
@@ -405,12 +467,11 @@ as it nears zero, since that is the user's only early-warning signal before liqu
 
 ## Core Math
 
-**Mint (deposit USDC, receive YES + NO tokens 1:1):**
+**Mint (deposit USDC, receive YES + NO tokens):**
 ```
-yesAmount = usdcIn   (always — mark does not affect mint ratio)
-noAmount  = usdcIn   (always)
-invariant: YES.totalSupply() == NO.totalSupply() always (every mint/redeem moves both equally)
-collateral: usdcIn held 1:1 against YES supply (pays out on credit event)
+yesAmount = usdcIn × currentMark / 1e18
+noAmount  = usdcIn × (1e18 − currentMark) / 1e18
+invariant: yesAmount + noAmount = usdcIn  (fully collateralized)
 ```
 
 **Redeem (burn 1 YES + 1 NO, receive 1 USDC — pre-settlement only):**
@@ -499,7 +560,7 @@ Each task = one bounded Claude Code session. Work in order.
    succeeds, direct wallet-to-wallet transfer reverts.
 
 3. CreditMarket.sol — mint() and redeem() only, no funding yet.
-   Tests: mint gives equal YES+NO regardless of mark, redeem 1:1 invariant holds,
+   Tests: correct YES+NO amounts at different marks, redeem 1:1 invariant holds,
    USDC balances correct, token balances correct.
 
 4. Add _accrueFunding() and fundingSnapshot tracking to CreditMarket.sol.
@@ -575,6 +636,14 @@ v1b-1. Add cumFundingPerNO to CreditMarket.sol. Since YES.totalSupply()==NO.tota
        always, cumFundingPerNO is simply set equal to cumFundingPerYES on every accrual —
        NO scaling math. Add snapNO[user] snapshots and noFundingCredit(address) view.
        Tests: indices always equal, conservation holds (total owed YES == total credited NO).
+
+v1b-1b. Wire the Model-1 funding hook into CLOBSettlement: every sale settles accrued
+       funding to/from the SELLER and resets both snapshots. NO sale credits seller
+       (tradePrice + credit). YES sale debits seller (tradePrice − owed), routes owed to NO
+       accretion, and REVERTS if tradePrice < owed (Option B safeguard — position unchanged,
+       not liquidated). Off-chain order book server pre-filters un-fundable YES sells.
+       Tests: NO sells $95/$25 accrued → nets $120; YES sells $30/$8 → nets $22, $8 to NO;
+       YES sell below owed reverts and leaves position UNCHANGED (not liquidated).
 
 v1b-2. Add display-layer view functions to CreditMarket.sol: costBasis(user), equity(user),
        pnl(user), breakevenMark(user), epochsToExpire(user) [YES only]. Pure read-only
