@@ -38,7 +38,6 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     mapping(address => uint256) public costBasis;       // 1e18-scaled entry mark (weighted avg)
     mapping(address => bool)    public claimable;       // true once keeper flags position
     mapping(address => uint256) public frozenFunding;   // per-unit index delta frozen at flag time
-    uint256 public noAccretionPool;                     // total USDC credited to NO holders, unclaimed
 
     event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
@@ -46,21 +45,13 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     event CreditEventTriggered();
     event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp);
     event FlaggedClaimable(address indexed user, uint256 frozenFundingPerUnit, uint256 timestamp);
-    event FundingSettledOnSale(
-        address indexed seller,
-        address indexed buyer,
-        bool    isYesSale,
-        uint256 amount,
-        uint256 sellerAdjustment,
-        bool    isCredit
-    );
+    event FundingSettled(address indexed user, int256 delta);
 
     error CreditEventAlreadyConfirmed();
     error CreditEventNotConfirmed();
     error PositionNotSeizable();
     error AlreadyFlagged();
     error MotionInProgress();
-    error FundingShortfall();
 
     constructor(
         address admin,
@@ -120,17 +111,19 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     }
 
     // Burn tokenAmount YES + tokenAmount NO; receive tokenAmount USDC (pre-settlement only).
-    // Accrued funding debt is deducted from the USDC payout (capped at tokenAmount).
+    // Funding is settled via settleFunding on the full pre-burn balance: any NO-side
+    // credit is paid out inside settleFunding; any net YES-side debit is deducted from
+    // this payout and stays in collateral — no accretion pool.
     function redeem(uint256 tokenAmount) external nonReentrant whenNotPaused {
         if (creditEventConfirmed) revert CreditEventAlreadyConfirmed();
-        _accrueFunding();
-        _syncUserFunding(msg.sender); // sync before balance decreases
-        uint256 debt = fundingDebt[msg.sender];
-        uint256 deduction = debt > tokenAmount ? tokenAmount : debt;
-        fundingDebt[msg.sender] = 0;
+        int256 delta = settleFunding(msg.sender);
         IRestrictedToken(yesToken).burn(msg.sender, tokenAmount);
         IRestrictedToken(noToken).burn(msg.sender, tokenAmount);
-        IERC20(usdc).safeTransfer(msg.sender, tokenAmount - deduction);
+        uint256 usdcOut = tokenAmount;
+        if (delta < 0) {
+            usdcOut -= uint256(-delta);
+        }
+        IERC20(usdc).safeTransfer(msg.sender, usdcOut);
         emit TokensRedeemed(msg.sender, tokenAmount);
     }
 
@@ -143,10 +136,18 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     }
 
     // Burn YES tokens at 1:1 USDC after a confirmed credit event. NO holders get nothing.
+    // Funding settles the same way as redeem: settleFunding pays out any NO-side
+    // credit directly; a net YES-side debit is deducted from notional and stays in
+    // collateral.
     function settleYES(uint256 amount) external nonReentrant {
         if (!creditEventConfirmed) revert CreditEventNotConfirmed();
+        int256 delta = settleFunding(msg.sender);
         IRestrictedToken(yesToken).burn(msg.sender, amount);
-        IERC20(usdc).safeTransfer(msg.sender, amount);
+        uint256 usdcOut = amount;
+        if (delta < 0) {
+            usdcOut -= uint256(-delta);
+        }
+        IERC20(usdc).safeTransfer(msg.sender, usdcOut);
         emit YESSettled(msg.sender, amount);
     }
 
@@ -268,43 +269,62 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         _syncUserFunding(user);
     }
 
-    // ─── v1b: CLOB funding settlement hook (Model 1) ────────────────────────────
-    // On every CLOB sale, accrued funding settles to/from the SELLER and both
-    // parties' snapshots reset to now. NO sale credits the seller (paid from the
-    // accretion pool); YES sale debits the seller (owed routes to NO accretion).
-    // amount/tradePrice/owed/credit are all TOTAL USDC amounts, never per-unit.
-
-    function _creditNOAccretion(uint256 amount) internal {
-        noAccretionPool += amount;
-    }
-
-    function _debitNOAccretion(uint256 amount) internal {
-        noAccretionPool -= amount;
-    }
-
-    function settleFundingOnSale(
-        address seller,
-        address buyer,
-        bool    isYesSale,
-        uint256 amount,
-        uint256 tradePrice
-    ) external onlyRole(CLOB_ROLE) returns (uint256 sellerAdjustment, bool isCredit) {
+    // ─── v1b1-2b-1: unified per-user funding settlement (no pool) ───────────────
+    // Nets a single user's YES-side debit against their NO-side credit and pays or
+    // reports the difference directly against locked collateral — no accretion
+    // pool, no seller/buyer pairing, no tradePrice coupling. Reusable across a CLOB
+    // sale, redeem, or liquidation (each caller decides how/where a debit gets paid).
+    //
+    // Returns a signed delta: positive = credit paid OUT to `user` now (from
+    // collateral); negative = debit `user` owes. A debit is only REPORTED here,
+    // never pulled — the caller is responsible for collecting it (e.g. from trade
+    // proceeds on a CLOB sale, or a direct transferFrom on redeem).
+    //
+    // Not itself nonReentrant: it is called internally by redeem/settleYES, which
+    // are already nonReentrant on their own call frame (OZ's guard is a single
+    // per-contract flag, so nesting two nonReentrant functions in one call would
+    // revert). External callers (CLOBSettlement, LiquidationEngine) rely on their
+    // own contract's guard; USDC is a plain ERC20 with no transfer hooks to reenter through.
+    function settleFunding(address user) public returns (int256 delta) {
         _accrueFunding();
-        if (isYesSale) {
-            uint256 owed = amount * (cumulativeFundingPerYES - fundingSnapshot[seller]) / 1e18;
-            if (tradePrice < owed) revert FundingShortfall();
-            _creditNOAccretion(owed);
-            fundingSnapshot[seller] = cumulativeFundingPerYES;
-            fundingSnapshot[buyer]  = cumulativeFundingPerYES;
-            emit FundingSettledOnSale(seller, buyer, true, amount, owed, false);
-            return (owed, false);
+
+        uint256 yesBal = IERC20(yesToken).balanceOf(user);
+        uint256 noBal  = IERC20(noToken).balanceOf(user);
+        uint256 yesOwed  = yesBal * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
+        uint256 noCredit = noBal  * (cumFundingPerNO - snapNO[user]) / 1e18;
+
+        fundingSnapshot[user] = cumulativeFundingPerYES;
+        snapNO[user]          = cumFundingPerNO;
+
+        if (noCredit > yesOwed) {
+            uint256 net = noCredit - yesOwed;
+            IERC20(usdc).safeTransfer(user, net);
+            delta = int256(net);
         } else {
-            uint256 credit = amount * (cumFundingPerNO - snapNO[seller]) / 1e18;
-            _debitNOAccretion(credit);
-            snapNO[seller] = cumFundingPerNO;
-            snapNO[buyer]  = cumFundingPerNO;
-            emit FundingSettledOnSale(seller, buyer, false, amount, credit, true);
-            return (credit, true);
+            uint256 net = yesOwed - noCredit;
+            delta = -int256(net);
         }
+
+        emit FundingSettled(user, delta);
+    }
+
+    // Non-mutating twin of settleFunding for off-chain reads (backend pre-filters,
+    // frontend quotes). Projects the index forward by elapsed time without writing
+    // it, and previews the net delta for a hypothetical `amount` traded on `side`
+    // (isYes) against the user's ACTUAL balance on the other, offsetting side.
+    function previewFunding(address user, uint256 amount, bool isYes) external view returns (int256 delta) {
+        uint256 elapsed         = block.timestamp - lastFundingTime;
+        uint256 projectedCumYES = cumulativeFundingPerYES + currentMark * elapsed / 365 days;
+        uint256 projectedCumNO  = projectedCumYES; // mirrored, always equal
+
+        uint256 yesBal = isYes ? amount : IERC20(yesToken).balanceOf(user);
+        uint256 noBal  = isYes ? IERC20(noToken).balanceOf(user) : amount;
+
+        uint256 yesOwed  = yesBal * (projectedCumYES - fundingSnapshot[user]) / 1e18;
+        uint256 noCredit = noBal  * (projectedCumNO  - snapNO[user]) / 1e18;
+
+        delta = noCredit > yesOwed
+            ? int256(noCredit - yesOwed)
+            : -int256(yesOwed - noCredit);
     }
 }

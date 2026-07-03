@@ -8,7 +8,16 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface ICreditMarket {
-    function syncUserFunding(address user) external;
+    function usdc() external view returns (address);
+    function yesToken() external view returns (address);
+    function noToken() external view returns (address);
+
+    // v1b1-2b-2: unified per-user funding settlement (no pool, no tradePrice
+    // coupling). Nets the user's YES-side debit against their NO-side credit over
+    // their FULL current balance, pays a net credit directly from collateral, and
+    // returns a signed delta (positive = credit already paid; negative = debit
+    // reported but NOT pulled — the caller decides whether/how to collect it).
+    function settleFunding(address user) external returns (int256 delta);
 }
 
 contract CLOBSettlement is ReentrancyGuard {
@@ -30,6 +39,9 @@ contract CLOBSettlement is ReentrancyGuard {
     );
 
     address public immutable creditMarket;
+    address public immutable usdc;
+    address public immutable yesToken;
+    address public immutable noToken;
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     mapping(address => mapping(uint256 => bool)) public usedNonces;
@@ -48,9 +60,13 @@ contract CLOBSettlement is ReentrancyGuard {
     error NonceUsed();
     error MismatchedPair();
     error SlippageExceeded();
+    error FundingShortfall();
 
     constructor(address _creditMarket) {
         creditMarket = _creditMarket;
+        usdc         = ICreditMarket(_creditMarket).usdc();
+        yesToken     = ICreditMarket(_creditMarket).yesToken();
+        noToken      = ICreditMarket(_creditMarket).noToken();
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256(
@@ -115,22 +131,60 @@ contract CLOBSettlement is ReentrancyGuard {
         if (takerOrder.amountIn < makerOrder.minAmountOut) revert SlippageExceeded();
         if (makerOrder.amountIn < takerOrder.minAmountOut) revert SlippageExceeded();
 
-        // ── funding sync (before balances change) ────────────────────────────
-        ICreditMarket(creditMarket).syncUserFunding(makerOrder.maker);
-        ICreditMarket(creditMarket).syncUserFunding(takerOrder.maker);
-
         // ── mark nonces spent (checks-effects before interactions) ───────────
         usedNonces[makerOrder.maker][makerOrder.nonce] = true;
         usedNonces[takerOrder.maker][takerOrder.nonce] = true;
 
+        _settleFundingAndSwap(makerOrder, takerOrder);
+    }
+
+    // Split out of verifyAndSettle to give the funding-settlement + swap logic its
+    // own stack frame (the combined function hits "stack too deep" under solc 0.8.24).
+    function _settleFundingAndSwap(Order calldata makerOrder, Order calldata takerOrder) private {
+        // ── identify seller/buyer and sale type ──────────────────────────────
+        // The seller is whichever party sends YES/NO tokens and receives USDC.
+        bool makerIsSeller = makerOrder.tokenIn == yesToken || makerOrder.tokenIn == noToken;
+        address seller = makerIsSeller ? makerOrder.maker : takerOrder.maker;
+        address buyer  = makerIsSeller ? takerOrder.maker : makerOrder.maker;
+        bool isYesSale = makerIsSeller
+            ? makerOrder.tokenIn == yesToken
+            : takerOrder.tokenIn == yesToken;
+        uint256 amount     = makerIsSeller ? makerOrder.amountIn : takerOrder.amountIn; // tokens sold
+        uint256 tradePrice = makerIsSeller ? takerOrder.amountIn : makerOrder.amountIn; // pure token value
+
+        // ── funding settlement (v1b1-2b-2: per-user, no pool, no tradePrice
+        // coupling) — BEFORE the swap, on each party's full pre-trade balance.
+        // A credit (positive delta) is already paid out directly by settleFunding;
+        // a debit (negative delta) is only reported here, never pulled.
+        int256 sellerDelta = ICreditMarket(creditMarket).settleFunding(seller);
+        ICreditMarket(creditMarket).settleFunding(buyer);
+
+        // ── seller proceeds ───────────────────────────────────────────────────
+        // tradePrice is pure token value — funding never rides the swap leg except
+        // for the one case where the seller's own settleFunding call left them with
+        // an outstanding YES-side debit, which must be collected from this trade's
+        // proceeds now (Option B): the debit stays in collateral, funded by the
+        // buyer's payment, and the sale reverts (position fully unchanged) if the
+        // trade doesn't clear high enough to cover it.
+        uint256 sellerProceeds  = tradePrice;
+        uint256 debtToCollateral = 0;
+        if (isYesSale && sellerDelta < 0) {
+            uint256 owed = uint256(-sellerDelta);
+            if (tradePrice < owed) revert FundingShortfall();
+            sellerProceeds   = tradePrice - owed;
+            debtToCollateral = owed;
+        }
+
         // ── atomic swap ──────────────────────────────────────────────────────
-        uint256 amountOut = takerOrder.amountIn;
-        IERC20(makerOrder.tokenIn).safeTransferFrom(
-            makerOrder.maker, takerOrder.maker, makerOrder.amountIn
-        );
-        IERC20(takerOrder.tokenIn).safeTransferFrom(
-            takerOrder.maker, makerOrder.maker, takerOrder.amountIn
-        );
+        // Token leg: seller's tokens move to the buyer.
+        IERC20(isYesSale ? yesToken : noToken).safeTransferFrom(seller, buyer, amount);
+
+        // USDC leg: buyer pays sellerProceeds to the seller; any collected debit
+        // routes to CreditMarket (collateral) instead of the seller.
+        IERC20(usdc).safeTransferFrom(buyer, seller, sellerProceeds);
+        if (debtToCollateral > 0) {
+            IERC20(usdc).safeTransferFrom(buyer, creditMarket, debtToCollateral);
+        }
 
         emit OrderSettled(
             makerOrder.maker,
@@ -138,7 +192,7 @@ contract CLOBSettlement is ReentrancyGuard {
             makerOrder.tokenIn,
             makerOrder.tokenOut,
             makerOrder.amountIn,
-            amountOut
+            takerOrder.amountIn
         );
     }
 }

@@ -308,4 +308,55 @@ contract LiquidationEngineTest is Test {
         assertEq(yesToken.totalSupply(), aliceMint + charlieMint, "total YES supply unchanged");
         assertEq(noToken.totalSupply(),  aliceMint + charlieMint, "total NO supply unchanged");
     }
+
+    // ─── v1b1-2b-3: settleFunding + collateral, no pool ────────────────────────
+
+    // Give the seized holder some NO on top of her frozen YES position (test
+    // setup only — a plain-transfer redistribution, so total supply stays
+    // balanced) so her own settleFunding call inside claim() has a real, nonzero
+    // net credit to pay — proving that credit comes directly out of CreditMarket's
+    // collateral balance, not any pool (there is no pool left in the codebase).
+    function test_Liquidation_UsesCollateralNotPool() public {
+        address charlie = makeAddr("charlie-no-holder");
+        mockUsdc.mint(charlie, 10_000e18);
+        vm.prank(charlie);
+        mockUsdc.approve(address(market), type(uint256).max);
+
+        vm.prank(alice);
+        market.mint(MINT_AMT); // alice: 1000 YES + 1000 NO
+        vm.prank(charlie);
+        market.mint(500e18);   // charlie: 500 YES + 500 NO
+
+        // Redistribute charlie's NO to alice so she holds more NO than YES.
+        noToken.grantRole(noToken.CLOB_ROLE(), charlie);
+        vm.prank(charlie);
+        noToken.transfer(alice, 500e18); // alice: 1000 YES, 1500 NO; charlie: 500 YES, 0 NO
+
+        vm.warp(block.timestamp + 356 days);
+        market.accrueFunding();
+        assertTrue(market.isSeizable(alice), "must be seizable before flag");
+
+        vm.prank(keeper);
+        market.flagClaimable(alice);
+
+        uint256 cum              = market.cumulativeFundingPerYES(); // == cumFundingPerNO
+        uint256 expectedYesOwed  = 1_000e18 * cum / 1e18;
+        uint256 expectedNoCredit = 1_500e18 * cum / 1e18;
+        uint256 expectedNetCredit = expectedNoCredit - expectedYesOwed;
+
+        uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
+
+        vm.prank(bob);
+        engine.claim(alice);
+
+        // Alice's own NO-side credit nets against her frozen YES debit and is
+        // paid directly out of CreditMarket's collateral balance during claim
+        // (via settleFunding) — no pool anywhere.
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + expectedNetCredit,
+            "seized holder's net NO credit paid directly from collateral, not a pool");
+
+        // Liquidation still proceeds normally: YES transfers, complete-set intact.
+        assertEq(yesToken.balanceOf(bob), 1_000e18, "liquidator receives seized YES");
+        assertEq(yesToken.totalSupply(), noToken.totalSupply(), "complete-set invariant holds");
+    }
 }

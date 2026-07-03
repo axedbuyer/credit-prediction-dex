@@ -227,8 +227,11 @@ contract CLOBSettlementTest is Test {
     }
 
     function test_FundingSyncedOnSettle() public {
-        // Taker holds 1000 YES for 1 year, then sells 80 to maker.
-        // The settle must capture the accrued carry on taker's pre-trade balance.
+        // Taker holds 1000 YES *and* 1000 NO (the matched pair from setUp) for a
+        // year, then sells 80 YES to maker. settleFunding nets taker's full YES
+        // debit against his full NO credit (same balance, same mirrored index) —
+        // they cancel exactly, so the sale clears at pure tradePrice with no
+        // deduction, and the settle still resets every snapshot to now.
 
         vm.warp(block.timestamp + 365 days);
 
@@ -240,17 +243,177 @@ contract CLOBSettlementTest is Test {
             taker, address(yesToken), address(usdc), 80e18, 100e18, expiry, 0
         );
 
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+
         clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
 
         // After 1 year at 23% mark: cumulativeFundingPerYES = 0.23e18 (exact).
         uint256 expectedCumulative = uint256(0.23e18) * 365 days / 365 days;
         assertEq(market.cumulativeFundingPerYES(), expectedCumulative, "cumulative accrued");
+        assertEq(market.cumFundingPerNO(), expectedCumulative, "mirrored NO index accrued");
 
-        // Taker's snapshot must equal the cumulative (sync happened during settle).
-        assertEq(market.fundingSnapshot(taker), expectedCumulative, "taker snapshot updated");
+        // settleFunding resets BOTH the YES and NO snapshot for both parties.
+        assertEq(market.fundingSnapshot(taker), expectedCumulative, "seller YES snapshot reset");
+        assertEq(market.snapNO(taker),          expectedCumulative, "seller NO snapshot reset");
+        assertEq(market.fundingSnapshot(maker), expectedCumulative, "buyer YES snapshot reset");
+        assertEq(market.snapNO(maker),          expectedCumulative, "buyer NO snapshot reset");
 
-        // Taker held 1000 YES for 1 year → debt = 1000e18 * 0.23e18 / 1e18 = 230e18.
-        uint256 expectedDebt = 1_000e18 * expectedCumulative / 1e18;
-        assertEq(market.fundingDebt(taker), expectedDebt, "taker funding debt captured");
+        // Held pair nets to zero -> taker receives the full tradePrice, no deduction.
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 100e18, "seller nets full tradePrice (matched pair nets to zero)");
+    }
+
+    // ─── v1b1-2b-2: settleFunding-direct wiring tests ──────────────────────────
+
+    // Strips taker down to a pure YES or pure NO holder by moving away the other
+    // side's balance (transfers are CLOB_ROLE-gated; grant it to taker just for
+    // this direct move, isolating the trade under test from the offsetting leg).
+    function _stripTakerToPureYes() internal {
+        address sink = makeAddr("no-sink");
+        noToken.grantRole(noToken.CLOB_ROLE(), taker);
+        vm.prank(taker);
+        noToken.transfer(sink, 1_000e18);
+    }
+
+    function _stripTakerToPureNo() internal {
+        address sink = makeAddr("yes-sink");
+        yesToken.grantRole(yesToken.CLOB_ROLE(), taker);
+        vm.prank(taker);
+        yesToken.transfer(sink, 1_000e18);
+    }
+
+    // Pure NO holder: the credit settleFunding pays out directly is on top of the
+    // trade's own tradePrice — per-token, $0.95 (price) + $0.03 (funding) = $0.98.
+    function test_NOSaleBack_SellerGets_TradePricePlusFunding() public {
+        _stripTakerToPureNo(); // taker: 0 YES, 1000 NO
+
+        // settleFunding pays the NO credit directly out of CreditMarket's own
+        // collateral balance; taker's tokens were minted directly in setUp
+        // (bypassing market.mint()), so fund the market's balance here to match.
+        usdc.mint(address(market), 1_000e18);
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18); // elapsed == 0 here, so this is a no-op accrual
+
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(noToken), 950e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(noToken), address(usdc), 1_000e18, 950e18, expiry, 0
+        );
+
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        // credit = 1000e18 * 0.03e18 / 1e18 = 30e18; tradePrice = 950e18.
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 950e18 + 30e18,
+            "seller nets tradePrice ($0.95/token) plus funding credit ($0.03/token) = $0.98/token");
+    }
+
+    // Pure YES holder: settleFunding reports a debit which is collected out of
+    // this trade's own proceeds — per-token, $0.05 (price) - $0.03 (funding) = $0.02.
+    function test_YESSaleBack_SellerGets_TradePriceMinusFunding() public {
+        _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18);
+
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 50e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 1_000e18, 50e18, expiry, 0
+        );
+
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        // owed = 1000e18 * 0.03e18 / 1e18 = 30e18; tradePrice = 50e18.
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - 30e18,
+            "seller nets tradePrice ($0.05/token) minus funding owed ($0.03/token) = $0.02/token");
+    }
+
+    function test_YESSale_BelowOwed_Reverts_PositionUnchanged() public {
+        _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18);
+
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        // owed = 30e18; priced at 20e18 < owed.
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 20e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 1_000e18, 20e18, expiry, 0
+        );
+        bytes memory ms = _sign(makerKey, mo);
+        bytes memory ts = _sign(takerKey, to_);
+
+        uint256 takerYesBefore = yesToken.balanceOf(taker);
+        uint256 snapBefore     = market.fundingSnapshot(taker);
+
+        vm.expectRevert(CLOBSettlement.FundingShortfall.selector);
+        clob.verifyAndSettle(mo, ms, to_, ts);
+
+        assertEq(yesToken.balanceOf(taker), takerYesBefore, "YES balance unchanged after failed sell");
+        assertEq(market.fundingSnapshot(taker), snapBefore, "funding snapshot unchanged after failed sell");
+        assertFalse(market.claimable(taker), "a failed sell must never flag the position claimable");
+        assertFalse(clob.usedNonces(taker, 0), "taker nonce not consumed on revert");
+        assertFalse(clob.usedNonces(maker, 0), "maker nonce not consumed on revert");
+    }
+
+    // Taker holds the matched YES+NO pair from setUp (never traded), so his YES
+    // debit and NO credit net to exactly zero regardless of elapsed time — proving
+    // the swap leg carries pure token value with no funding embedded when there is
+    // no NET funding obligation, even though YES alone would normally owe carry.
+    function test_TradePrice_IsPureTokenValue() public {
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 100e18, 80e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 80e18, 100e18, expiry, 0
+        );
+
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 100e18,
+            "matched pair nets to zero -> tradePrice passes through with no funding deduction");
+    }
+
+    // A brand-new buyer (zero pre-trade balance on both sides) still gets both
+    // funding snapshots reset to now by settleFunding — the reset is unconditional,
+    // not just for the side of the token actually being traded.
+    function test_BuyerSnapshotsReset() public {
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 100e18, 80e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 80e18, 100e18, expiry, 0
+        );
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        uint256 cumYes = market.cumulativeFundingPerYES();
+        uint256 cumNo  = market.cumFundingPerNO();
+        assertEq(market.fundingSnapshot(maker), cumYes, "buyer YES snapshot reset");
+        assertEq(market.snapNO(maker),          cumNo,  "buyer NO snapshot reset");
     }
 }

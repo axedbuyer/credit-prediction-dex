@@ -220,18 +220,22 @@ contract IntegrationTest is Test {
         assertEq(total, 2_000e18, "USDC invariant: total supply conserved");
     }
 
-    // Credit event path: mint → become YES holder → credit event → settleYES at 1:1.
+    // Credit event path: mint → become YES holder → credit event → settleYES.
     //
     // Steps:
     //   1. Alice mints 230 USDC → 230 YES + 230 NO  (1:1 mint since v1b-1)
     //   2. Alice sells all 230 NO to Bob (CLOB trade: Bob pays 230 USDC)
     //      → alice: 230 YES  bob: 230 NO
-    //   3. vm.warp(60 days)
+    //   3. vm.warp(60 days) — alice holds pure YES the whole time, so this accrues
+    //      a funding debit against her that is never settled anywhere else
     //   4. OracleRouter.confirmCreditEvent() — market paused, flag set
     //   5. mint() and redeem() both revert
-    //   6. Alice calls settleYES(230) → receives 230 USDC at zero recovery
+    //   6. Alice calls settleYES(230) → settleFunding nets her accrued YES debit
+    //      first; she receives 230 minus that debit, not the full notional (v1b1-2b-3:
+    //      settleYES routes funding through settleFunding + collateral, no pool)
     //   7. Bob (NO holder) tries settleYES → reverts (no YES to burn)
-    //   8. Market holds 0 USDC (all collateral paid to YES holder; Bob's NO worthless)
+    //   8. Market retains exactly alice's deducted debit (the funding owed stays in
+    //      collateral — nobody currently collects it on Bob's behalf, a known gap)
     function test_FullLifecycle_CreditEvent() public {
         // ── 1. alice mints 230 USDC → 230 YES + 230 NO (1:1) ─────────────
         vm.prank(alice);
@@ -274,14 +278,18 @@ contract IntegrationTest is Test {
         vm.expectRevert(); // whenNotPaused fires
         market.redeem(1e18);
 
-        // ── 6. alice settleYES(230) → 230 USDC at zero recovery ───────────
+        // ── 6. alice settleYES(230) → notional minus accrued YES debit ─────
+        // 60 days at 23% mark: cumulativeFundingPerYES = 0.23e18 * 60d / 365d.
+        uint256 expectedCum  = uint256(0.23e18) * 60 days / 365 days;
+        uint256 expectedOwed = 230e18 * expectedCum / 1e18;
+
         uint256 aliceUsdcBefore = usdc.balanceOf(alice); // 1 000 + 1 from test setup above
         vm.prank(alice);
         market.settleYES(230e18);
 
         assertEq(yesToken.balanceOf(alice), 0, "alice YES burned on settlement");
-        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + 230e18,
-            "alice receives exactly 230 USDC (zero recovery)");
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + 230e18 - expectedOwed,
+            "alice receives notional minus accrued funding debit (settled via collateral)");
 
         // ── 7. bob (NO holder) cannot redeem or settle ────────────────────
         vm.prank(bob);
@@ -290,10 +298,12 @@ contract IntegrationTest is Test {
 
         assertEq(noToken.balanceOf(bob), 230e18, "bob NO tokens still exist but worthless");
 
-        // ── 8. market holds 0 USDC: all collateral paid to YES holder ─────
-        // market started with 230 USDC (alice's mint); paid it all to alice's YES settlement
-        assertEq(usdc.balanceOf(address(market)), 0,
-            "market fully paid out: alice's YES settled, bob's NO worthless");
+        // ── 8. market retains exactly alice's deducted debit ──────────────
+        // market started with 230 USDC (alice's mint); paid out (230 - owed) to
+        // alice's YES settlement, so `owed` stays in collateral (no pool payout
+        // mechanism collects it on bob's behalf here — a known follow-up gap).
+        assertEq(usdc.balanceOf(address(market)), expectedOwed,
+            "market retains alice's funding debit in collateral; bob's NO worthless");
 
         // total USDC conservation: 1 000 (alice initial) + 1 000 (bob initial) + 1 (test mint) = 2 001
         uint256 total = usdc.balanceOf(alice)

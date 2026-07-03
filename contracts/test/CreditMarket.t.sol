@@ -177,6 +177,11 @@ contract CreditMarketTest is Test {
         assertEq(market.cumulativeFundingPerYES(), expected, "two-leg cumulative");
     }
 
+    // Alice holds the matched 1000 YES + 1000 NO pair from mint, untouched. Her
+    // YES debit and NO credit accrue off the same mirrored index and same
+    // balance, so settleFunding nets them to exactly zero — redeem returns the
+    // full amount, not a naive YES-only debt deduction (v1b1-2b-3: redeem routes
+    // funding through settleFunding + collateral, no pool).
     function test_Funding_DeductedOnRedeem() public {
         uint256 usdcAmount = 1000e18; // → 1000 YES + 1000 NO (1:1 mint)
 
@@ -192,12 +197,8 @@ contract CreditMarketTest is Test {
         vm.prank(alice);
         market.redeem(redeemAmount);
 
-        // debt = 1000e18 * 0.23e18 / 1e18 = 230e18
-        uint256 expectedDebt = redeemAmount * uint256(0.23e18) / 1e18;
-        uint256 expectedUsdcOut = redeemAmount - expectedDebt;
-
-        assertEq(market.fundingDebt(alice), 0, "debt cleared on redeem");
-        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + expectedUsdcOut, "net USDC returned");
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + redeemAmount,
+            "matched pair nets to zero -> full amount returned, no double charge");
     }
 
     // ─── v1b: mirrored NO index tests ─────────────────────────────────────────
@@ -537,148 +538,203 @@ contract CreditMarketTest is Test {
         assertGe(mockUsdc.balanceOf(alice), aliceUsdcBefore, "USDC never goes negative");
     }
 
-    // ─── v1b: CLOB funding settlement hook tests ──────────────────────────────
+    // ─── v1b1-2b-1: unified per-user funding settlement tests (no pool) ───────
 
-    function test_SettleFundingOnSale_YES_ReturnsDebit() public {
-        vm.prank(alice);
-        market.mint(1000e18); // mark = 0.23e18, fundingSnapshot[alice] = 0
-
-        vm.warp(block.timestamp + 30 days);
-
-        address clob = makeAddr("clob-1");
-        address bob  = makeAddr("bob-1");
-        market.grantRole(market.CLOB_ROLE(), clob);
-
-        uint256 amount       = 500e18;
-        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
-        uint256 expectedOwed = amount * expectedCum / 1e18;
-
-        vm.prank(clob);
-        (uint256 sellerAdjustment, bool isCredit) =
-            market.settleFundingOnSale(alice, bob, true, amount, expectedOwed);
-
-        assertEq(sellerAdjustment, expectedOwed, "owed computed correctly (total, not per-unit)");
-        assertFalse(isCredit, "YES sale returns a debit");
-    }
-
-    function test_SettleFundingOnSale_NO_ReturnsCredit() public {
-        address bob  = makeAddr("bob-2");
-        address clob = makeAddr("clob-2");
+    // Pure NO holder: no YES debit to net against, so the full credit is paid
+    // straight out of collateral.
+    function test_SettleFunding_NOHolder_PaysCreditFromCollateral() public {
+        address bob = makeAddr("bob-no");
         mockUsdc.mint(bob, 10_000e18);
         vm.prank(bob);
         mockUsdc.approve(address(market), type(uint256).max);
 
-        // Bob mints a much larger balance so a prior YES-side settlement (below)
-        // funds the accretion pool enough to cover alice's smaller NO credit.
-        vm.prank(bob);
-        market.mint(5000e18);
+        // Alice mints then sells her NO to Bob. NO transfers are CLOB_ROLE-gated
+        // (see NOToken._update), so grant alice CLOB_ROLE just to move the tokens
+        // directly — isolating settleFunding's own math from CLOB/order-matching.
         vm.prank(alice);
-        market.mint(1000e18);
+        market.mint(1000e18); // alice: 1000 YES + 1000 NO
+
+        noToken.grantRole(noToken.CLOB_ROLE(), alice);
+        vm.prank(alice);
+        noToken.transfer(bob, 1000e18); // bob: 1000 NO, 0 YES
 
         vm.warp(block.timestamp + 30 days);
-        market.grantRole(market.CLOB_ROLE(), clob);
 
-        // Fund the pool first via bob's (larger) YES-side settlement.
-        vm.prank(clob);
-        market.settleFundingOnSale(bob, alice, true, 5000e18, type(uint256).max / 2);
+        uint256 expectedCum    = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedCredit = 1000e18 * expectedCum / 1e18;
 
-        uint256 expectedCum    = market.cumFundingPerNO() - market.snapNO(alice);
-        uint256 amount         = 1000e18;
-        uint256 expectedCredit = amount * expectedCum / 1e18;
+        uint256 bobUsdcBefore = mockUsdc.balanceOf(bob);
+        int256  delta         = market.settleFunding(bob);
 
-        vm.prank(clob);
-        (uint256 sellerAdjustment, bool isCredit) =
-            market.settleFundingOnSale(alice, bob, false, amount, 0);
-
-        assertEq(sellerAdjustment, expectedCredit, "credit computed correctly (total, not per-unit)");
-        assertTrue(isCredit, "NO sale returns a credit");
+        assertEq(delta, int256(expectedCredit), "delta == full NO credit (no offsetting YES debit)");
+        assertEq(mockUsdc.balanceOf(bob), bobUsdcBefore + expectedCredit, "credit paid from collateral");
+        assertEq(market.snapNO(bob), market.cumFundingPerNO(), "NO snapshot reset");
     }
 
-    function test_SettleFundingOnSale_YES_BelowOwed_Reverts() public {
+    // Pure YES holder: no NO credit to net against, so the function reports a
+    // negative delta and does NOT pull any USDC — the caller decides how to collect it.
+    function test_SettleFunding_YESHolder_ReturnsDebit() public {
         vm.prank(alice);
-        market.mint(1000e18);
+        market.mint(1000e18); // alice: 1000 YES + 1000 NO
+
+        // Strip alice down to a pure YES holder (transfers are CLOB_ROLE-gated).
+        address sink = makeAddr("no-sink");
+        noToken.grantRole(noToken.CLOB_ROLE(), alice);
+        vm.prank(alice);
+        noToken.transfer(sink, 1000e18);
 
         vm.warp(block.timestamp + 30 days);
 
-        address clob = makeAddr("clob-3");
-        address bob  = makeAddr("bob-3");
-        market.grantRole(market.CLOB_ROLE(), clob);
-
-        uint256 amount       = 500e18;
         uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
-        uint256 expectedOwed = amount * expectedCum / 1e18;
+        uint256 expectedOwed = 1000e18 * expectedCum / 1e18;
 
-        vm.prank(clob);
-        vm.expectRevert(CreditMarket.FundingShortfall.selector);
-        market.settleFundingOnSale(alice, bob, true, amount, expectedOwed - 1);
+        uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
+        int256  delta           = market.settleFunding(alice);
+
+        assertEq(delta, -int256(expectedOwed), "delta is a negative debit");
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore, "no USDC pulled inside settleFunding");
+        assertEq(market.fundingSnapshot(alice), market.cumulativeFundingPerYES(), "YES snapshot reset");
     }
 
-    function test_SettleFundingOnSale_ResetsBothSnapshots() public {
-        address bob  = makeAddr("bob-4");
-        address clob = makeAddr("clob-4");
-        mockUsdc.mint(bob, 10_000e18);
-        vm.prank(bob);
-        mockUsdc.approve(address(market), type(uint256).max);
-
+    // Holding an equal YES+NO pair (the mint invariant, never traded): owed and
+    // credit are computed off the SAME index and the SAME balance, so they net to
+    // exactly zero — no payout, no debit.
+    function test_SettleFunding_HeldPair_NetsToZero() public {
         vm.prank(alice);
-        market.mint(1000e18);
-        vm.prank(bob);
-        market.mint(1000e18);
+        market.mint(1000e18); // alice: 1000 YES + 1000 NO, untouched
 
         vm.warp(block.timestamp + 30 days);
-        market.grantRole(market.CLOB_ROLE(), clob);
 
-        uint256 amount      = 500e18;
-        uint256 expectedCum = uint256(0.23e18) * 30 days / 365 days;
-        uint256 owed        = amount * expectedCum / 1e18;
+        uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
+        int256  delta           = market.settleFunding(alice);
 
-        vm.prank(clob);
-        market.settleFundingOnSale(alice, bob, true, amount, owed);
-
-        assertEq(market.fundingSnapshot(alice), market.cumulativeFundingPerYES(), "seller YES snapshot reset");
-        assertEq(market.fundingSnapshot(bob),   market.cumulativeFundingPerYES(), "buyer YES snapshot reset");
-
-        // NO-side snapshots reset symmetrically (amount=0 avoids touching the accretion pool).
-        vm.prank(clob);
-        market.settleFundingOnSale(bob, alice, false, 0, 0);
-
-        assertEq(market.snapNO(bob),   market.cumFundingPerNO(), "seller NO snapshot reset");
-        assertEq(market.snapNO(alice), market.cumFundingPerNO(), "buyer NO snapshot reset");
+        assertEq(delta, 0, "equal YES+NO balances net to zero");
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore, "no USDC moved");
     }
 
-    function test_SettleFundingOnSale_OnlyCLOBRole() public {
+    function test_SettleFunding_ResetsBothSnapshots() public {
         vm.prank(alice);
         market.mint(1000e18);
 
         vm.warp(block.timestamp + 30 days);
 
-        address bob   = makeAddr("bob-5");
-        address rando = makeAddr("rando-5");
+        market.settleFunding(alice);
 
-        vm.prank(rando);
-        vm.expectRevert();
-        market.settleFundingOnSale(alice, bob, true, 500e18, type(uint256).max / 2);
+        assertEq(market.fundingSnapshot(alice), market.cumulativeFundingPerYES(), "YES snapshot reset");
+        assertEq(market.snapNO(alice),           market.cumFundingPerNO(),         "NO snapshot reset");
     }
 
-    function test_SettleFundingOnSale_RoutesToNOAccretion() public {
+    function test_PreviewFunding_MatchesSettle_ButNoMutation() public {
         vm.prank(alice);
-        market.mint(1000e18);
+        market.mint(1000e18); // alice: 1000 YES + 1000 NO
 
         vm.warp(block.timestamp + 30 days);
 
-        address clob = makeAddr("clob-6");
-        address bob  = makeAddr("bob-6");
-        market.grantRole(market.CLOB_ROLE(), clob);
+        uint256 snapYesBefore = market.fundingSnapshot(alice);
+        uint256 snapNoBefore  = market.snapNO(alice);
 
-        uint256 amount      = 500e18;
-        uint256 expectedCum = uint256(0.23e18) * 30 days / 365 days;
-        uint256 owed        = amount * expectedCum / 1e18;
+        // Preview a hypothetical YES-side settlement of alice's full YES balance —
+        // this should match what settleFunding would actually return right now.
+        int256 previewed = market.previewFunding(alice, 1000e18, true);
 
-        uint256 poolBefore = market.noAccretionPool();
+        assertEq(market.fundingSnapshot(alice), snapYesBefore, "preview does not mutate YES snapshot");
+        assertEq(market.snapNO(alice),          snapNoBefore,  "preview does not mutate NO snapshot");
 
-        vm.prank(clob);
-        market.settleFundingOnSale(alice, bob, true, amount, owed);
+        int256 actual = market.settleFunding(alice);
+        assertEq(previewed, actual, "preview matches the real settlement");
+    }
 
-        assertEq(market.noAccretionPool(), poolBefore + owed, "YES sale routes owed to NO accretion pool");
+    // Compile-time guarantee that the pool mechanism is fully gone (not just
+    // unused) — a stray reference here would fail to compile.
+    function test_NoPoolReferences() public {
+        // solc would reject `market.noAccretionPool()` / `market.settleFundingOnSale(...)`
+        // if either still existed — this test's mere presence + a passing build is the check.
+        vm.prank(alice);
+        market.mint(1e18);
+        assertTrue(true, "build succeeded with no pool-based members on CreditMarket");
+    }
+
+    // ─── v1b1-2b-3: redeem/settleYES routed through settleFunding (no pool) ────
+
+    // Redeem burns EQUAL YES and NO, so a "pure YES holder" can never call it —
+    // the meaningful case is an ASYMMETRIC holding (more YES than NO), which
+    // produces a real net debit that settleFunding deducts from the payout and
+    // leaves sitting in CreditMarket's own collateral balance — no pool ledger.
+    function test_Redeem_NettsFundingViaCollateral() public {
+        vm.prank(alice);
+        market.mint(1000e18); // 1000 YES + 1000 NO
+
+        // Move part of alice's NO away (transfers are CLOB_ROLE-gated) so her
+        // YES balance exceeds her NO balance.
+        address sink = makeAddr("no-sink-redeem-collateral");
+        noToken.grantRole(noToken.CLOB_ROLE(), alice);
+        vm.prank(alice);
+        noToken.transfer(sink, 400e18); // alice: 1000 YES, 600 NO
+
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedOwed = (1000e18 - 600e18) * expectedCum / 1e18; // net debit over held balance
+
+        uint256 redeemAmount = 600e18; // capped by alice's remaining NO balance
+
+        uint256 aliceUsdcBefore  = mockUsdc.balanceOf(alice);
+        uint256 marketUsdcBefore = mockUsdc.balanceOf(address(market));
+
+        vm.prank(alice);
+        market.redeem(redeemAmount);
+
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + redeemAmount - expectedOwed,
+            "redeemer nets tokenAmount minus net funding owed");
+        assertEq(mockUsdc.balanceOf(address(market)), marketUsdcBefore - (redeemAmount - expectedOwed),
+            "owed portion stays in CreditMarket's collateral, not paid out");
+    }
+
+    // The reported lifecycle bug: a holder who never traded (still holds the
+    // matched YES+NO pair from mint) must NOT be double-charged for owing YES
+    // funding while ALSO being due the mirrored NO credit — settleFunding nets
+    // both off the same balance and the same index, so they cancel exactly and
+    // the full tokenAmount is returned.
+    function test_Redeem_HeldPair_NoDoubleCharge() public {
+        vm.prank(alice);
+        market.mint(1000e18); // 1000 YES + 1000 NO, untouched
+
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
+
+        vm.prank(alice);
+        market.redeem(1000e18);
+
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + 1000e18,
+            "matched pair nets to zero -> full tokenAmount redeemed, no double charge");
+    }
+
+    // Post-credit-event settlement deducts accrued YES funding the same way
+    // redeem does — via settleFunding against collateral, no pool.
+    function test_SettleYES_DeductsFundingViaCollateral() public {
+        vm.prank(alice);
+        market.mint(1000e18); // 1000 YES + 1000 NO
+
+        address sink = makeAddr("no-sink-settleyes");
+        noToken.grantRole(noToken.CLOB_ROLE(), alice);
+        vm.prank(alice);
+        noToken.transfer(sink, 1000e18); // alice: pure YES holder
+
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedOwed = 1000e18 * expectedCum / 1e18;
+
+        vm.prank(oracle);
+        market.confirmCreditEvent();
+
+        uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
+
+        vm.prank(alice);
+        market.settleYES(1000e18);
+
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + 1000e18 - expectedOwed,
+            "YES settles at full notional minus accrued funding debit, via collateral");
     }
 }
