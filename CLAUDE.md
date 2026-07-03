@@ -82,7 +82,8 @@ FeeDistributor.sol    — splits trading fees: 50% LP / 20% insurance / 30% trea
 **⚠️ FUNDING v1b — ONE NEW CONTRACT + tweak CreditMarket.sol:**
 ```
 CreditMarket.sol      — add cumFundingPerNO (mirrors cumFundingPerYES exactly), display
-                        helpers (equity, P&L, breakeven, epochsToExpire), seizure-trigger view
+                        helpers (equity, P&L, breakeven, epochsToExpire), seizure-trigger view,
+                        flagged-position lockout + cure()
 LiquidationEngine.sol — NEW. Formulaic claim of seizure-triggered YES positions.
                         No Dutch auction, no discount ramp — price is fully determined by
                         the funding-owed formula. YES token transfers, never burned.
@@ -212,6 +213,14 @@ The 3% buffer doubles as the liquidator's profit margin (see Liquidation Math be
 is not just a safety cushion, it is the incentive that makes someone actually claim the
 position.
 
+**Freeze semantics (v1b1-2d):** once flagged, the position is fully locked — no `mint()`,
+no `redeem()`, no CLOB trade on either side (all revert `PositionFrozen`). YES-side funding
+is frozen at the flagged value (never live accrual while flagged). The only exits are a
+liquidation claim, `cure()` (the holder pays the frozen obligation in cash, keeps the YES
+and the ~3% sliver a claimant would otherwise earn, and accrual resumes from now), or
+`settleYES` after a credit event (which auto-cures, collecting the frozen debt from the
+payout before clearing the flag).
+
 ### Liquidation math (locked — formulaic, no Dutch auction)
 
 When the trigger fires, the keeper flags the position claimable and **freezes its funding
@@ -243,6 +252,12 @@ Claim (anyone, first to call — no auction, no discount ramp):
     (so NO is ALWAYS made whole, even in the tail case)
     YES token still transfers to liquidator at P = m (fair — they paid full value)
 ```
+
+**Claim touches ONLY the YES side (v1b1-2d):** the holder's NO-side credit (if they also
+hold NO) is NOT netted against the frozen debt, NOT paid out during the claim, and NOT
+forfeited — their `snapNO` is untouched and the credit keeps accruing, payable at their own
+next settlement touchpoint. No USDC is ever pushed to the original holder inside `claim()`
+(pull-over-push: a USDC-blacklisted holder must not be able to brick liquidation).
 
 **Why this is NOT "sold at zero":** the YES token is *transferred*, not burned/redeemed — it
 still carries full value `m` to whoever holds it. If the liquidator paid zero, NO would be
@@ -359,6 +374,10 @@ user-facing guidance so sellers see the constraint before submitting.
 9. A net funding debit recorded in `fundingDebt` is NEVER erased without the equivalent
    USDC landing in (or staying in) collateral — snapshots may advance, but debt persists
    until collected.
+10. A flagged (claimable) position is fully locked — no mint, redeem, or CLOB trade on
+    either side — and its YES-side funding is frozen at the flagged value. The only exits
+    are claim(), cure(), or post-credit-event settleYES. Liquidation itself touches ONLY
+    the YES side: the holder's NO-side credit survives a claim untouched.
 ```
 
 ### What stays the same as v1

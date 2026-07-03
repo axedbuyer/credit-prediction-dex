@@ -737,4 +737,152 @@ contract CreditMarketTest is Test {
         assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + 1000e18 - expectedOwed,
             "YES settles at full notional minus accrued funding debit, via collateral");
     }
+
+    // ─── v1b1-2c: freeze-aware settleFunding, lockout, and cure ────────────────
+
+    // settleFunding must charge the FROZEN funding value, not live accrual since
+    // flagging — this is the bug the freeze-aware branch fixes. After settleYES,
+    // the flag must auto-clear (the frozen obligation was fully folded into the
+    // payout deduction, so leaving the flag set would let a later claim() seize
+    // the remaining YES — but there's no YES left here, it's fully burned).
+    function test_SettleYES_FreezeRespected_AutoCures() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+
+        address bob = makeAddr("bob-freeze-settle");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18); // 100 YES + 100 NO
+
+        // Strip bob down to a pure YES holder.
+        address sink = makeAddr("no-sink-freeze-settle");
+        noToken.grantRole(noToken.CLOB_ROLE(), bob);
+        vm.prank(bob);
+        noToken.transfer(sink, 100e18);
+
+        vm.warp(block.timestamp + 356 days);
+        mkt.accrueFunding();
+        assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
+
+        mkt.flagClaimable(bob);
+        assertTrue(mkt.claimable(bob), "flagged");
+        uint256 frozen = mkt.frozenFunding(bob);
+
+        // 30 MORE days of live accrual pass while flagged — must NOT count against bob.
+        vm.warp(block.timestamp + 30 days);
+        mkt.accrueFunding();
+        assertEq(mkt.frozenFunding(bob), frozen, "frozen value unaffected by further accrual");
+
+        vm.prank(oracle);
+        mkt.confirmCreditEvent();
+
+        uint256 expectedOwed  = 100e18 * frozen / 1e18; // FROZEN debt only, not 356+30 days worth
+        uint256 bobUsdcBefore = mockUsdc.balanceOf(bob);
+
+        vm.prank(bob);
+        mkt.settleYES(100e18);
+
+        assertEq(mockUsdc.balanceOf(bob), bobUsdcBefore + 100e18 - expectedOwed,
+            "payout deducts the FROZEN debt, not frozen + 30 days of live accrual");
+        assertFalse(mkt.claimable(bob), "claimable auto-cleared after settleYES");
+    }
+
+    // A flagged position is fully locked: mint() and redeem() must revert.
+    function test_Lockout_MintAndRedeem_Revert() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+
+        address bob = makeAddr("bob-lockout");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18); // 100 YES + 100 NO
+
+        address sink = makeAddr("no-sink-lockout");
+        noToken.grantRole(noToken.CLOB_ROLE(), bob);
+        vm.prank(bob);
+        noToken.transfer(sink, 100e18); // bob: pure YES holder
+
+        vm.warp(block.timestamp + 356 days);
+        mkt.accrueFunding();
+        mkt.flagClaimable(bob);
+        assertTrue(mkt.claimable(bob), "flagged");
+
+        vm.prank(bob);
+        vm.expectRevert(CreditMarket.PositionFrozen.selector);
+        mkt.mint(10e18);
+
+        vm.prank(bob);
+        vm.expectRevert(CreditMarket.PositionFrozen.selector);
+        mkt.redeem(1e18);
+    }
+
+    // Flagged holder voluntarily cures: pays exactly the frozen YES debit net of
+    // any NO credit, the flag clears, frozenFunding zeroes out, and accrual
+    // resumes fresh from the cure time (not from the original flag time).
+    function test_Cure_PaysNetDebtAndResumesAccrual() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+
+        address bob = makeAddr("bob-cure");
+        mockUsdc.mint(bob, 1000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18); // 100 YES + 100 NO
+
+        // Strip down to an asymmetric 100 YES / 40 NO holding so cure's net
+        // (frozen YES debit minus NO credit) is a real, nonzero number.
+        address sink = makeAddr("no-sink-cure");
+        noToken.grantRole(noToken.CLOB_ROLE(), bob);
+        vm.prank(bob);
+        noToken.transfer(sink, 60e18); // bob: 100 YES, 40 NO
+
+        vm.warp(block.timestamp + 356 days);
+        mkt.accrueFunding();
+        assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
+        mkt.flagClaimable(bob);
+        assertTrue(mkt.claimable(bob), "flagged");
+
+        uint256 frozen = mkt.frozenFunding(bob);
+        uint256 cumNo  = mkt.cumFundingPerNO(); // no time elapsed since flag -> == frozen
+        uint256 expectedYesOwed  = 100e18 * frozen / 1e18;
+        uint256 expectedNoCredit = 40e18  * cumNo  / 1e18;
+        uint256 expectedNet      = expectedYesOwed - expectedNoCredit;
+
+        uint256 bobUsdcBefore    = mockUsdc.balanceOf(bob);
+        uint256 marketUsdcBefore = mockUsdc.balanceOf(address(mkt));
+
+        vm.prank(bob);
+        mkt.cure();
+
+        assertEq(bobUsdcBefore - mockUsdc.balanceOf(bob), expectedNet,
+            "bob pays exactly fundingDebt + frozen x Q, net of NO credit");
+        assertEq(mockUsdc.balanceOf(address(mkt)), marketUsdcBefore + expectedNet,
+            "USDC conservation: bob's payment lands in market collateral");
+        assertFalse(mkt.claimable(bob), "flag cleared");
+        assertEq(mkt.frozenFunding(bob), 0, "frozenFunding zeroed");
+        assertEq(mkt.fundingDebt(bob), 0, "fundingDebt cleared");
+        assertEq(mkt.fundingSnapshot(bob), mkt.cumulativeFundingPerYES(), "snapshot reset to now");
+
+        // Warp afterward: accrual (and isSeizable) resumes from the cure time,
+        // not from the original flag time.
+        vm.warp(block.timestamp + 1 days);
+        mkt.accrueFunding();
+        uint256 fNowAfterCure = mkt.cumulativeFundingPerYES() - mkt.fundingSnapshot(bob);
+        assertEq(fNowAfterCure, mkt.currentMark() * 1 days / 365 days,
+            "post-cure accrual counts only from the cure time");
+    }
+
+    function test_Cure_NonFlagged_Reverts() public {
+        vm.prank(alice);
+        market.mint(100e18);
+
+        vm.prank(alice);
+        vm.expectRevert(CreditMarket.PositionNotFlagged.selector);
+        market.cure();
+    }
 }

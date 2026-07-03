@@ -11,6 +11,7 @@ interface ICreditMarket {
     function usdc() external view returns (address);
     function yesToken() external view returns (address);
     function noToken() external view returns (address);
+    function claimable(address user) external view returns (bool);
 
     // v1b1-2b-2: unified per-user funding settlement (no pool, no tradePrice
     // coupling). Nets the user's YES-side debit against their NO-side credit over
@@ -65,6 +66,7 @@ contract CLOBSettlement is ReentrancyGuard {
     error MismatchedPair();
     error SlippageExceeded();
     error FundingShortfall();
+    error PositionFrozen();
 
     constructor(address _creditMarket) {
         creditMarket = _creditMarket;
@@ -156,6 +158,10 @@ contract CLOBSettlement is ReentrancyGuard {
         uint256 amount     = makerIsSeller ? makerOrder.amountIn : takerOrder.amountIn; // tokens sold
         uint256 tradePrice = makerIsSeller ? takerOrder.amountIn : makerOrder.amountIn; // pure token value
 
+        // A flagged position is fully locked until claimed, cured, or settled
+        // post-credit-event: no CLOB trade may move tokens in/out of it either side.
+        _requireNotFrozen(seller, buyer);
+
         // ── funding settlement (v1b1-2b-2: per-user, no pool, no tradePrice
         // coupling) — BEFORE the swap, on each party's full pre-trade balance.
         // A credit (positive delta) is already paid out directly by settleFunding;
@@ -203,5 +209,14 @@ contract CLOBSettlement is ReentrancyGuard {
             makerOrder.amountIn,
             takerOrder.amountIn
         );
+    }
+
+    // Hoisted into its own frame (rather than inlined) to keep _settleFundingAndSwap's
+    // stack shallow enough for solc 0.8.24, which already stack-too-deeps easily here.
+    function _requireNotFrozen(address seller, address buyer) private view {
+        if (
+            ICreditMarket(creditMarket).claimable(seller) ||
+            ICreditMarket(creditMarket).claimable(buyer)
+        ) revert PositionFrozen();
     }
 }

@@ -14,10 +14,6 @@ interface ICreditMarket {
     function yesToken() external view returns (address);
     function usdc() external view returns (address);
     function clearLiquidatedPosition(address originalHolder, address liquidator) external;
-
-    // v1b1-2b-3: unified per-user funding settlement (no pool). Pays out any
-    // NO-side credit `user` still holds directly from collateral.
-    function settleFunding(address user) external returns (int256 delta);
 }
 
 interface IInsuranceFund {
@@ -87,13 +83,17 @@ contract LiquidationEngine is ReentrancyGuard {
         bool    tailCase     = fFrozenTotal > tokenValue;
         uint256 P            = tailCase ? tokenValue : fFrozenTotal;
 
-        // ── effects (settle any NO-side credit, clear CreditMarket state) ─────────
-        // settleFunding captures the seized holder's position into collateral — pays
-        // out any NO-side credit `user` still holds directly (no pool: a bare
-        // snapshot reset would otherwise silently forfeit it). The YES-side debit
-        // itself is already priced via frozenFunding above and collected below via
-        // the liquidator's P payment into collateral.
-        ICreditMarket(creditMarket).settleFunding(user);
+        // ── effects (clear CreditMarket state — YES side only) ────────────────────
+        // claim() touches ONLY the YES side: the pricing above already read
+        // frozenFunding/fundingDebt directly and is collected via the liquidator's
+        // P payment below. We deliberately do NOT call settleFunding(user) here —
+        // doing so would net the just-priced frozen debt against the holder's
+        // NO-side credit a second time (a double-charge on top of P). The holder's
+        // NO-side credit is untouched: their snapNO is left alone by
+        // clearLiquidatedPosition and persists to be collected at their own next
+        // touchpoint (redeem, settleYES, a CLOB sale, or a cure). No cash is ever
+        // pushed to the original holder inside claim() (pull-over-push — a
+        // USDC-blacklisted holder must not be able to brick liquidation).
         ICreditMarket(creditMarket).clearLiquidatedPosition(user, msg.sender);
 
         // ── interactions ──────────────────────────────────────────────────────────

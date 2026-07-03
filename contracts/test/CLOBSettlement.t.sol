@@ -416,4 +416,61 @@ contract CLOBSettlementTest is Test {
         assertEq(market.fundingSnapshot(maker), cumYes, "buyer YES snapshot reset");
         assertEq(market.snapNO(maker),          cumNo,  "buyer NO snapshot reset");
     }
+
+    // ─── v1b1-2c: flagged positions are fully locked out of CLOB trades ────────
+
+    // A flagged holder acting as the SELLER in a CLOB trade must be blocked.
+    function test_Lockout_FlaggedSeller_Reverts() public {
+        _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
+
+        vm.warp(block.timestamp + 356 days);
+        market.accrueFunding();
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        assertTrue(market.isSeizable(taker), "must be seizable before flag");
+        market.flagClaimable(taker);
+        assertTrue(market.claimable(taker), "taker flagged");
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 50e18, 100e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 100e18, 50e18, expiry, 0
+        );
+        bytes memory ms = _sign(makerKey, mo);
+        bytes memory ts = _sign(takerKey, to_);
+
+        vm.expectRevert(CLOBSettlement.PositionFrozen.selector);
+        clob.verifyAndSettle(mo, ms, to_, ts);
+    }
+
+    // A flagged holder acting as the BUYER in a CLOB trade must be blocked, even
+    // when the trade itself has nothing to do with the position that got them
+    // flagged (maker here buys more YES while already flagged from an earlier,
+    // unrelated YES position).
+    function test_Lockout_FlaggedBuyer_Reverts() public {
+        // Give maker a separate flaggable YES position (independent of the trade below).
+        yesToken.mint(maker, 1_000e18); // admin holds MINTER_ROLE from setUp
+
+        vm.warp(block.timestamp + 356 days);
+        market.accrueFunding();
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        assertTrue(market.isSeizable(maker), "maker must be seizable before flag");
+        market.flagClaimable(maker);
+        assertTrue(market.claimable(maker), "maker flagged");
+
+        // maker (frozen) now attempts to BUY YES from taker.
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 50e18, 40e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 40e18, 50e18, expiry, 0
+        );
+        bytes memory ms = _sign(makerKey, mo);
+        bytes memory ts = _sign(takerKey, to_);
+
+        vm.expectRevert(CLOBSettlement.PositionFrozen.selector);
+        clob.verifyAndSettle(mo, ms, to_, ts);
+    }
 }

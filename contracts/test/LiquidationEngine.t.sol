@@ -210,6 +210,35 @@ contract LiquidationEngineTest is Test {
         );
     }
 
+    // frozenFunding is locked in at flag time — further LIVE accrual after the
+    // flag (global index keeps rising) must never change P. This is exactly what
+    // frozenFunding exists to prevent: a keeper-downtime gap between flag and
+    // claim must not let more funding silently pile onto the priced position.
+    function test_Claim_PostFlagWarp_DoesNotChangeP() public {
+        (, uint256 fFrozenTotal, , uint256 P) = _mintAndFlag(alice, MINT_AMT);
+
+        // fundingSnapshot(alice) was 0 pre-flag (first-ever mint, no prior sync),
+        // so frozenFunding(alice) == the global index value at flag time.
+        uint256 cumAtFlag = market.frozenFunding(alice);
+
+        // Warp well past the flag — the live global index keeps rising.
+        vm.warp(block.timestamp + 60 days);
+        market.accrueFunding();
+        assertGt(market.cumulativeFundingPerYES(), cumAtFlag,
+            "sanity: global index kept rising after flag");
+        assertEq(market.frozenFunding(alice), cumAtFlag,
+            "sanity: frozenFunding itself is untouched by the warp");
+
+        uint256 marketUsdcBefore = mockUsdc.balanceOf(address(market));
+
+        vm.prank(bob);
+        engine.claim(alice);
+
+        assertEq(mockUsdc.balanceOf(address(market)), marketUsdcBefore + P,
+            "P (frozen at flag time) is unaffected by post-flag warp");
+        assertEq(P, fFrozenTotal, "normal case: P == fFrozenTotal captured at flag time");
+    }
+
     // ── snapshot / fresh-start tests ──────────────────────────────────────────
 
     // After claim, the liquidator's fundingSnapshot equals cumulativeFundingPerYES —
@@ -309,14 +338,17 @@ contract LiquidationEngineTest is Test {
         assertEq(noToken.totalSupply(),  aliceMint + charlieMint, "total NO supply unchanged");
     }
 
-    // ─── v1b1-2b-3: settleFunding + collateral, no pool ────────────────────────
+    // ─── v1b1-2c: claim() touches only the YES side ────────────────────────────
 
     // Give the seized holder some NO on top of her frozen YES position (test
     // setup only — a plain-transfer redistribution, so total supply stays
-    // balanced) so her own settleFunding call inside claim() has a real, nonzero
-    // net credit to pay — proving that credit comes directly out of CreditMarket's
-    // collateral balance, not any pool (there is no pool left in the codebase).
-    function test_Liquidation_UsesCollateralNotPool() public {
+    // balanced). UPDATED for v1b1-2c: claim() no longer calls settleFunding(user)
+    // (that would double-charge the just-priced frozen debt against her NO
+    // credit — see LiquidationEngine.claim's comment block). Her NO-side credit
+    // is now left completely untouched by the claim: snapNO is not reset by
+    // clearLiquidatedPosition, so no USDC moves to her during claim() and her
+    // full noFundingCredit persists, to be collected at her own next touchpoint.
+    function test_Liquidation_LeavesNOSideUntouched() public {
         address charlie = makeAddr("charlie-no-holder");
         mockUsdc.mint(charlie, 10_000e18);
         vm.prank(charlie);
@@ -339,21 +371,30 @@ contract LiquidationEngineTest is Test {
         vm.prank(keeper);
         market.flagClaimable(alice);
 
-        uint256 cum              = market.cumulativeFundingPerYES(); // == cumFundingPerNO
-        uint256 expectedYesOwed  = 1_000e18 * cum / 1e18;
+        uint256 cum = market.cumulativeFundingPerYES(); // == cumFundingPerNO
         uint256 expectedNoCredit = 1_500e18 * cum / 1e18;
-        uint256 expectedNetCredit = expectedNoCredit - expectedYesOwed;
 
-        uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
+        uint256 aliceUsdcBefore    = mockUsdc.balanceOf(alice);
+        uint256 marketUsdcBefore   = mockUsdc.balanceOf(address(market));
+        uint256 bobUsdcBefore      = mockUsdc.balanceOf(bob);
+
+        uint256 pFrozenPerUnit = market.frozenFunding(alice);
+        uint256 P = 1_000e18 * pFrozenPerUnit / 1e18; // normal case: P == frozen YES debit
 
         vm.prank(bob);
         engine.claim(alice);
 
-        // Alice's own NO-side credit nets against her frozen YES debit and is
-        // paid directly out of CreditMarket's collateral balance during claim
-        // (via settleFunding) — no pool anywhere.
-        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore + expectedNetCredit,
-            "seized holder's net NO credit paid directly from collateral, not a pool");
+        // Alice receives NOTHING during claim — no cash is ever pushed to the
+        // original holder inside claim() (pull-over-push).
+        assertEq(mockUsdc.balanceOf(alice), aliceUsdcBefore, "claim pushes no USDC to original holder");
+
+        // Her NO-side credit is unaffected by the claim — snapNO untouched.
+        assertEq(market.noFundingCredit(alice), expectedNoCredit,
+            "seized holder's NO credit unchanged by claim (snapNO untouched)");
+
+        // USDC conservation: liquidator paid P into the market; nothing else moved.
+        assertEq(mockUsdc.balanceOf(bob), bobUsdcBefore - P, "liquidator paid exactly P");
+        assertEq(mockUsdc.balanceOf(address(market)), marketUsdcBefore + P, "market gained exactly P");
 
         // Liquidation still proceeds normally: YES transfers, complete-set intact.
         assertEq(yesToken.balanceOf(bob), 1_000e18, "liquidator receives seized YES");
