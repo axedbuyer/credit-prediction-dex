@@ -18,6 +18,10 @@ interface ICreditMarket {
     // returns a signed delta (positive = credit already paid; negative = debit
     // reported but NOT pulled — the caller decides whether/how to collect it).
     function settleFunding(address user) external returns (int256 delta);
+
+    // CLOB_ROLE: clears fundingDebt[user] after the caller has routed the
+    // equivalent USDC into collateral (e.g. the YES-sale seller-debit path below).
+    function markDebtCollected(address user) external;
 }
 
 contract CLOBSettlement is ReentrancyGuard {
@@ -184,6 +188,11 @@ contract CLOBSettlement is ReentrancyGuard {
         IERC20(usdc).safeTransferFrom(buyer, seller, sellerProceeds);
         if (debtToCollateral > 0) {
             IERC20(usdc).safeTransferFrom(buyer, creditMarket, debtToCollateral);
+            // The debt amount now sits in collateral — clear the seller's ledger entry.
+            // (Buyer's debit, and a NO-sale seller's debit, are intentionally left
+            // uncollected here: they persist in fundingDebt and are collected later
+            // at redeem/settleYES/a future YES sale/liquidation.)
+            ICreditMarket(creditMarket).markDebtCollected(seller);
         }
 
         emit OrderSettled(

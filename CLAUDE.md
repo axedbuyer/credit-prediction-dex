@@ -146,7 +146,8 @@ mapping(address => uint256) public fundingSnapshot; // snapshot at last sync
 function _syncFunding(address user) internal {
     uint256 owed = YES.balanceOf(user) * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
     fundingSnapshot[user] = cumulativeFundingPerYES;
-    // deduct `owed` USDC from user's claimable balance or deduct on next redeem
+    // `owed` accumulates in the persistent fundingDebt ledger and is collected at the
+    // user's next redeem/settleYES/YES-sale proceeds/liquidation — never forgiven
 }
 ```
 
@@ -254,47 +255,69 @@ similar to a normal CLOB sale (funding is synced, snapshot resets) except the pr
 differently: in a normal sale, the seller keeps `m − f_now`; in a liquidation, the liquidator
 keeps it instead, as payment for performing the seizure the original holder failed to avoid.
 
-### Funding settlement points (Model 1 — settle to seller on transfer)
+### Funding settlement points (unified per-user `settleFunding` + `fundingDebt` ledger)
 
 Funding accrues as a number via the indices, but **cash moves only at these points**. The
-critical rule: **on every CLOB sale, accrued funding is settled to/from the SELLER and both
-parties' snapshots reset to now** (Model 1 — funding accrues to whoever bore the risk during
-each moment of holding). Without this, secondary-market trades silently leak accrued funding.
+critical rule: **on every CLOB sale, `CreditMarket.settleFunding(seller)` nets accrued
+funding over the seller's FULL YES/NO balances (not just the amount being sold) and resets
+both of the seller's snapshots to now**. A net credit is paid out immediately, in cash, from
+collateral (there is no separate "NO accretion pool" — that pool language was retired in
+v1b1-2b; "NO accretion" now just means the cash sits in collateral, backing NO holders'
+future credits). A net debit is **recorded in the persistent `fundingDebt[user]` ledger**,
+not forgiven — `settleFunding` folds any prior `fundingDebt[user]` into the netting
+(`debit = fundingDebt[user] + yesOwed` vs `noCredit`) before deciding credit or debit.
+Without this ledger, a net debit that isn't collected in cash at trade time would vanish
+the moment snapshots advance, silently depleting collateral. The buyer's own net position
+is settled the same way via `settleFunding(buyer)`, but a buyer's (or a NO-sale seller's)
+net debit is **not** collected in cash at trade time — it persists in `fundingDebt` until
+that holder's next redeem/settleYES/YES-sale/liquidation. This is deliberate: one party's
+unrelated funding debt must never block or revert a third party's fill.
 
 ```
-mint:        snapshots set to current indices for the minter
-redeem:      pair burned — YES owed deducted, NO credit added, net USDC out adjusted
-settleYES:   (credit event) YES gets notional − funding owed
-liquidation: seized YES holder's owed → NO accretion; YES transfers (see liquidation math)
+mint:        settleFunding(minter) — prior NO credit paid out (previously forfeited under
+             the old _syncUserFunding path); any YES debit lands in fundingDebt (previously
+             stranded)
+redeem:      settleFunding(user) — debit (fundingDebt + yesOwed net of noCredit) deducted
+             from the USDC payout and fundingDebt zeroed; net credit paid out and zeroed
+settleYES:   (credit event) settleFunding(user) — debit deducted from notional payout,
+             fundingDebt zeroed
+liquidation: LiquidationEngine.claim prices P from (fundingDebt[user] + frozenFunding × Q)
+             — consistent with the ledger; YES transfers (see liquidation math)
 
 CLOB sale — NO side (seller selling NO tokens):
-  _accrueFunding()
-  credit = noFundingCredit(seller)              // total, on the amount being sold
-  seller receives:  tradePrice + credit         // funding is a CREDIT (+) — paid from
-                                                //   the accretion pool
+  settleFunding(seller) nets seller's full position:
+    net credit  → paid to seller in cash from collateral immediately, fundingDebt zeroed
+    net debit   → recorded in fundingDebt[seller], NOT collected at trade time, does not
+                  block the trade
+  seller receives:  tradePrice + (any net credit paid out)
   snapNO[seller] = snapNO[buyer] = cumFundingPerNO   // buyer starts earning fresh
+  settleFunding(buyer) also runs — buyer's own net debit (if any) lands in fundingDebt[buyer]
 
 CLOB sale — YES side (seller selling YES tokens):
-  _accrueFunding()
-  owed = yesFundingOwed(seller)                 // total, on the amount being sold
-  require tradePrice ≥ owed                      // ── OPTION B SAFEGUARD ──
-                                                //   if the fill would clear below accrued
-                                                //   funding, REVERT. Position is UNCHANGED.
+  settleFunding(seller) nets seller's full position → debit = fundingDebt[seller] + yesOwed
+  require tradePrice ≥ debit                     // ── OPTION B SAFEGUARD (FundingShortfall) ──
+                                                //   if the fill would clear below the debit,
+                                                //   REVERT. Position is UNCHANGED.
                                                 //   Do NOT route to liquidation (it's still
                                                 //   above the seizure trigger and solvent).
-  seller receives:  tradePrice − owed           // funding is a DEBIT (−)
-  owed → NO accretion pool                       // funding lands with the NO holders owed it
+  seller receives:  tradePrice − debit          // debit collected from trade proceeds into
+                                                //   collateral, right here, in cash
+  CLOB_ROLE calls CreditMarket.markDebtCollected(seller) → fundingDebt[seller] zeroed
   snapYES[seller] = snapYES[buyer] = cumFundingPerYES   // buyer owes funding from now
+  settleFunding(buyer) also runs — buyer's own net debit (if any) lands in fundingDebt[buyer]
 ```
 
 **Worked examples:**
 ```
-NO sells at $95 with $25 accrued → seller nets $95 + $25 = $120; buyer snapshot resets.
-YES sells at $30 with $8 accrued → seller nets $30 − $8 = $22; $8 → NO accretion;
+NO sells at $95 with $25 net credit → seller nets $95 + $25 = $120, paid from collateral;
+                                    buyer snapshot resets.
+YES sells at $30 with $8 net debit → seller nets $30 − $8 = $22; $8 collected into
+                                    collateral and fundingDebt zeroed via markDebtCollected;
                                     buyer snapshot resets (owes funding from purchase).
-YES tries to market-sell at $5 with $8 accrued → REVERT (fill < owed). Seller keeps the
-                                    position unchanged; must place a limit sell ≥ $8, or
-                                    hold. NOT liquidated (still above trigger).
+YES tries to market-sell at $5 with $8 net debit → REVERT FundingShortfall (fill < debit).
+                                    Seller keeps the position unchanged, fundingDebt[seller]
+                                    still $8; must place a limit sell ≥ $8, or hold.
+                                    NOT liquidated (still above trigger).
 ```
 
 **The Option B edge case is narrow:** the shortfall (tradePrice < owed) requires BOTH (a) thin
@@ -324,13 +347,18 @@ user-facing guidance so sellers see the constraint before submitting.
 6. Liquidation claims are permissionless and first-come — no single liquidator is
    load-bearing. (Known MVP limitation: first-valid-tx-wins has MEV/front-run exposure;
    acceptable for MVP, revisit with private relay if it becomes a problem.)
-7. EVERY CLOB sale settles accrued funding to/from the SELLER and resets BOTH snapshots
-   (Model 1). NO sale credits the seller (+funding); YES sale debits the seller (−funding,
-   routed to NO accretion). Funding is never silently lost on a transfer.
-8. A YES sale that would clear BELOW the seller's accrued funding REVERTS and leaves the
-   position completely unchanged. It is NEVER force-liquidated by a failed sale — the
-   position is still above the seizure trigger and solvent. Liquidation is reached only by
-   the trigger, never by a sale attempt.
+7. EVERY settlement path (mint, redeem, settleYES, CLOB sale, liquidation) nets accrued
+   funding per-user via `settleFunding`, over the user's full YES/NO balances, folding in
+   any prior `fundingDebt`. A net credit is paid out in cash immediately; a net debit is
+   NEVER forgiven just because snapshots advance — it persists in the `fundingDebt` ledger
+   until collected at the holder's next redeem/settleYES/YES-sale proceeds/liquidation.
+8. A YES sale that would clear BELOW the seller's net debit (fundingDebt + yesOwed) REVERTS
+   and leaves the position completely unchanged. It is NEVER force-liquidated by a failed
+   sale — the position is still above the seizure trigger and solvent. Liquidation is
+   reached only by the trigger, never by a sale attempt.
+9. A net funding debit recorded in `fundingDebt` is NEVER erased without the equivalent
+   USDC landing in (or staying in) collateral — snapshots may advance, but debt persists
+   until collected.
 ```
 
 ### What stays the same as v1
@@ -492,7 +520,9 @@ NO credit:     balance × (cumFundingPerNO  − snapNO)  / 1e18
 Seizure:       m ≤ 1.03 × (f_now + m×Δt/365)   → flag claimable, freeze f_now
 Liquidation:   P = min(f_now, m) → to NO accretion; YES TRANSFERS to liquidator (never
                burned); residual (m−P in normal case) kept by liquidator, not returned
-Settled:       on CLOB exchange, redeem, settleYES, or liquidation claim
+Settled:       via unified per-user settleFunding at CLOB exchange, redeem, settleYES, or
+               liquidation claim; net credits pay out immediately, net debits persist in
+               the fundingDebt ledger until collected at the next settlement touchpoint
 ```
 
 **Credit event settlement:**

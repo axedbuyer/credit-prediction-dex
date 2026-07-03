@@ -99,9 +99,9 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     function mint(uint256 usdcAmount) external nonReentrant whenNotPaused {
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), usdcAmount);
         _accrueFunding();
-        // Read pre-mint balance before sync so cost basis uses the same snapshot.
+        // Read pre-mint balance before settling so cost basis uses the same snapshot.
         uint256 prevBalance = IERC20(yesToken).balanceOf(msg.sender);
-        _syncUserFunding(msg.sender); // sync before balance increases
+        settleFunding(msg.sender); // settle (pay credit / record debit) before balance increases
         // Weighted-average cost basis: must use pre-mint balance (read above).
         uint256 newBalance = prevBalance + usdcAmount;
         costBasis[msg.sender] = (costBasis[msg.sender] * prevBalance + currentMark * usdcAmount) / newBalance;
@@ -121,7 +121,11 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         IRestrictedToken(noToken).burn(msg.sender, tokenAmount);
         uint256 usdcOut = tokenAmount;
         if (delta < 0) {
+            // uint256(-delta) == fundingDebt[msg.sender] right after settleFunding;
+            // deducting it from the payout keeps the USDC in collateral, which IS
+            // the collection — so the ledger is cleared here too.
             usdcOut -= uint256(-delta);
+            fundingDebt[msg.sender] = 0;
         }
         IERC20(usdc).safeTransfer(msg.sender, usdcOut);
         emit TokensRedeemed(msg.sender, tokenAmount);
@@ -145,7 +149,11 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         IRestrictedToken(yesToken).burn(msg.sender, amount);
         uint256 usdcOut = amount;
         if (delta < 0) {
+            // uint256(-delta) == fundingDebt[msg.sender] right after settleFunding;
+            // deducting it from the payout keeps the USDC in collateral, which IS
+            // the collection — so the ledger is cleared here too.
             usdcOut -= uint256(-delta);
+            fundingDebt[msg.sender] = 0;
         }
         IERC20(usdc).safeTransfer(msg.sender, usdcOut);
         emit YESSettled(msg.sender, amount);
@@ -269,16 +277,32 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         _syncUserFunding(user);
     }
 
+    // CLOB_ROLE: clears a user's outstanding fundingDebt ledger entry. Caller must
+    // have already routed the equivalent USDC into collateral (e.g. CLOBSettlement's
+    // YES-sale seller-debit path, which transfers the debt amount to this contract).
+    function markDebtCollected(address user) external onlyRole(CLOB_ROLE) {
+        fundingDebt[user] = 0;
+    }
+
     // ─── v1b1-2b-1: unified per-user funding settlement (no pool) ───────────────
     // Nets a single user's YES-side debit against their NO-side credit and pays or
-    // reports the difference directly against locked collateral — no accretion
+    // records the difference directly against locked collateral — no accretion
     // pool, no seller/buyer pairing, no tradePrice coupling. Reusable across a CLOB
     // sale, redeem, or liquidation (each caller decides how/where a debit gets paid).
     //
+    // fundingDebt[user] is the persistent ledger for uncollected debits: any prior
+    // debt is folded into this call's yesOwed before netting against noCredit, so a
+    // debit NEVER disappears just because the snapshot advances (e.g. on a buyer's
+    // side of a CLOB trade, or a NO-sale seller's side, where nothing collects cash
+    // in the same transaction). It persists in fundingDebt until an explicit
+    // collection point clears it: redeem/settleYES deduct it from the payout and
+    // zero it out, or CLOB_ROLE calls markDebtCollected after routing the
+    // equivalent USDC into collateral (e.g. the YES-sale seller-debit path).
+    //
     // Returns a signed delta: positive = credit paid OUT to `user` now (from
-    // collateral); negative = debit `user` owes. A debit is only REPORTED here,
-    // never pulled — the caller is responsible for collecting it (e.g. from trade
-    // proceeds on a CLOB sale, or a direct transferFrom on redeem).
+    // collateral); negative = debit now recorded in fundingDebt[user] (not lost —
+    // see above). The magnitude of a negative delta always equals fundingDebt[user]
+    // immediately after this call.
     //
     // Not itself nonReentrant: it is called internally by redeem/settleYES, which
     // are already nonReentrant on their own call frame (OZ's guard is a single
@@ -296,12 +320,16 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         fundingSnapshot[user] = cumulativeFundingPerYES;
         snapNO[user]          = cumFundingPerNO;
 
-        if (noCredit > yesOwed) {
-            uint256 net = noCredit - yesOwed;
-            IERC20(usdc).safeTransfer(user, net);
+        uint256 debit = fundingDebt[user] + yesOwed;
+
+        if (noCredit >= debit) {
+            fundingDebt[user] = 0;
+            uint256 net = noCredit - debit;
+            if (net > 0) IERC20(usdc).safeTransfer(user, net);
             delta = int256(net);
         } else {
-            uint256 net = yesOwed - noCredit;
+            uint256 net = debit - noCredit;
+            fundingDebt[user] = net;
             delta = -int256(net);
         }
 
