@@ -343,10 +343,20 @@ revert: the seller chooses to (1) limit-sell at a price that covers funding, or 
 nothing and keep holding. The position is never thrown into liquidation by a failed sell —
 liquidation is reached ONLY by funding accrual crossing the trigger, never by a sale attempt.
 
-**Off-chain pre-filter (UX):** the order book server should pre-filter YES sell orders that
-cannot clear above the seller's accrued funding, surfacing "minimum sell price to cover
-funding = X" in the UI. The on-chain `require` is the backstop; the off-chain filter is the
-user-facing guidance so sellers see the constraint before submitting.
+**Off-chain pre-filter (UX) — IMPLEMENTED (v1b1-3):** `POST /order` in order-book-server now
+rejects at submission time, before the order ever reaches matching:
+- any order from a maker whose position is flagged/claimable → `400 {error:'PositionFrozen'}`
+  (checked on both YES and NO orders — a frozen position is fully locked, see freeze
+  semantics above)
+- a YES sell order whose `minAmountOut` can't cover the seller's net carry debit →
+  `400 {error:'FundingShortfall', minSellProceeds}`, where the net debit is
+  `fundingDebt(maker) − previewFunding(maker, fullYesBalance, true)` clamped at 0, and
+  `minSellProceeds` is surfaced directly so the UI can show "minimum sell price to cover
+  funding = X" before the user submits
+Chain reads (via the new injectable `IChainReader` in `order-book-server/src/chain.ts`,
+built on viem) **fail open** — if the RPC read errors, the order is allowed through and the
+on-chain `require`/freeze check remains the backstop. The off-chain filter is pure UX; it
+is never the source of truth.
 
 ### Critical invariants (enforce in code AND tests)
 
@@ -446,8 +456,26 @@ Then atomically executes both transfers
 ### Backend Services
 
 ```
-/order-book-server    — REST: POST /order, DELETE /order/:id, GET /orderbook
-/matching-engine      — price-time priority matching, submits matched pairs on-chain
+/order-book-server    — REST: POST /order, DELETE /order/:id, GET /orderbook. v1b1-3:
+                        POST /order pre-filters against chain state — rejects orders from
+                        flagged/claimable makers (PositionFrozen) and YES sells that can't
+                        cover the seller's net carry debit (FundingShortfall +
+                        minSellProceeds); chain reads fail open (backstop is on-chain).
+/matching-engine      — price-time priority matching, submits matched pairs on-chain.
+                        v1b1-4: settler decodes FundingShortfall/PositionFrozen custom
+                        errors at gas-estimation time and prunes the offending order(s)
+                        from the book (seller's order for FundingShortfall; flagged
+                        maker(s) for PositionFrozen) instead of leave-in-book retry; all
+                        other revert reasons keep the old retry behavior. v1b1-4 also fixed
+                        a pre-existing bug: the settler's verifyAndSettle ABI didn't match
+                        the deployed contract (selector 0x538df8d8 expects
+                        (Order, bytes makerSig, Order, bytes takerSig) with a 7-field Order,
+                        not two embedded-signature tuples) — no settlement could have
+                        succeeded on a real chain before this fix. v1b1-4b fixed a second
+                        pre-existing bug: main.ts never wired createSettler, so matches were
+                        logged but never actually settled; it's now wired whenever
+                        SETTLER_PRIVATE_KEY + BASE_SEPOLIA_RPC_URL are set (log-only
+                        fallback otherwise).
 /funding-keeper       — v1b: accrueFunding() every epoch, bumps cumFundingPerYES (NO
                         mirrors it exactly); checks seizure trigger per holder; flags +
                         freezes f_now for any position that breaches it
@@ -467,14 +495,32 @@ Then atomically executes both transfers
   /liquidate          — v1b: NEW. Minimal liquidator dashboard — flagged positions + claim
 /components
   OrderBook.tsx       — live bid/ask ladder (poll /orderbook)
-  TradePanel.tsx      — enter USDC amount + select YES/NO, sign EIP-712 order
+  TradePanel.tsx      — enter USDC amount + select YES/NO, sign EIP-712 order. v1b1-5:
+                        gates trading with a banner (disabled, explains why) when the
+                        connected wallet's position is claimable/frozen; on YES sells,
+                        shows "minimum sell price to cover carry" guidance mirroring the
+                        on-chain FundingShortfall check, and surfaces the order-book
+                        server's 400 FundingShortfall response inline; also fixed
+                        token-amount math to the correct 6-decimal scale (was incorrectly
+                        using 1e18).
   PriceChart.tsx      — YES token price over time (TradingView Lightweight Charts)
   FundingTicker.tsx   — current annual carry displayed live
   PositionCard.tsx    — v1b: shows Cost Basis, Equity, P&L, Breakeven Mark; YES additionally
-                        shows Epochs To Expire with a warning as it approaches zero
+                        shows Epochs To Expire with a warning as it approaches zero.
+                        v1b1-5: adds a distinct frozen panel (separate from the isSeizable
+                        warning state) with a client-side cure-cost estimate — fundingDebt
+                        + frozenFunding×yesBal/1e18 minus pending NO credit computed from
+                        snapNO/cumFundingPerNO/lastFundingTime (NOT previewFunding, which
+                        is not freeze-aware) — plus an approve→cure() two-step flow; redeem
+                        is disabled while frozen, settleYES stays enabled (auto-cures); live
+                        net-carry display; DEV_YES_FROZEN dev fixture for testing the state.
   LiquidationCard.tsx — v1b: NEW, simpler than v2's — no discount ticker (price is fixed
                         by formula, not an auction), just shows P and a "Claim" button
 ```
+
+v1b1-5 also added `lib/creditMarketAbi.ts` — the canonical CreditMarket/ERC20 ABI plus a
+shared `netFundingDebit` helper, replacing three inline ABI duplicates that had drifted
+across components.
 
 ⚠️ v1b note: unlike v2, there is no buffer UI (no top-up/withdraw) — v1b has no buffer.
 The only YES-side health signal is Epochs To Expire. Surface it prominently with a warning
@@ -737,6 +783,42 @@ v1b-9.  Update PositionCard.tsx: show Cost Basis, Equity, P&L, Breakeven Mark; Y
 v1b-10. New LiquidationCard.tsx + /liquidate page: poll /claimable, show P, "Claim" button.
         No discount ticker needed (price is fixed by formula).
 ```
+
+### ⚠️ v1b1 Off-Chain Catch-Up (COMPLETE)
+
+The v1b1-2* commits landed the contract-side ledger/freeze fixes (fundingDebt persistence,
+unified settleFunding, claimable freeze + cure()). The following commits caught the
+off-chain services and frontend up to that contract behavior:
+
+```
+3f9427b [v1b1-3]  order-book-server: POST /order pre-filter — PositionFrozen (either side)
+                  + FundingShortfall (YES sells) rejection, minSellProceeds surfaced,
+                  fail-open on chain-read error. New src/chain.ts (injectable IChainReader).
+164a7df [v1b1-4]  matching-engine settler: decode FundingShortfall/PositionFrozen custom
+                  errors at gas-estimation and prune the offending order(s) instead of
+                  leave-in-book retry. ALSO fixed a pre-existing bug carried over from the
+                  original MVP build: verifyAndSettle's ABI was wrong (two 8-field tuples
+                  with embedded signatures vs. the deployed contract's
+                  (Order, bytes makerSig, Order, bytes takerSig) / 7-field Order, selector
+                  0x538df8d8) — no settlement could ever have succeeded on a real chain.
+59915d5 [v1b1-4b] matching-engine main.ts: fixed a second pre-existing bug — createSettler
+                  was never wired up, so matches were logged but never actually settled.
+                  Now wired when SETTLER_PRIVATE_KEY + BASE_SEPOLIA_RPC_URL are set
+                  (log-only fallback otherwise).
+ef19d57 [v1b1-5]  frontend: shared lib/creditMarketAbi.ts (replaces 3 inline ABI dupes);
+                  TradePanel frozen-position gate + carry guidance + FundingShortfall
+                  handling + 6-decimal token math fix; PositionCard/portfolio frozen panel
+                  with client-side cure-cost estimate + approve→cure() flow; redeem disabled
+                  while frozen, settleYES stays enabled; DEV_YES_FROZEN fixture.
+```
+
+Keepers required **no changes** — liquidation-keeper already priced claims with
+`fundingDebt` folded in.
+
+Verified end-to-end by a 12/12 live anvil smoke test (mint → CLOB match → on-chain
+`verifyAndSettle` settlement → flag → `PositionFrozen` rejection → `FundingShortfall` with
+exact `minSellProceeds` → `cure()` unfreeze), plus full unit suites: order-book-server 15,
+matching-engine 23, keepers 39, contracts 87.
 
 ---
 
