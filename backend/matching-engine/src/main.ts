@@ -1,5 +1,6 @@
 import { HttpOrderBookClient } from './client'
 import { MatchingEngine } from './engine'
+import { createSettler } from './settler'
 import type { MatchingEngineConfig } from './types'
 
 const config: MatchingEngineConfig = {
@@ -14,11 +15,20 @@ const client = new HttpOrderBookClient(orderBookUrl)
 const engine = new MatchingEngine(client, config)
 
 engine.on('matched', (maker, taker) => {
-  // Task 12 will hook here and call CLOBSettlement.verifyAndSettle()
   console.log(
     `[match] maker=${maker.id} (ask @ ${maker.price}) <-> taker=${taker.id} (bid @ ${taker.price})`,
   )
 })
+
+// The settler subscribes to 'matched' in its constructor and submits
+// CLOBSettlement.verifyAndSettle() on-chain. Without credentials, matches are
+// only logged (useful for dry-running the engine against a book).
+if (process.env.SETTLER_PRIVATE_KEY && process.env.BASE_SEPOLIA_RPC_URL) {
+  createSettler(engine)
+  console.log('[settler] wired — matched pairs will be settled on-chain')
+} else {
+  console.warn('[settler] SETTLER_PRIVATE_KEY or BASE_SEPOLIA_RPC_URL not set — matches will be logged only')
+}
 
 engine.start()
 console.log(`Matching engine polling ${orderBookUrl}/orderbook every ${config.pollIntervalMs ?? 500}ms`)
