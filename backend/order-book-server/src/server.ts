@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type { Address, Hex } from 'viem'
 import type { AppConfig, Order, OrderWire, StoredOrder } from './types'
 import type { OrderStore } from './orderbook'
+import type { IChainReader } from './chain'
 import { verifyOrderSignature, verifyCancelSignature } from './validation'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -41,9 +42,58 @@ function deriveSide(wire: OrderWire, usdcAddress: string): 'bid' | 'ask' {
   return wire.tokenIn.toLowerCase() === usdcAddress.toLowerCase() ? 'bid' : 'ask'
 }
 
+// ─── Chain pre-filter ─────────────────────────────────────────────────────────
+//
+// v1b1: rejects orders that would deterministically revert on-chain (see root
+// CLAUDE.md, "Off-chain pre-filter"). This is UX guidance only — the on-chain
+// `require`/revert remains the backstop — so any chain-read error is caught
+// and logged, and the order is accepted rather than blocked.
+
+type PreFilterResult =
+  | { rejected: false }
+  | { rejected: true; status: number; body: Record<string, unknown> }
+
+async function runChainPreFilter(
+  order: Order,
+  config: AppConfig,
+  chainReader: IChainReader,
+): Promise<PreFilterResult> {
+  try {
+    if (await chainReader.isClaimable(order.maker)) {
+      return { rejected: true, status: 400, body: { error: 'PositionFrozen' } }
+    }
+
+    const isYesSell = order.tokenIn.toLowerCase() === config.yesTokenAddress.toLowerCase()
+    if (isYesSell) {
+      const yesBal = await chainReader.yesBalanceOf(order.maker)
+      const [previewDelta, debt] = await Promise.all([
+        chainReader.previewFunding(order.maker, yesBal, true),
+        chainReader.fundingDebt(order.maker),
+      ])
+
+      // Net debit D = fundingDebt − previewDelta (previewDelta = noCredit − yesOwed,
+      // mirroring settleFunding's `debit = fundingDebt + yesOwed` netted against
+      // noCredit). Only relevant when positive.
+      const netDebit = debt - previewDelta
+      if (netDebit > 0n && order.minAmountOut < netDebit) {
+        return {
+          rejected: true,
+          status: 400,
+          body: { error: 'FundingShortfall', minSellProceeds: netDebit.toString() },
+        }
+      }
+    }
+
+    return { rejected: false }
+  } catch (err) {
+    console.error(`[order-book-server] chain pre-filter failed for maker=${order.maker}, accepting order:`, err)
+    return { rejected: false }
+  }
+}
+
 // ─── App factory ──────────────────────────────────────────────────────────────
 
-export function buildApp(store: OrderStore, config: AppConfig): FastifyInstance {
+export function buildApp(store: OrderStore, config: AppConfig, chainReader?: IChainReader): FastifyInstance {
   const app = Fastify({ logger: false })
 
   // POST /order — validate EIP-712 sig, add to order book
@@ -81,6 +131,13 @@ export function buildApp(store: OrderStore, config: AppConfig): FastifyInstance 
     )
     if (!valid) {
       return reply.status(400).send({ error: 'Invalid signature' })
+    }
+
+    if (chainReader) {
+      const preFilter = await runChainPreFilter(order, config, chainReader)
+      if (preFilter.rejected) {
+        return reply.status(preFilter.status).send(preFilter.body)
+      }
     }
 
     const orderId = uuidv4()

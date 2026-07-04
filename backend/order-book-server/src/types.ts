@@ -45,4 +45,9 @@ export interface AppConfig {
   clobSettlementAddress: string
   chainId: number
   port?: number
+  // v1b1: chain pre-filter config (used by main.ts to build an IChainReader;
+  // creditMarketAddress/rpcUrl are optional — when absent the reader is
+  // omitted and buildApp() skips freeze/funding pre-filter checks entirely).
+  creditMarketAddress?: string
+  rpcUrl?: string
 }

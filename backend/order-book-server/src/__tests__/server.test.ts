@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Address } from 'viem'
 import { buildApp } from '../server'
 import { MemoryOrderStore } from '../orderbook'
 import { ORDER_TYPES } from '../validation'
 import type { AppConfig, OrderWire } from '../types'
+import type { IChainReader } from '../chain'
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -98,6 +99,45 @@ async function buildOrderWire(
   }
 }
 
+// ─── Mock IChainReader (v1b1 pre-filter tests) ────────────────────────────────
+
+interface MockChainReaderOpts {
+  claimable?: boolean
+  yesBalance?: bigint
+  previewDelta?: bigint   // noCredit − yesOwed
+  fundingDebt?: bigint
+  throwOn?: 'isClaimable' | 'previewFunding' | 'fundingDebt' | 'yesBalanceOf'
+}
+
+function mockChainReader(opts: MockChainReaderOpts = {}): IChainReader {
+  const {
+    claimable = false,
+    yesBalance = BigInt(0),
+    previewDelta = BigInt(0),
+    fundingDebt = BigInt(0),
+    throwOn,
+  } = opts
+
+  return {
+    isClaimable: vi.fn(async () => {
+      if (throwOn === 'isClaimable') throw new Error('RPC down')
+      return claimable
+    }),
+    previewFunding: vi.fn(async () => {
+      if (throwOn === 'previewFunding') throw new Error('RPC down')
+      return previewDelta
+    }),
+    fundingDebt: vi.fn(async () => {
+      if (throwOn === 'fundingDebt') throw new Error('RPC down')
+      return fundingDebt
+    }),
+    yesBalanceOf: vi.fn(async () => {
+      if (throwOn === 'yesBalanceOf') throw new Error('RPC down')
+      return yesBalance
+    }),
+  }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('POST /order', () => {
@@ -178,6 +218,140 @@ describe('POST /order', () => {
 
     expect(res.statusCode).toBe(400)
     expect(res.json<{ error: string }>().error).toBe('Nonce already used')
+  })
+})
+
+describe('POST /order — v1b1 chain pre-filter', () => {
+  let app: ReturnType<typeof buildApp>
+  let store: MemoryOrderStore
+
+  beforeEach(() => {
+    store = new MemoryOrderStore()
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  it('rejects a bid (buy) order from a flagged/frozen maker', async () => {
+    const reader = mockChainReader({ claimable: true })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(MAKER, {}, BigInt(100))  // default: USDC in → bid
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json<{ error: string }>().error).toBe('PositionFrozen')
+  })
+
+  it('rejects an ask (sell) order from a flagged/frozen maker', async () => {
+    const reader = mockChainReader({ claimable: true })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(40) },
+      BigInt(101),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json<{ error: string }>().error).toBe('PositionFrozen')
+  })
+
+  it('rejects a YES sell whose minAmountOut is below the seller net funding debit', async () => {
+    // fundingDebt=50, previewDelta=-30 (i.e. yesOwed=30 net of noCredit) → D = 50 - (-30) = 80
+    const reader = mockChainReader({ fundingDebt: BigInt(50), previewDelta: BigInt(-30) })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(79) },
+      BigInt(102),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(400)
+    const body = res.json<{ error: string; minSellProceeds: string }>()
+    expect(body.error).toBe('FundingShortfall')
+    expect(body.minSellProceeds).toBe('80')
+  })
+
+  it('accepts a YES sell whose minAmountOut covers the net funding debit', async () => {
+    const reader = mockChainReader({ fundingDebt: BigInt(50), previewDelta: BigInt(-30) })  // D = 80
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(80) },
+      BigInt(103),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(201)
+  })
+
+  it('accepts a NO sell even with an outstanding funding debit (debit never blocks NO sales)', async () => {
+    const reader = mockChainReader({ fundingDebt: BigInt(999), previewDelta: BigInt(-999) })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_NO as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(1) },
+      BigInt(104),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(201)
+  })
+
+  it('never runs the funding pre-filter on a bid (buy) order', async () => {
+    const reader = mockChainReader({ fundingDebt: BigInt(999), previewDelta: BigInt(-999) })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(MAKER, {}, BigInt(105))  // default: USDC in → bid
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(201)
+    expect(reader.previewFunding).not.toHaveBeenCalled()
+    expect(reader.fundingDebt).not.toHaveBeenCalled()
+  })
+
+  it('fails open (accepts the order) when the chain reader throws', async () => {
+    const reader = mockChainReader({ throwOn: 'isClaimable' })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(MAKER, {}, BigInt(106))
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(201)
+  })
+
+  it('fails open (accepts the order) when previewFunding throws on a YES sell', async () => {
+    const reader = mockChainReader({ throwOn: 'previewFunding' })
+    app = buildApp(store, TEST_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(1) },
+      BigInt(107),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(201)
+  })
+
+  it('skips all pre-filter checks when no chain reader is provided (existing tests keep passing)', async () => {
+    app = buildApp(store, TEST_CONFIG)  // no chainReader arg
+
+    const wire = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(1) },
+      BigInt(108),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(201)
   })
 })
 
