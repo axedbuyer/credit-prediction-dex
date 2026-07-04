@@ -8,35 +8,7 @@ import { parseUnits, formatUnits } from 'viem'
 import { wagmiConfig } from '@/lib/wagmi'
 import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
 import { ORDER_BOOK_URL } from '@/lib/constants'
-
-// ── ABIs ────────────────────────────────────────────────────────────────────
-
-const CREDIT_MARKET_ABI = [
-  {
-    name: 'mint',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [{ name: 'usdcAmount', type: 'uint256' }],
-    outputs: [],
-  },
-] as const
-
-const ERC20_ABI = [
-  {
-    name: 'balanceOf',
-    type: 'function',
-    stateMutability: 'view',
-    inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    name: 'decimals',
-    type: 'function',
-    stateMutability: 'view',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint8' }],
-  },
-] as const
+import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
 
 // ── EIP-712 types ────────────────────────────────────────────────────────────
 
@@ -75,6 +47,20 @@ async function fetchOrderBook(marketId: string): Promise<OrderBookData> {
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
+}
+
+// tokenAmountWei: how many 6-decimal YES/NO tokens correspond to `usdcAmountWei` (6-dec)
+// at `limitPriceRaw` (price scaled to 1e6, i.e. limitPrice*1_000_000). Shared between the
+// live preview (min-sell-price guidance) and the actual order/mint submission so both
+// always agree on the same number.
+function computeTokenAmountWei(
+  side: Side,
+  usdcAmountWei: bigint,
+  limitPriceRaw: bigint,
+): bigint {
+  return side === 'YES'
+    ? usdcAmountWei * 1_000_000n / limitPriceRaw
+    : usdcAmountWei * 1_000_000n / (1_000_000n - limitPriceRaw)
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -141,6 +127,40 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     query: { enabled: !!address },
   })
 
+  // ── Freeze state (v1b1) — a flagged position locks mint/redeem/all CLOB trades ──
+  const { data: claimableData } = useReadContract({
+    address: contracts.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'claimable',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address },
+  })
+  const isFrozen = claimableData === true
+
+  // ── Carry-owed preview (SELL + YES only) ────────────────────────────────────
+  const wantsCarryPreview = direction === 'SELL' && side === 'YES' && !isFrozen
+
+  const { data: previewDelta } = useReadContract({
+    address: contracts.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'previewFunding',
+    args: address ? [address, yesBalance ?? 0n, true] : undefined,
+    query: { enabled: !!address && wantsCarryPreview },
+  })
+
+  const { data: fundingDebtData } = useReadContract({
+    address: contracts.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'fundingDebt',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address && wantsCarryPreview },
+  })
+
+  const carryOwed =
+    wantsCarryPreview && previewDelta !== undefined && fundingDebtData !== undefined
+      ? netFundingDebit(previewDelta, fundingDebtData)
+      : 0n
+
   // ── Wagmi write / sign ─────────────────────────────────────────────────────
   const { writeContractAsync } = useWriteContract()
   const { signTypedDataAsync } = useSignTypedData()
@@ -165,9 +185,50 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       ? yesBalance != null ? Number(formatUnits(yesBalance, 6)) : null
       : noBalance  != null ? Number(formatUnits(noBalance,  6)) : null
 
+  // Minimum USDC proceeds this order must clear to cover carry owed (Option B safeguard
+  // mirrors CLOBSettlement: proceeds for the WHOLE trade, not per-token, must be >= carry
+  // owed — the debit is netted over the seller's full balance regardless of trade size).
+  let usdcAmountWeiPreview: bigint | null = null
+  let tokenAmountWeiPreview: bigint | null = null
+  if (isValidAmount) {
+    try {
+      usdcAmountWeiPreview = parseUnits(usdcAmt.toString(), 6)
+      const limitPriceRawPreview = BigInt(Math.round(limitPrice * 1_000_000))
+      tokenAmountWeiPreview = computeTokenAmountWei(side, usdcAmountWeiPreview, limitPriceRawPreview)
+    } catch {
+      usdcAmountWeiPreview = null
+      tokenAmountWeiPreview = null
+    }
+  }
+
+  const carryShortfall =
+    wantsCarryPreview &&
+    carryOwed > 0n &&
+    usdcAmountWeiPreview !== null &&
+    usdcAmountWeiPreview < carryOwed
+
+  // Minimum sell price (as annual-probability %) needed for THIS order's token quantity
+  // to clear carry owed: price = carryOwed / tokenAmountSold.
+  const minSellPricePct =
+    wantsCarryPreview && carryOwed > 0n && tokenAmountWeiPreview && tokenAmountWeiPreview > 0n
+      ? (Number(carryOwed) / Number(tokenAmountWeiPreview)) * 100
+      : null
+
+  const carryOwedDisplay = wantsCarryPreview && carryOwed > 0n
+    ? `$${parseFloat(formatUnits(carryOwed, 6)).toFixed(2)}`
+    : null
+
+  const sellProceedsAfterCarry =
+    wantsCarryPreview && carryOwed > 0n && usdcAmountWeiPreview !== null
+      ? formatUnits(
+          usdcAmountWeiPreview > carryOwed ? usdcAmountWeiPreview - carryOwed : 0n,
+          6,
+        )
+      : null
+
   // ── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
-    if (!address || !isValidAmount) return
+    if (!address || !isValidAmount || isFrozen || carryShortfall) return
     setStatus('idle')
     setErrorMsg('')
     setSuccessOrderId('')
@@ -175,9 +236,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     try {
       const usdcAmountWei = parseUnits(usdcAmt.toString(), 6)
       const limitPriceRaw = BigInt(Math.round(limitPrice * 1_000_000))
-      const tokenAmountWei = side === 'YES'
-        ? usdcAmountWei * 10n ** 18n / limitPriceRaw
-        : usdcAmountWei * 10n ** 18n / (1_000_000n - limitPriceRaw)
+      const tokenAmountWei = computeTokenAmountWei(side, usdcAmountWei, limitPriceRaw)
 
       // Mint-first for SELL: need token balance
       if (direction === 'SELL') {
@@ -186,8 +245,8 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
           const shortfall = tokenAmountWei - balanceWei
           // Calculate USDC needed to mint enough tokens
           const mintUsdc = side === 'YES'
-            ? shortfall * limitPriceRaw / 10n ** 18n + 1n
-            : shortfall * (1_000_000n - limitPriceRaw) / 10n ** 18n + 1n
+            ? shortfall * limitPriceRaw / 1_000_000n + 1n
+            : shortfall * (1_000_000n - limitPriceRaw) / 1_000_000n + 1n
 
           setStatus('minting')
           const hash = await writeContractAsync({
@@ -256,7 +315,27 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       })
 
       if (!res.ok) {
-        const err = await res.text()
+        // The order-book server pre-filters deterministic on-chain reverts and
+        // returns a structured error — map both to the same friendly copy the
+        // client-side gating above already shows.
+        let body: { error?: string; minSellProceeds?: string } | null = null
+        try {
+          body = await res.clone().json()
+        } catch {
+          body = null
+        }
+        if (body?.error === 'FundingShortfall') {
+          const min = body.minSellProceeds ? formatUnits(BigInt(body.minSellProceeds), 6) : null
+          throw new Error(
+            min
+              ? `Carry owed exceeds this order's proceeds — minimum proceeds to cover it: $${parseFloat(min).toFixed(2)}`
+              : "Carry owed exceeds this order's proceeds — increase the price or amount",
+          )
+        }
+        if (body?.error && /position frozen/i.test(body.error)) {
+          throw new Error('Your position is frozen pending liquidation. Cure it from your Portfolio or wait for a claim.')
+        }
+        const err = body?.error ?? (await res.text().catch(() => ''))
         throw new Error(err || `Server ${res.status}`)
       }
 
@@ -271,7 +350,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       setErrorMsg(msg.includes('User rejected') || msg.includes('4001') ? 'Signature rejected' : msg)
     }
   }, [
-    address, isValidAmount, usdcAmt, limitPrice, side, direction,
+    address, isValidAmount, isFrozen, carryShortfall, usdcAmt, limitPrice, side, direction,
     yesBalance, noBalance, contracts, marketId,
     writeContractAsync, signTypedDataAsync,
   ])
@@ -281,12 +360,22 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
 
   const buttonLabel =
     !isConnected             ? 'Connect wallet to trade'
+    : isFrozen               ? 'Position frozen'
     : busy                   ? statusLabel(status)
+    : carryShortfall         ? 'Increase price or amount to cover carry'
     : `Place ${direction} ${side} order`
 
   return (
     <div className="flex flex-col gap-4">
       <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">Place Order</h2>
+
+      {/* Frozen banner — flagged positions are fully locked (mint, redeem, any CLOB trade) */}
+      {isFrozen && (
+        <div className="rounded-lg border border-red-700/60 bg-red-950/60 px-3 py-2.5 text-xs text-red-300">
+          Your position is frozen pending liquidation. Cure it from your Portfolio or wait
+          for a claim.
+        </div>
+      )}
 
       {/* Side toggle */}
       <div className="flex rounded-lg overflow-hidden border border-slate-700 text-sm font-medium">
@@ -388,14 +477,25 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
             {tokenBalance === 0 && ' — will mint first'}
           </p>
         )}
+        {carryOwedDisplay && (
+          <p className={carryShortfall ? 'text-red-400' : undefined}>
+            Carry owed: {carryOwedDisplay}
+            {minSellPricePct !== null && (
+              <> — minimum sell price to cover it: {minSellPricePct.toFixed(1)}%</>
+            )}
+          </p>
+        )}
+        {sellProceedsAfterCarry !== null && !carryShortfall && (
+          <p>You receive ≈ ${parseFloat(sellProceedsAfterCarry).toFixed(2)}</p>
+        )}
       </div>
 
       {/* Submit button */}
       <button
         onClick={handleSubmit}
-        disabled={!isConnected || !isValidAmount || busy}
+        disabled={!isConnected || !isValidAmount || busy || isFrozen || carryShortfall}
         className={`w-full rounded-lg py-2.5 text-sm font-semibold transition-colors ${
-          !isConnected || !isValidAmount || busy
+          !isConnected || !isValidAmount || busy || isFrozen || carryShortfall
             ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
             : side === 'YES'
             ? 'bg-emerald-600 hover:bg-emerald-500 text-white'

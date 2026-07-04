@@ -1,12 +1,13 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { useAccount, useReadContracts, useWriteContract, useChainId } from 'wagmi'
+import { useAccount, useReadContract, useReadContracts, useWriteContract, useChainId } from 'wagmi'
 import { waitForTransactionReceipt } from '@wagmi/core'
 import { formatUnits } from 'viem'
 import Link from 'next/link'
 import { wagmiConfig } from '@/lib/wagmi'
 import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
 import { TradePanel } from '@/components/TradePanel'
 import { MSTR_MARKET } from '@/lib/constants'
 import {
@@ -15,58 +16,9 @@ import {
   DEV_YES_AMBER,
   DEV_YES_RED,
   DEV_YES_SEIZABLE,
+  DEV_YES_FROZEN,
   DEV_NO_HEALTHY,
 } from '@/components/PositionCard'
-
-// ── ABIs ─────────────────────────────────────────────────────────────────────
-
-const ERC20_ABI = [
-  {
-    name: 'balanceOf',
-    type: 'function',
-    stateMutability: 'view',
-    inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-] as const
-
-const CREDIT_MARKET_ABI = [
-  {
-    name: 'currentMark',
-    type: 'function',
-    stateMutability: 'view',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    name: 'creditEventConfirmed',
-    type: 'function',
-    stateMutability: 'view',
-    inputs: [],
-    outputs: [{ name: '', type: 'bool' }],
-  },
-  {
-    name: 'fundingDebt',
-    type: 'function',
-    stateMutability: 'view',
-    inputs: [{ name: 'user', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    name: 'redeem',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [{ name: 'tokenAmount', type: 'uint256' }],
-    outputs: [],
-  },
-  {
-    name: 'settleYES',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [{ name: 'amount', type: 'uint256' }],
-    outputs: [],
-  },
-] as const
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -134,6 +86,12 @@ export default function PortfolioPage() {
         abi: CREDIT_MARKET_ABI,
         functionName: 'creditEventConfirmed',
       },
+      {
+        address: addrs.creditMarket,
+        abi: CREDIT_MARKET_ABI,
+        functionName: 'claimable',
+        args: [userAddr],
+      },
     ],
     query: { enabled: !!address },
   })
@@ -143,6 +101,18 @@ export default function PortfolioPage() {
   const fundingDebt     = data?.[2]?.result as bigint | undefined
   const currentMark     = data?.[3]?.result as bigint | undefined
   const creditConfirmed = data?.[4]?.result as boolean | undefined
+  const isClaimable     = data?.[5]?.result as boolean | undefined
+
+  // Live net carry (unflagged only — previewFunding is NOT freeze-aware): nets the
+  // YES-side owed carry against the persistent fundingDebt ledger, same math as
+  // CLOBSettlement's Option B check. Positive = carry earned (credit), negative = owed.
+  const { data: previewDelta } = useReadContract({
+    address: addrs.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'previewFunding',
+    args: [userAddr, yesBalance ?? 0n, true],
+    query: { enabled: !!address && isClaimable === false && yesBalance !== undefined },
+  })
 
   // ── Derived values ─────────────────────────────────────────────────────────
   const mark    = currentMark ?? 0n
@@ -161,6 +131,18 @@ export default function PortfolioPage() {
 
   const yesNetValue = yesValue > debtRaw ? yesValue - debtRaw : 0n
   const noNetValue  = noValue // NO holders don't owe funding in this contract
+
+  // Signed net carry: positive = "Carry earned", negative = "Carry owed".
+  const carryNet =
+    isClaimable === false && previewDelta !== undefined
+      ? (previewDelta as bigint) - debtRaw
+      : undefined
+  // netFundingDebit clamps to the owed side only (0 when there's a net credit instead) —
+  // used for the "Carry owed" case; carryNet's sign covers the "Carry earned" case.
+  const carryOwed =
+    isClaimable === false && previewDelta !== undefined
+      ? netFundingDebit(previewDelta as bigint, debtRaw)
+      : 0n
 
   const redeemable    = yesRaw < noRaw ? yesRaw : noRaw   // min(YES, NO)
   const redeemableNet = redeemable > debtRaw ? redeemable - debtRaw : 0n
@@ -238,6 +220,11 @@ export default function PortfolioPage() {
               userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
               yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
               onSell={() => {}} />
+            <PositionCard side="YES" _dev={DEV_YES_FROZEN}
+              userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+              yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+              usdcAddress={ZERO_ADDR}
+              onSell={() => {}} />
             <PositionCard side="NO" _dev={DEV_NO_HEALTHY}
               userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
               yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
@@ -293,10 +280,12 @@ export default function PortfolioPage() {
               creditMarketAddress={addrs.creditMarket}
               yesTokenAddress={addrs.yesToken}
               noTokenAddress={addrs.noToken}
+              usdcAddress={addrs.usdc}
               creditEventConfirmed={creditConfirmed ?? false}
               onSell={() => setTradeModal('YES')}
               onSettle={handleSettleYES}
               settleStatus={settleStatus}
+              onCured={refetch}
             />
           )}
 
@@ -307,8 +296,32 @@ export default function PortfolioPage() {
               creditMarketAddress={addrs.creditMarket}
               yesTokenAddress={addrs.yesToken}
               noTokenAddress={addrs.noToken}
+              usdcAddress={addrs.usdc}
               onSell={() => setTradeModal('NO')}
             />
+          )}
+
+          {/* Position value summary — net of carry */}
+          {(hasYES || hasNO) && (
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-5">
+              {hasYES && (
+                <Stat
+                  label="YES value (net of carry)"
+                  value={usdcDisplay(yesNetValue)}
+                />
+              )}
+              {hasNO && (
+                <Stat label="NO value" value={usdcDisplay(noNetValue)} />
+              )}
+              {hasYES && carryNet !== undefined && (
+                <Stat
+                  label="Carry"
+                  value={carryNet >= 0n ? `Earned ${usdcDisplay(carryNet)}` : `Owed ${usdcDisplay(carryOwed)}`}
+                  highlight={carryNet >= 0n}
+                  warn={carryNet < 0n}
+                />
+              )}
+            </div>
           )}
 
           {/* Redeem section */}
@@ -320,14 +333,20 @@ export default function PortfolioPage() {
                 {usdcDisplay(redeemable)} USDC
               </p>
               <div className="mb-4 flex items-center justify-between text-sm">
-                <span className="text-slate-400">You receive (net of funding owed)</span>
+                <span className="text-slate-400">You receive (net of carry owed)</span>
                 <span className="font-semibold text-slate-100">
                   {usdcDisplay(redeemableNet)}
                 </span>
               </div>
+              {isClaimable && (
+                <p className="mb-3 text-xs text-red-400">
+                  Redeem is disabled while your position is frozen — cure it above first.
+                </p>
+              )}
               <button
                 onClick={handleRedeem}
-                disabled={redeemStatus === 'pending' || redeemable === 0n}
+                disabled={redeemStatus === 'pending' || redeemable === 0n || !!isClaimable}
+                title={isClaimable ? 'Redeem is disabled while frozen — cure first' : undefined}
                 className="w-full rounded-lg bg-slate-600 py-2.5 text-sm font-semibold text-slate-100 hover:bg-slate-500 disabled:opacity-50 transition-colors"
               >
                 {redeemStatus === 'pending'
@@ -368,6 +387,11 @@ export default function PortfolioPage() {
           <PositionCard side="YES" _dev={DEV_YES_SEIZABLE}
             userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
             yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            onSell={() => {}} />
+          <PositionCard side="YES" _dev={DEV_YES_FROZEN}
+            userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
+            yesTokenAddress={ZERO_ADDR} noTokenAddress={ZERO_ADDR}
+            usdcAddress={ZERO_ADDR}
             onSell={() => {}} />
           <PositionCard side="NO" _dev={DEV_NO_HEALTHY}
             userAddress={ZERO_ADDR} creditMarketAddress={ZERO_ADDR}
