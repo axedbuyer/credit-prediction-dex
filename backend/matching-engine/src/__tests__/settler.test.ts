@@ -1,24 +1,47 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'events'
-import { Settler, NonceQueue, RedisOrderRemover } from '../settler'
+import { ContractFunctionRevertedError, encodeErrorResult } from 'viem'
+import { Settler, NonceQueue, RedisOrderRemover, CLOB_SETTLEMENT_ABI } from '../settler'
 import type { IPublicClient, IWalletClient, OrderRemover, SettlerConfig } from '../settler'
 import type { MatchingEngine } from '../engine'
 import type { StoredOrder } from '../types'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-const CLOB_ADDRESS = '0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9' as const
-const SETTLER_ADDR  = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const TX_HASH       = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' as const
+const CLOB_ADDRESS         = '0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9' as const
+const CREDIT_MARKET_ADDR   = '0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0' as const
+const USDC_ADDRESS         = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const
+const SETTLER_ADDR         = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
+const TX_HASH              = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' as const
 
-const CONFIG: SettlerConfig = { clobSettlementAddress: CLOB_ADDRESS }
+const CONFIG: SettlerConfig = {
+  clobSettlementAddress: CLOB_ADDRESS,
+  creditMarketAddress:   CREDIT_MARKET_ADDR,
+  usdcAddress:           USDC_ADDRESS,
+}
 
-function makeOrder(id: string, side: 'bid' | 'ask' = 'ask'): StoredOrder {
+// A real ContractFunctionRevertedError, decoded from actual ABI-encoded revert
+// data — exercises the same decode path (`err.walk` / `.data.errorName`) that
+// real viem estimateContractGas failures produce, rather than a hand-rolled stub.
+function makeRevertError(errorName: 'FundingShortfall' | 'PositionFrozen') {
+  const data = encodeErrorResult({ abi: CLOB_SETTLEMENT_ABI, errorName, args: [] })
+  return new ContractFunctionRevertedError({
+    abi: CLOB_SETTLEMENT_ABI,
+    data,
+    functionName: 'verifyAndSettle',
+  })
+}
+
+function makeOrder(
+  id: string,
+  side: 'bid' | 'ask' = 'ask',
+  overrides: Partial<Pick<StoredOrder, 'maker' | 'tokenIn' | 'tokenOut'>> = {},
+): StoredOrder {
   return {
     id,
-    maker:        '0xmaker',
-    tokenIn:      '0x0000000000000000000000000000000000000001',
-    tokenOut:     '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    maker:        overrides.maker    ?? '0xmaker',
+    tokenIn:      overrides.tokenIn  ?? '0x0000000000000000000000000000000000000001',
+    tokenOut:     overrides.tokenOut ?? '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
     amountIn:     '1000000000000000000',
     minAmountOut: '230000',
     expiry:       String(Math.floor(Date.now() / 1000) + 3600),
@@ -45,6 +68,7 @@ function makeMocks(overrides: {
   estimateContractGas?: () => Promise<bigint>
   writeContract?: () => Promise<string>
   waitForTransactionReceipt?: () => Promise<{ status: 'success' | 'reverted' }>
+  readContract?: (args: { functionName: string; args: readonly unknown[] }) => Promise<unknown>
 } = {}) {
   const publicClient: IPublicClient = {
     estimateContractGas: vi.fn().mockImplementation(
@@ -53,6 +77,9 @@ function makeMocks(overrides: {
     waitForTransactionReceipt: vi.fn().mockImplementation(
       overrides.waitForTransactionReceipt ??
         (() => Promise.resolve({ status: 'success' as const })),
+    ),
+    readContract: vi.fn().mockImplementation(
+      overrides.readContract ?? (() => Promise.resolve(false)),
     ),
   }
   const walletClient: IWalletClient = {
@@ -96,11 +123,15 @@ describe('Settler — successful settlement', () => {
       .mock.results[0].value as bigint
     expect(callArgs.gas).toBe((estimated * 120n) / 100n)
 
-    // args[0] = makerOrder (the ask), args[1] = takerOrder (the bid)
-    const [makerArg, takerArg] = callArgs.args
+    // args = [makerOrder, makerSig, takerOrder, takerSig]
+    const [makerArg, makerSig, takerArg, takerSig] = callArgs.args
     expect(makerArg.maker).toBe(maker.maker)
     expect(takerArg.maker).toBe(taker.maker)
     expect(makerArg.amountIn).toBe(BigInt(maker.amountIn))
+    expect(makerArg.signature).toBeUndefined()
+    expect(takerArg.signature).toBeUndefined()
+    expect(makerSig).toBe(maker.signature)
+    expect(takerSig).toBe(taker.signature)
 
     // Both orders removed from the store
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask1', 'ask')
@@ -158,6 +189,93 @@ describe('Settler — failed transaction', () => {
     engine.emit('matched', makeOrder('ask-gas', 'ask'), makeOrder('bid-gas', 'bid'))
 
     // withRetry retries 3× with exponential backoff; use generous wait
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+  }, 10_000)
+})
+
+// ─── Settler: deterministic-revert handling (v1b1) ───────────────────────────
+
+describe('Settler — deterministic revert handling', () => {
+  const MAKER_A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
+  const MAKER_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const
+
+  it('FundingShortfall: removes only the seller-side order, keeps the buyer order, submits no tx', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('FundingShortfall')),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    // Seller leg: tokenIn = YES/NO (not USDC). Buyer leg: tokenIn = USDC.
+    const sellerOrder = makeOrder('ask-fs', 'ask', { maker: MAKER_A })
+    const buyerOrder  = makeOrder('bid-fs', 'bid', {
+      maker:    MAKER_B,
+      tokenIn:  USDC_ADDRESS,
+      tokenOut: '0x0000000000000000000000000000000000000001',
+    })
+    engine.emit('matched', sellerOrder, buyerOrder)
+
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-fs', 'ask')
+  }, 10_000)
+
+  it('PositionFrozen: claimable(makerA)=true, claimable(makerB)=false → only makerA order removed', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('PositionFrozen')),
+      readContract: ({ args }) => {
+        const [user] = args as [string]
+        return Promise.resolve(user === MAKER_A)
+      },
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    const orderA = makeOrder('ask-pf', 'ask', { maker: MAKER_A })
+    const orderB = makeOrder('bid-pf', 'bid', { maker: MAKER_B })
+    engine.emit('matched', orderA, orderB)
+
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf', 'ask')
+  }, 10_000)
+
+  it('PositionFrozen: claimable() read throws → both orders removed', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('PositionFrozen')),
+      readContract: () => Promise.reject(new Error('RPC down')),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    const orderA = makeOrder('ask-pf-err', 'ask', { maker: MAKER_A })
+    const orderB = makeOrder('bid-pf-err', 'bid', { maker: MAKER_B })
+    engine.emit('matched', orderA, orderB)
+
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf-err', 'ask')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-pf-err', 'bid')
+  }, 10_000)
+
+  it('generic RPC error (not a deterministic revert) → nothing removed', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(new Error('execution reverted: out of gas')),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-generic', 'ask'), makeOrder('bid-generic', 'bid'))
+
     await sleep(3000)
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()

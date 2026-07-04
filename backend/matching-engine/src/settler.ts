@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import path from 'path'
 import fs from 'fs'
-import { createPublicClient, createWalletClient, http } from 'viem'
+import { createPublicClient, createWalletClient, http, BaseError, ContractFunctionRevertedError } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
 import type { Address, Hash } from 'viem'
@@ -18,7 +18,6 @@ const ORDER_COMPONENTS = [
   { name: 'minAmountOut', type: 'uint256' },
   { name: 'expiry',       type: 'uint256' },
   { name: 'nonce',        type: 'uint256' },
-  { name: 'signature',    type: 'bytes'   },
 ] as const
 
 export const CLOB_SETTLEMENT_ABI = [
@@ -28,9 +27,37 @@ export const CLOB_SETTLEMENT_ABI = [
     stateMutability: 'nonpayable' as const,
     inputs: [
       { name: 'makerOrder', type: 'tuple', components: ORDER_COMPONENTS },
+      { name: 'makerSig',   type: 'bytes' },
       { name: 'takerOrder', type: 'tuple', components: ORDER_COMPONENTS },
+      { name: 'takerSig',   type: 'bytes' },
     ],
     outputs: [],
+  },
+  // v1b1: deterministic reverts — including these lets viem decode the
+  // revert data into a named error (ContractFunctionRevertedError.data.errorName)
+  // instead of an opaque "execution reverted". Both are terminal on retry:
+  // the seller's funding debit / the flagged freeze won't clear itself.
+  {
+    name: 'FundingShortfall',
+    type: 'error' as const,
+    inputs: [],
+  },
+  {
+    name: 'PositionFrozen',
+    type: 'error' as const,
+    inputs: [],
+  },
+] as const
+
+// ─── CreditMarket ABI (minimal — claimable() read only) ──────────────────────
+
+export const CREDIT_MARKET_ABI = [
+  {
+    name: 'claimable',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{ name: 'user', type: 'address' }],
+    outputs: [{ name: '', type: 'bool' }],
   },
 ] as const
 
@@ -47,6 +74,12 @@ export interface IPublicClient {
   waitForTransactionReceipt(args: {
     hash: Hash
   }): Promise<{ status: 'success' | 'reverted' }>
+  readContract(args: {
+    address: Address
+    abi: readonly unknown[]
+    functionName: string
+    args: readonly unknown[]
+  }): Promise<unknown>
 }
 
 export interface IWalletClient {
@@ -64,6 +97,10 @@ export interface IWalletClient {
 
 export interface SettlerConfig {
   clobSettlementAddress: Address
+  creditMarketAddress: Address
+  // Used to identify the seller-side order in a matched pair (the leg whose
+  // tokenIn is YES/NO, not USDC) when a FundingShortfall revert needs pruning.
+  usdcAddress: Address
 }
 
 export interface OrderRemover {
@@ -133,6 +170,8 @@ class Settler extends EventEmitter {
   private async settle(maker: StoredOrder, taker: StoredOrder): Promise<void> {
     const makerArg = toContractOrder(maker)
     const takerArg = toContractOrder(taker)
+    const makerSig = maker.signature as `0x${string}`
+    const takerSig = taker.signature as `0x${string}`
     const account  = this.walletClient.account?.address
     if (!account) throw new Error('wallet client has no account')
 
@@ -144,12 +183,26 @@ class Settler extends EventEmitter {
           address:      this.config.clobSettlementAddress,
           abi:          CLOB_SETTLEMENT_ABI,
           functionName: 'verifyAndSettle',
-          args:         [makerArg, takerArg],
+          args:         [makerArg, makerSig, takerArg, takerSig],
           account,
         }),
       )
     } catch (err) {
       console.error(`[settler] gas estimation failed maker=${maker.id} taker=${taker.id}:`, err)
+
+      // FundingShortfall / PositionFrozen are deterministic — retrying the same
+      // pair will revert identically forever, wedging this price level. Prune
+      // the offending order(s) instead of leaving them to be re-matched.
+      const revertName = decodeSettlementError(err)
+      if (revertName === 'FundingShortfall') {
+        await this.handleFundingShortfall(maker, taker)
+        return
+      }
+      if (revertName === 'PositionFrozen') {
+        await this.handlePositionFrozen(maker, taker)
+        return
+      }
+
       return  // orders stay in book; matching engine will skip them (pendingSettlement)
     }
 
@@ -162,7 +215,7 @@ class Settler extends EventEmitter {
         address:      this.config.clobSettlementAddress,
         abi:          CLOB_SETTLEMENT_ABI,
         functionName: 'verifyAndSettle',
-        args:         [makerArg, takerArg],
+        args:         [makerArg, makerSig, takerArg, takerSig],
         gas,
       })
     } catch (err) {
@@ -184,7 +237,14 @@ class Settler extends EventEmitter {
     }
 
     if (receipt.status !== 'success') {
-      // On-chain revert: do NOT remove orders — let next match cycle decide
+      // On-chain revert: do NOT remove orders — let next match cycle decide.
+      // Unlike the gas-estimation failure above, the receipt alone carries no
+      // revert reason (viem's waitForTransactionReceipt doesn't decode it), and
+      // re-simulating here would race a since-changed chain state (e.g. a nonce
+      // already consumed by this same reverted tx would surface as NonceUsed
+      // instead of the original cause). Left as today's behavior — orders are
+      // re-matched next cycle, at which point a deterministic revert will
+      // re-surface at the gas-estimation step above and be pruned there.
       console.error(`[settler] tx reverted ${txHash} maker=${maker.id} taker=${taker.id}`)
       return
     }
@@ -198,9 +258,119 @@ class Settler extends EventEmitter {
     console.log(`[settler] settled ${txHash}`)
     this.emit('settled', txHash)
   }
+
+  // ── FundingShortfall: the seller-side order can never clear at this price —
+  // prune only that leg; the other party's order is untouched and can still match.
+  private async handleFundingShortfall(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+    const sellerOrder = identifySellerOrder(maker, taker, this.config.usdcAddress)
+    if (!sellerOrder) {
+      // Neither leg's tokenIn is USDC — shouldn't happen for a valid matched
+      // pair, but fail safe rather than guess: leave both orders untouched.
+      console.error(
+        `[settler] FundingShortfall but could not identify seller-side order ` +
+        `maker=${maker.id} taker=${taker.id}`,
+      )
+      return
+    }
+    console.error(
+      `[settler] FundingShortfall — removing seller order ${sellerOrder.id} ` +
+      `(maker=${maker.id} taker=${taker.id})`,
+    )
+    await this.orderRemover.removeOrder(sellerOrder.id, sellerOrder.side)
+  }
+
+  // ── PositionFrozen: one (or both) makers are flagged claimable — prune the
+  // flagged party's order(s). If we can't determine who's flagged, remove both:
+  // makers can always resubmit, so over-pruning here is safe.
+  private async handlePositionFrozen(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+    let makerFlagged: boolean
+    let takerFlagged: boolean
+    try {
+      ;[makerFlagged, takerFlagged] = await Promise.all([
+        this.readClaimable(maker.maker as Address),
+        this.readClaimable(taker.maker as Address),
+      ])
+    } catch (err) {
+      console.error(
+        `[settler] PositionFrozen — claimable() read failed, removing both orders ` +
+        `maker=${maker.id} taker=${taker.id}:`, err,
+      )
+      await this.removeBoth(maker, taker)
+      return
+    }
+
+    if (!makerFlagged && !takerFlagged) {
+      // Read succeeded but neither reports flagged (e.g. cured between the
+      // revert and this check) — fall back to removing both.
+      console.error(
+        `[settler] PositionFrozen but claimable() reports neither party flagged — ` +
+        `removing both maker=${maker.id} taker=${taker.id}`,
+      )
+      await this.removeBoth(maker, taker)
+      return
+    }
+
+    console.error(
+      `[settler] PositionFrozen — maker=${maker.id}(flagged=${makerFlagged}) ` +
+      `taker=${taker.id}(flagged=${takerFlagged})`,
+    )
+    const removals: Array<Promise<void>> = []
+    if (makerFlagged) removals.push(this.orderRemover.removeOrder(maker.id, maker.side))
+    if (takerFlagged) removals.push(this.orderRemover.removeOrder(taker.id, taker.side))
+    await Promise.all(removals)
+  }
+
+  private async readClaimable(user: Address): Promise<boolean> {
+    return this.publicClient.readContract({
+      address:      this.config.creditMarketAddress,
+      abi:          CREDIT_MARKET_ABI,
+      functionName: 'claimable',
+      args:         [user],
+    }) as Promise<boolean>
+  }
+
+  private async removeBoth(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+    await Promise.all([
+      this.orderRemover.removeOrder(maker.id, maker.side),
+      this.orderRemover.removeOrder(taker.id, taker.side),
+    ])
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+type DeterministicRevert = 'FundingShortfall' | 'PositionFrozen'
+
+// Decodes a deterministic, non-retryable custom-error revert out of a thrown
+// estimateContractGas error. viem wraps on-chain reverts in a BaseError chain;
+// once the ABI passed to the call includes the error definition (see
+// CLOB_SETTLEMENT_ABI above), ContractFunctionRevertedError.data.errorName
+// carries the decoded name. Anything else (RPC timeout, network error, an
+// as-yet-unhandled revert reason) yields undefined and the caller falls back
+// to today's leave-orders-in-book behavior.
+function decodeSettlementError(err: unknown): DeterministicRevert | undefined {
+  if (!(err instanceof BaseError)) return undefined
+  const revertError = err.walk(
+    e => e instanceof ContractFunctionRevertedError,
+  ) as ContractFunctionRevertedError | null
+  const errorName = revertError?.data?.errorName
+  if (errorName === 'FundingShortfall' || errorName === 'PositionFrozen') return errorName
+  return undefined
+}
+
+// The seller-side order is whichever leg sends YES/NO tokens in for USDC
+// (tokenIn != USDC). Returns undefined if neither leg matches (shouldn't
+// happen for a valid matched pair).
+function identifySellerOrder(
+  maker: StoredOrder,
+  taker: StoredOrder,
+  usdcAddress: Address,
+): StoredOrder | undefined {
+  const usdc = usdcAddress.toLowerCase()
+  if (maker.tokenIn.toLowerCase() !== usdc) return maker
+  if (taker.tokenIn.toLowerCase() !== usdc) return taker
+  return undefined
+}
 
 function toContractOrder(order: StoredOrder) {
   return {
@@ -211,7 +381,6 @@ function toContractOrder(order: StoredOrder) {
     minAmountOut: BigInt(order.minAmountOut),
     expiry:       BigInt(order.expiry),
     nonce:        BigInt(order.nonce),
-    signature:    order.signature    as `0x${string}`,
   } as const
 }
 
@@ -270,6 +439,8 @@ export function createSettler(engine: MatchingEngine): Settler {
   )
   const deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8')) as {
     clobSettlement: string
+    creditMarket: string
+    usdc: string
   }
 
   const account = privateKeyToAccount(privateKey as `0x${string}`)
@@ -286,7 +457,11 @@ export function createSettler(engine: MatchingEngine): Settler {
 
   return new Settler(
     engine,
-    { clobSettlementAddress: deployments.clobSettlement as Address },
+    {
+      clobSettlementAddress: deployments.clobSettlement as Address,
+      creditMarketAddress:   deployments.creditMarket   as Address,
+      usdcAddress:           deployments.usdc            as Address,
+    },
     publicClient as IPublicClient,
     walletClient as unknown as IWalletClient,
     new RedisOrderRemover(redis),
