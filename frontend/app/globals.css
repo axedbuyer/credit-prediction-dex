@@ -5,9 +5,34 @@
 @layer base {
   :root {
     color-scheme: dark;
+
+    --font-serif: var(--font-eb-garamond), Georgia, serif;
+    --font-sans: var(--font-barlow), system-ui, -apple-system, sans-serif;
   }
 
   body {
-    @apply bg-slate-950 text-slate-100 antialiased;
+    background: var(--color-bg);
+    color: var(--color-text-1);
+    font-family: var(--font-sans);
   }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes pari-logo-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.pari-logo-dot {
+  animation: pari-logo-blink 2.4s ease-in-out infinite;
 }

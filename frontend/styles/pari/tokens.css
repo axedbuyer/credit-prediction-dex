@@ -1,0 +1,207 @@
+/**
+ * Pari Design Tokens
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Import this file ONCE at the root of your app (e.g. main.css, globals.css).
+ * All tokens are CSS custom properties consumed by components.css and your
+ * own code.  Switch themes by setting data-theme="light" on <html>.
+ *
+ * Usage:
+ *   color: var(--color-text-1);
+ *   background: var(--color-bg);
+ *   font-family: var(--font-serif);
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DARK MODE (default)
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root,
+[data-theme="dark"] {
+
+  /* ── Backgrounds ──────────────────────────────────────────────────────── */
+  --color-bg:          #0C0D12;   /* page background              */
+  --color-surface-1:   #13141D;   /* cards, panels                */
+  --color-surface-2:   #1A1C26;   /* inputs, nested elements      */
+  --color-surface-3:   #20222E;   /* hover states, selected rows  */
+  --color-dim:         #3A3F56;   /* disabled, dividers           */
+
+  /* ── Text ─────────────────────────────────────────────────────────────── */
+  --color-text-1:      #EDF1F7;   /* primary text                 */
+  --color-text-2:      #B0B8CC;   /* secondary text               */
+  --color-text-muted:  #7A8499;   /* placeholder, captions        */
+  --color-text-dim:    #3A3F56;   /* disabled text                */
+
+  /* ── Brand Teal ───────────────────────────────────────────────────────── */
+  --color-teal-050:    #C0F5F2;
+  --color-teal-100:    #8EECEA;
+  --color-teal-200:    #5CDDD5;
+  --color-teal-300:    #2CCEC4;
+  --color-teal-400:    #00C4B4;   /* ★ primary brand color        */
+  --color-teal-500:    #009990;   /* light-mode primary           */
+  --color-teal-600:    #006B65;
+  --color-teal:        var(--color-teal-400);
+
+  /* ── Teal alpha utilities ─────────────────────────────────────────────── */
+  --color-teal-a10:    rgba(0, 196, 180, 0.10);
+  --color-teal-a16:    rgba(0, 196, 180, 0.16);
+  --color-teal-a22:    rgba(0, 196, 180, 0.22);
+  --color-teal-a32:    rgba(0, 196, 180, 0.32);
+
+  /* ── Semantic ─────────────────────────────────────────────────────────── */
+  --color-success:     #22C55E;
+  --color-warning:     #D4A84C;
+  --color-danger:      #D95B5B;
+  --color-danger-a10:  rgba(217, 91, 91, 0.10);
+  --color-danger-a28:  rgba(217, 91, 91, 0.28);
+
+  /* ── Borders ──────────────────────────────────────────────────────────── */
+  --border-subtle:     rgba(255, 255, 255, 0.06);  /* hairline dividers    */
+  --border-brand:      rgba(0, 196, 180, 0.16);    /* card/input borders   */
+  --border-brand-em:   rgba(0, 196, 180, 0.32);    /* emphasis borders     */
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LIGHT MODE
+   Activate with: <html data-theme="light">
+   ═══════════════════════════════════════════════════════════════════════════ */
+[data-theme="light"] {
+
+  --color-bg:          #F4F6FA;
+  --color-surface-1:   #FFFFFF;
+  --color-surface-2:   #ECEEF5;
+  --color-surface-3:   #E0E3EE;
+  --color-dim:         #C0C6D6;
+
+  --color-text-1:      #0D0F1A;
+  --color-text-2:      #3A3F56;
+  --color-text-muted:  #6E7990;
+  --color-text-dim:    #C0C6D6;
+
+  --color-teal:        var(--color-teal-500);   /* slightly darker for contrast */
+  --color-teal-a10:    rgba(0, 153, 144, 0.08);
+  --color-teal-a16:    rgba(0, 153, 144, 0.14);
+  --color-teal-a22:    rgba(0, 153, 144, 0.22);
+  --color-teal-a32:    rgba(0, 153, 144, 0.32);
+
+  --color-danger:      #C44040;
+  --color-danger-a10:  rgba(196, 64, 64, 0.10);
+  --color-danger-a28:  rgba(196, 64, 64, 0.22);
+
+  --border-subtle:     rgba(0, 0, 0, 0.07);
+  --border-brand:      rgba(0, 153, 144, 0.26);
+  --border-brand-em:   rgba(0, 153, 144, 0.44);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TYPOGRAPHY
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Font families */
+  --font-serif:  'EB Garamond', Georgia, serif;
+  --font-sans:   'Barlow', system-ui, -apple-system, sans-serif;
+
+  /* Type scale — use for font-size */
+  --text-xs:     11px;   /* labels, tags, caps                 */
+  --text-sm:     13px;   /* body small, table data             */
+  --text-base:   14px;   /* UI body default                    */
+  --text-md:     16px;   /* body comfortable                   */
+  --text-lg:     20px;   /* subtitle, lead                     */
+  --text-xl:     24px;   /* card headings (sans)               */
+  --text-2xl:    30px;   /* section subheadings                */
+  --text-3xl:    36px;   /* section headings                   */
+  --text-4xl:    48px;   /* display (serif)                    */
+  --text-5xl:    64px;   /* hero headings                      */
+  --text-6xl:    96px;   /* cover / jumbo                      */
+
+  /* Line heights */
+  --leading-tight:   1.05;
+  --leading-snug:    1.2;
+  --leading-normal:  1.5;
+  --leading-relaxed: 1.65;
+
+  /* Font weights */
+  --weight-light:    300;
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* Letter spacing */
+  --tracking-tight:  -0.02em;
+  --tracking-normal:  0;
+  --tracking-wide:    0.05em;
+  --tracking-wider:   0.12em;
+  --tracking-widest:  0.22em;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SPACING
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --space-1:   4px;
+  --space-2:   8px;
+  --space-3:   12px;
+  --space-4:   16px;
+  --space-5:   20px;
+  --space-6:   24px;
+  --space-8:   32px;
+  --space-10:  40px;
+  --space-12:  48px;
+  --space-16:  64px;
+  --space-20:  80px;
+  --space-24:  96px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BORDER RADIUS
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Direction A — The Analyst (softer, institutional) */
+  --radius-sm-a:   3px;
+  --radius-md-a:   4px;
+  --radius-lg-a:   6px;
+
+  /* Direction B — The Trader (sharp, terminal) */
+  --radius-sm-b:   1px;
+  --radius-md-b:   1px;
+  --radius-lg-b:   2px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHADOWS
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --shadow-sm:  0 1px 3px rgba(0, 0, 0, 0.30);
+  --shadow-md:  0 4px 16px rgba(0, 0, 0, 0.40);
+  --shadow-lg:  0 8px 32px rgba(0, 0, 0, 0.50);
+  --shadow-teal: 0 0 24px rgba(0, 196, 180, 0.18);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TRANSITIONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --transition-fast:   0.12s ease;
+  --transition-base:   0.18s ease;
+  --transition-slow:   0.30s ease;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Z-INDEX SCALE
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --z-base:     0;
+  --z-raised:   10;
+  --z-dropdown: 50;
+  --z-sticky:   80;
+  --z-nav:      90;
+  --z-modal:    100;
+  --z-toast:    110;
+}

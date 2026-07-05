@@ -1,14 +1,27 @@
 import type { Metadata } from 'next'
-import { Inter } from 'next/font/google'
+import { EB_Garamond, Barlow } from 'next/font/google'
 import '@rainbow-me/rainbowkit/styles.css'
+import '../styles/pari/tokens.css'
+import '../styles/pari/components.css'
 import './globals.css'
 import { Providers } from '@/components/Providers'
 import { Header } from '@/components/Header'
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
+const ebGaramond = EB_Garamond({
+  subsets: ['latin'],
+  weight: ['400', '500', '700'],
+  style: ['normal', 'italic'],
+  variable: '--font-eb-garamond',
+})
+
+const barlow = Barlow({
+  subsets: ['latin'],
+  weight: ['300', '400', '500', '600', '700'],
+  variable: '--font-barlow',
+})
 
 export const metadata: Metadata = {
-  title: 'Credit Prediction DEX',
+  title: 'Pari — Tradable Credit For All',
   description: 'Will MicroStrategy have a credit event in the next 12 months?',
 }
 
@@ -18,8 +31,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={inter.variable}>
-      <body className="min-h-screen bg-slate-950 text-slate-100 antialiased">
+    <html lang="en" className={`${ebGaramond.variable} ${barlow.variable}`}>
+      <body className="min-h-screen antialiased">
         <Providers>
           <Header />
           <main>{children}</main>

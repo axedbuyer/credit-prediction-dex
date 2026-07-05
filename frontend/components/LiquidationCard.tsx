@@ -96,16 +96,12 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
     }
   }, [writeContractAsync, addrs, position.user])
 
-  const outerClass = isFrozen
-    ? 'rounded-lg border border-slate-700 bg-slate-900/40 p-5 opacity-60'
-    : 'rounded-lg border border-amber-900/50 bg-slate-900 p-5'
-
   return (
-    <div className={outerClass}>
+    <div className={`pari-b-card ${isFrozen ? 'opacity-50' : ''}`}>
       {/* Frozen banner */}
       {isFrozen && (
-        <div className="mb-3 rounded-md border border-slate-600 bg-slate-800 px-3 py-2">
-          <span className="text-xs font-semibold text-slate-400">
+        <div className="mb-3 rounded-[1px] border border-subtle bg-surface-2 px-3 py-2">
+          <span className="text-xs font-bold uppercase tracking-wider text-text-muted">
             Frozen — credit event under review
           </span>
         </div>
@@ -113,55 +109,65 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
 
       {/* Header row */}
       <div className="mb-4 flex items-center justify-between">
-        <span className="font-mono text-xs text-slate-400">{shortAddr(position.user)}</span>
+        <span className="font-mono text-xs text-text-2">{shortAddr(position.user)}</span>
         {position.tailCase && (
-          <span className="rounded-full border border-blue-700/50 bg-blue-900/40 px-2 py-0.5 text-[10px] font-medium text-blue-300">
-            Backstopped by insurance fund
-          </span>
+          <span className="pari-badge pari-badge--warning">Tail Case</span>
         )}
       </div>
 
       {/* Metrics grid */}
-      <div className="mb-5 grid grid-cols-2 gap-x-6 gap-y-3">
-        <Stat label="YES tokens"     value={`${tokenQty(position.notional)} YES`} />
-        <Stat label="Token value"    value={usdc(position.tokenValue)} />
-        <Stat label="Claim price (P)" value={usdc(position.claimPrice)} colorClass="text-amber-300" />
-        {!position.tailCase && (
-          <Stat label="Est. profit (before resale)" value={`+${usdc(profitBig.toString())}`} colorClass="text-emerald-400" />
-        )}
+      <div className="mb-4 grid grid-cols-2 gap-x-6 gap-y-3">
+        <BStat label="Upbet size"  value={`${tokenQty(position.notional)}`} />
+        <BStat label="Position value" value={usdc(position.tokenValue)} />
       </div>
+
+      {/* Claim price — large */}
+      <div className="mb-4">
+        <p className="pari-b-label">Claim price (P)</p>
+        <p className="pari-b-card__value font-serif">{usdc(position.claimPrice)}</p>
+      </div>
+
+      {!position.tailCase && (
+        <div className="mb-5">
+          <BStat
+            label="Est. profit (before resale)"
+            value={`+${usdc(profitBig.toString())}`}
+            colorClass="text-success"
+          />
+        </div>
+      )}
 
       {/* Claim button / success */}
       {txStatus !== 'success' ? (
         <button
           onClick={handleClaim}
           disabled={isDisabled}
-          className="w-full rounded-lg bg-amber-600 py-2.5 text-sm font-semibold text-white hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+          className="pari-b-btn pari-b-btn--primary w-full"
         >
           {txStatus === 'pending'
             ? 'Claiming…'
             : `Claim — pay ${usdc(position.claimPrice)}`}
         </button>
       ) : (
-        <div className="rounded-lg border border-emerald-800 bg-emerald-900/30 p-4">
-          <p className="mb-1 text-sm font-semibold text-emerald-300">
-            YES position claimed successfully.
+        <div className="rounded-[1px] border border-success/30 bg-success/10 p-4">
+          <p className="mb-1 text-sm font-bold uppercase tracking-wide text-success">
+            Upbet position claimed successfully.
           </p>
-          <p className="mb-3 text-xs text-emerald-400/80">
-            The YES tokens are now in your wallet. Resell on the market to capture
+          <p className="mb-3 text-xs text-text-2">
+            The Upbet position is now in your wallet. Resell on the market to capture
             your ~{usdc(profitBig.toString())} profit.
           </p>
           <Link
             href="/market/mstr"
-            className="inline-block rounded-lg border border-emerald-700 bg-emerald-800 px-4 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-700 transition-colors"
+            className="pari-b-btn pari-b-btn--secondary inline-flex"
           >
-            Go to trade panel to sell YES →
+            Go to trade panel to sell Upbet →
           </Link>
         </div>
       )}
 
       {txStatus === 'error' && txError && (
-        <p className="mt-2 text-xs text-red-400">{txError}</p>
+        <p className="mt-2 text-xs text-danger">{txError}</p>
       )}
     </div>
   )
@@ -169,10 +175,10 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
 
 // ── Stat sub-component ────────────────────────────────────────────────────────
 
-function Stat({
+function BStat({
   label,
   value,
-  colorClass = 'text-slate-100',
+  colorClass = 'text-teal',
 }: {
   label: string
   value: string
@@ -180,8 +186,8 @@ function Stat({
 }) {
   return (
     <div>
-      <p className="mb-0.5 text-xs text-slate-500">{label}</p>
-      <p className={`text-sm font-semibold ${colorClass}`}>{value}</p>
+      <p className="pari-b-label">{label}</p>
+      <p className={`text-sm tabular ${colorClass}`}>{value}</p>
     </div>
   )
 }
