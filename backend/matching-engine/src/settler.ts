@@ -151,7 +151,7 @@ class Settler extends EventEmitter {
   private readonly nonceQueue = new NonceQueue()
 
   constructor(
-    engine: MatchingEngine,
+    private readonly engine: MatchingEngine,
     private readonly config: SettlerConfig,
     private readonly publicClient: IPublicClient,
     private readonly walletClient: IWalletClient,
@@ -203,7 +203,13 @@ class Settler extends EventEmitter {
         return
       }
 
-      return  // orders stay in book; matching engine will skip them (pendingSettlement)
+      // Not a deterministic revert (e.g. RPC hiccup, OrderExpired, an
+      // as-yet-unhandled revert reason) — no tx was ever submitted, so it's
+      // safe to release both orders back into pendingSettlement immediately:
+      // they stay in the book and are retried on the next poll cycle instead
+      // of being wedged forever.
+      this.engine.releasePendingSettlement(maker.id, taker.id)
+      return
     }
 
     const gas = (gasEstimate * 120n) / 100n  // +20% buffer
@@ -220,6 +226,11 @@ class Settler extends EventEmitter {
       })
     } catch (err) {
       console.error(`[settler] tx submission failed maker=${maker.id} taker=${taker.id}:`, err)
+      // No tx hash was ever obtained — nothing was broadcast (or, in the rare
+      // case the response was merely lost, a duplicate resubmission would
+      // safely revert on the order's already-consumed nonce/signature).
+      // Safe to release for a retry on the next poll cycle.
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
 
@@ -233,19 +244,29 @@ class Settler extends EventEmitter {
       )
     } catch (err) {
       console.error(`[settler] receipt wait failed ${txHash}:`, err)
+      // Deliberately NOT released: the tx WAS broadcast and its outcome is
+      // genuinely unknown (RPC couldn't confirm either way). Releasing here
+      // risks a real double-submission racing an in-flight tx. Orders stay
+      // wedged out of matching until this is manually investigated — a
+      // narrower tradeoff than the plain-revert case below, where the
+      // outcome (reverted) is already known for certain.
       return
     }
 
     if (receipt.status !== 'success') {
-      // On-chain revert: do NOT remove orders — let next match cycle decide.
-      // Unlike the gas-estimation failure above, the receipt alone carries no
-      // revert reason (viem's waitForTransactionReceipt doesn't decode it), and
-      // re-simulating here would race a since-changed chain state (e.g. a nonce
-      // already consumed by this same reverted tx would surface as NonceUsed
-      // instead of the original cause). Left as today's behavior — orders are
-      // re-matched next cycle, at which point a deterministic revert will
-      // re-surface at the gas-estimation step above and be pruned there.
+      // On-chain revert: do NOT remove orders from the book, but DO release
+      // them back into pendingSettlement — this is what lets "next match
+      // cycle decide" (below) actually happen. Unlike the gas-estimation
+      // failure above, the receipt alone carries no revert reason (viem's
+      // waitForTransactionReceipt doesn't decode it), and re-simulating here
+      // would race a since-changed chain state (e.g. a nonce already
+      // consumed by this same reverted tx would surface as NonceUsed instead
+      // of the original cause). Orders are re-matched next cycle, at which
+      // point a deterministic revert will re-surface at the gas-estimation
+      // step above and be pruned there; anything else falls into the
+      // release-and-retry path there too.
       console.error(`[settler] tx reverted ${txHash} maker=${maker.id} taker=${taker.id}`)
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
 
@@ -265,11 +286,13 @@ class Settler extends EventEmitter {
     const sellerOrder = identifySellerOrder(maker, taker, this.config.usdcAddress)
     if (!sellerOrder) {
       // Neither leg's tokenIn is USDC — shouldn't happen for a valid matched
-      // pair, but fail safe rather than guess: leave both orders untouched.
+      // pair, but fail safe rather than guess: leave both orders untouched —
+      // and release both back into pendingSettlement so they aren't wedged.
       console.error(
         `[settler] FundingShortfall but could not identify seller-side order ` +
         `maker=${maker.id} taker=${taker.id}`,
       )
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
     console.error(
@@ -277,6 +300,10 @@ class Settler extends EventEmitter {
       `(maker=${maker.id} taker=${taker.id})`,
     )
     await this.orderRemover.removeOrder(sellerOrder.id, sellerOrder.side)
+    // The other (buyer-side) order was untouched — it's still in the book,
+    // so release it back into pendingSettlement or it can never match again.
+    const otherOrder = sellerOrder.id === maker.id ? taker : maker
+    this.engine.releasePendingSettlement(otherOrder.id)
   }
 
   // ── PositionFrozen: one (or both) makers are flagged claimable — prune the
@@ -318,6 +345,12 @@ class Settler extends EventEmitter {
     if (makerFlagged) removals.push(this.orderRemover.removeOrder(maker.id, maker.side))
     if (takerFlagged) removals.push(this.orderRemover.removeOrder(taker.id, taker.side))
     await Promise.all(removals)
+    // Exactly one side flagged (the !makerFlagged && !takerFlagged case
+    // already returned above): the other order is untouched and still in
+    // the book — release it back into pendingSettlement so it can match
+    // again instead of being wedged.
+    if (!makerFlagged) this.engine.releasePendingSettlement(maker.id)
+    if (!takerFlagged) this.engine.releasePendingSettlement(taker.id)
   }
 
   private async readClaimable(user: Address): Promise<boolean> {

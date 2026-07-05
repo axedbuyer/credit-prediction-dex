@@ -23,6 +23,20 @@ class MatchingEngine extends EventEmitter {
    */
   private readonly pendingSettlement = new Set<string>()
 
+  /**
+   * Release order IDs from the pending-settlement set so they become
+   * matchable again on the next poll cycle. Called by the settler when a
+   * settlement attempt ends WITHOUT the order being removed from the book
+   * (i.e. every failure path that isn't a deterministic prune) — otherwise
+   * the order is wedged in pendingSettlement forever with no way back in,
+   * even though it's still sitting in the book and is (by design) meant to
+   * be retried. See backend/matching-engine/CLAUDE.md or root CLAUDE.md
+   * "other reverts keep the retry behavior" for the intended semantics.
+   */
+  releasePendingSettlement(...orderIds: string[]): void {
+    for (const id of orderIds) this.pendingSettlement.delete(id)
+  }
+
   constructor(
     private readonly client: OrderBookClient,
     private readonly config: MatchingEngineConfig,

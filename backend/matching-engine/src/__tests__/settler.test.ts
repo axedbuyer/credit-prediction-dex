@@ -3,6 +3,7 @@ import { EventEmitter } from 'events'
 import { ContractFunctionRevertedError, encodeErrorResult } from 'viem'
 import { Settler, NonceQueue, RedisOrderRemover, CLOB_SETTLEMENT_ABI } from '../settler'
 import type { IPublicClient, IWalletClient, OrderRemover, SettlerConfig } from '../settler'
+import { MatchingEngine as RealMatchingEngine } from '../engine'
 import type { MatchingEngine } from '../engine'
 import type { StoredOrder } from '../types'
 
@@ -57,9 +58,16 @@ function sleep(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms))
 }
 
-// Use a bare EventEmitter as the engine — Settler only calls engine.on('matched', …)
+// Use a bare EventEmitter as the engine — Settler calls engine.on('matched', …)
+// and, on non-pruned settlement failures, engine.releasePendingSettlement(...ids)
+// to un-wedge orders. Stub the latter as a spy so tests can assert on it.
 function makeEngine() {
-  return new EventEmitter() as unknown as MatchingEngine
+  const engine = new EventEmitter() as unknown as MatchingEngine & {
+    releasePendingSettlement: ReturnType<typeof vi.fn>
+  }
+  ;(engine as unknown as { releasePendingSettlement: ReturnType<typeof vi.fn> })
+    .releasePendingSettlement = vi.fn()
+  return engine
 }
 
 // ─── Mock clients ─────────────────────────────────────────────────────────────
@@ -164,6 +172,9 @@ describe('Settler — failed transaction', () => {
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
     // And no settled event
     expect(settled).toHaveLength(0)
+    // v1b1-7 wedge fix: on-chain revert is a known-final outcome — orders are
+    // released back into pendingSettlement so the next poll cycle can retry them.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-rev', 'bid-rev')
   })
 
   it('does not remove orders when writeContract throws', async () => {
@@ -177,7 +188,26 @@ describe('Settler — failed transaction', () => {
     await sleep(50)
 
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    // No tx was ever broadcast — safe to release immediately for a retry.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-err', 'bid-err')
   })
+
+  it('does NOT release pending orders when the receipt wait itself fails (outcome unknown)', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      waitForTransactionReceipt: () => Promise.reject(new Error('RPC timeout')),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-receipt', 'ask'), makeOrder('bid-receipt', 'bid'))
+    await sleep(3000)
+
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    // The tx WAS broadcast and its outcome is genuinely unknown — releasing
+    // here would risk a real double-submission racing an in-flight tx, so
+    // this is the one failure path that deliberately stays wedged.
+    expect(engine.releasePendingSettlement).not.toHaveBeenCalled()
+  }, 10_000)
 
   it('does not remove orders when gas estimation fails after retries', async () => {
     const engine = makeEngine()
@@ -193,6 +223,8 @@ describe('Settler — failed transaction', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    // No tx submitted (failed at estimation) — released for retry.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-gas', 'bid-gas')
   }, 10_000)
 })
 
@@ -223,6 +255,9 @@ describe('Settler — deterministic revert handling', () => {
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-fs', 'ask')
+    // Buyer order was untouched — must be released so it can still match.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-fs')
+    expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-fs')
   }, 10_000)
 
   it('PositionFrozen: claimable(makerA)=true, claimable(makerB)=false → only makerA order removed', async () => {
@@ -245,6 +280,9 @@ describe('Settler — deterministic revert handling', () => {
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf', 'ask')
+    // The un-flagged taker order was untouched — release it so it can still match.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-pf')
+    expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-pf')
   }, 10_000)
 
   it('PositionFrozen: claimable() read throws → both orders removed', async () => {
@@ -280,6 +318,71 @@ describe('Settler — deterministic revert handling', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    // v1b1-7 wedge fix: neither order is removed from the book, but both must
+    // be released back into pendingSettlement — otherwise they're wedged
+    // forever even though "other reverts keep the retry behavior" (root
+    // CLAUDE.md) says they should be retried on the next poll cycle.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-generic', 'bid-generic')
+  }, 10_000)
+})
+
+// ─── Settler + MatchingEngine: wedge-fix integration (v1b1-7) ────────────────
+//
+// Reproduces the actual reported bug end-to-end with the real MatchingEngine
+// (not the bare-EventEmitter stand-in used above): a match is emitted, settle()
+// hits a non-pruned revert (something other than FundingShortfall/
+// PositionFrozen — e.g. OrderExpired), and the SAME two orders must be
+// matchable again on the very next poll cycle instead of being wedged in
+// pendingSettlement until process restart.
+describe('Settler + MatchingEngine — wedge fix (non-pruned revert)', () => {
+  it('re-matches the same order pair on the next poll cycle after a generic revert', async () => {
+    const YES = '0x0000000000000000000000000000000000000001'
+    const engineConfig = {
+      yesTokenAddress: YES,
+      noTokenAddress:  '0x0000000000000000000000000000000000000002',
+      usdcAddress:     USDC_ADDRESS,
+      pollIntervalMs:  100,
+    }
+
+    const bid = {
+      id: 'bid-wedge', maker: '0xbuyer', tokenIn: USDC_ADDRESS, tokenOut: YES,
+      amountIn: '1000', minAmountOut: '1000',
+      expiry: String(Math.floor(Date.now() / 1000) + 3600), nonce: '1',
+      signature: '0xsig', side: 'bid' as const, price: 0.30, timestamp: Date.now(),
+    }
+    const ask = {
+      id: 'ask-wedge', maker: '0xseller', tokenIn: YES, tokenOut: USDC_ADDRESS,
+      amountIn: '1000', minAmountOut: '230', expiry: bid.expiry, nonce: '1',
+      signature: '0xsig', side: 'ask' as const, price: 0.25, timestamp: Date.now(),
+    }
+    const book = { bids: [bid], asks: [ask] }
+
+    const realEngine = new RealMatchingEngine({ fetchOrderBook: async () => book }, engineConfig)
+
+    // estimateContractGas rejects with a plain (non-deterministic) revert on
+    // every call — simulating something like OrderExpired, which isn't one
+    // of the two pruned error names.
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(new Error('execution reverted: OrderExpired')),
+    })
+    new Settler(realEngine, CONFIG, publicClient, walletClient, orderRemover)
+
+    // Cycle 1: matches, then settle() fails and (post-fix) releases both ids.
+    // estimateContractGas is wrapped in withRetry (3 attempts, exponential
+    // backoff) before the failure handler runs — give it the same generous
+    // wait used by the other retry-path tests above.
+    await realEngine.runOnce()
+    await sleep(3000)
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+
+    // Cycle 2: same book (order still resting, never removed) — pre-fix this
+    // would silently match zero times forever because both ids stayed stuck
+    // in pendingSettlement; post-fix it matches again.
+    const matchedAgain: Array<[string, string]> = []
+    realEngine.on('matched', (maker, taker) => matchedAgain.push([maker.id, taker.id]))
+    await realEngine.runOnce()
+
+    expect(matchedAgain).toEqual([['ask-wedge', 'bid-wedge']])
   }, 10_000)
 })
 
