@@ -1,19 +1,49 @@
 'use client'
 
+import type { CSSProperties } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useChainId } from 'wagmi'
 import { ORDER_BOOK_URL } from '@/lib/constants'
+import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+
+// Raw shape returned by GET /orderbook (backend/order-book-server's
+// StoredOrder — full signed order, not a simplified {price, size} level).
+// amountIn/minAmountOut are 6-decimal-scaled raw integers (as strings).
+// The book is shared across YES and NO orders for the market (tokenIn/
+// tokenOut disambiguate which); this component shows the Upbet (YES) side
+// only — mixing NO-token orders in unfiltered makes the book look crossed,
+// since a NO price isn't comparable to a YES price on the same axis.
+type RawOrder = {
+  side: 'bid' | 'ask'
+  price: number // 0–1 float, e.g. 0.234 = 23.4% annual probability
+  amountIn: string
+  minAmountOut: string
+  tokenIn: string
+  tokenOut: string
+}
 
 type Level = {
-  price: number // 0–1 float, e.g. 0.234 = 23.4% annual probability
-  size: number  // USDC
+  price: number
+  size: number // USDC notional, derived below (not present on the wire)
 }
 
 type OrderBookData = {
-  bids: Level[] // descending price (best bid first)
-  asks: Level[] // ascending price  (best ask first)
+  bids: RawOrder[] // descending price (best bid first)
+  asks: RawOrder[] // ascending price  (best ask first)
+}
+
+// USDC notional resting on this order: for a bid, tokenIn is USDC
+// (amountIn is the USDC offered); for an ask, tokenOut is USDC
+// (minAmountOut is the minimum USDC proceeds) — mirrors the price
+// derivation in order-book-server's derivePrice().
+function toLevel(o: RawOrder): Level {
+  const raw = o.side === 'bid' ? o.amountIn : o.minAmountOut
+  return { price: o.price, size: Number(raw) / 1_000_000 }
 }
 
 const LEVELS = 8
+const CLOB_COLS = '1fr 1fr'
+const CLOB_STYLE = { '--clob-cols': CLOB_COLS } as CSSProperties
 
 function pct(p: number) {
   return `${(p * 100).toFixed(1)}%`
@@ -32,23 +62,12 @@ async function fetchOrderBook(marketId: string): Promise<OrderBookData> {
   return res.json()
 }
 
-function SkeletonRow() {
+function SkeletonRow({ side }: { side: 'upbet' | 'downbet' }) {
   return (
-    <div className="flex items-center justify-between px-2 py-[5px]">
-      <div className="h-3 w-10 rounded bg-slate-800 animate-pulse" />
-      <div className="h-3 w-14 rounded bg-slate-800 animate-pulse" />
+    <div className={`pari-clob__row pari-clob__row--${side}`} style={{ opacity: 0.35 }}>
+      <div className="h-3 w-12 rounded bg-surface-2 animate-pulse" />
+      <div className="h-3 w-10 rounded bg-surface-2 animate-pulse justify-self-end" />
     </div>
-  )
-}
-
-// Keeps column height stable when fewer than LEVELS rows are present
-function EmptyFill({ count }: { count: number }) {
-  return (
-    <>
-      {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="py-[5px] h-[25px]" />
-      ))}
-    </>
   )
 }
 
@@ -57,6 +76,10 @@ interface OrderBookProps {
 }
 
 export function OrderBook({ marketId }: OrderBookProps) {
+  const chainId = useChainId()
+  const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
+  const yesToken = contracts.yesToken.toLowerCase()
+
   const { data, isLoading } = useQuery<OrderBookData>({
     queryKey: ['orderbook', marketId],
     queryFn: () => fetchOrderBook(marketId),
@@ -65,8 +88,13 @@ export function OrderBook({ marketId }: OrderBookProps) {
     throwOnError: false,
   })
 
-  const bids = (data?.bids ?? []).slice(0, LEVELS)
-  const asks = (data?.asks ?? []).slice(0, LEVELS)
+  // Upbet (YES) side only: a bid buys YES (tokenOut === yesToken), an ask
+  // sells YES (tokenIn === yesToken).
+  const isYes = (o: RawOrder) =>
+    (o.side === 'bid' ? o.tokenOut : o.tokenIn).toLowerCase() === yesToken
+
+  const bids = (data?.bids ?? []).filter(isYes).slice(0, LEVELS).map(toLevel)
+  const asks = (data?.asks ?? []).filter(isYes).slice(0, LEVELS).map(toLevel)
   const isEmpty = !isLoading && bids.length === 0 && asks.length === 0
 
   const bestBid = bids[0]?.price
@@ -76,105 +104,53 @@ export function OrderBook({ marketId }: OrderBookProps) {
       ? (bestBid + bestAsk) / 2
       : (bestBid ?? bestAsk)
 
+  // Asks are ascending (best ask first); render farthest-from-mid at the top,
+  // best ask (nearest mid) at the bottom, just above the mid strip.
+  const asksDisplay = [...asks].reverse()
+
   return (
-    <div className="select-none font-mono text-xs">
+    <div className="pari-clob select-none tabular" style={CLOB_STYLE}>
+      <div className="pari-clob__header">
+        <span>Price</span>
+        <span className="text-right">Size</span>
+      </div>
 
-      {/* Column headers */}
-      <div className="flex">
-        <div className="flex-1 min-w-0">
-          <p className="px-2 pb-0.5 text-[10px] uppercase tracking-widest text-emerald-500/70">
-            Bids · YES buyers
-          </p>
-          <div className="flex justify-between px-2 pb-1 text-[10px] uppercase tracking-wide text-slate-500">
-            <span>Price</span><span>Size</span>
+      {isLoading ? (
+        <>
+          {Array.from({ length: LEVELS }).map((_, i) => (
+            <SkeletonRow key={`sk-ask-${i}`} side="upbet" />
+          ))}
+          {Array.from({ length: LEVELS }).map((_, i) => (
+            <SkeletonRow key={`sk-bid-${i}`} side="downbet" />
+          ))}
+        </>
+      ) : isEmpty ? (
+        <div className="py-6 text-center text-xs uppercase tracking-widest text-text-muted">
+          No resting orders
+        </div>
+      ) : (
+        <>
+          {asksDisplay.map((lvl, i) => (
+            <div key={`ask-${i}`} className="pari-clob__row pari-clob__row--upbet">
+              <span>{pct(lvl.price)}</span>
+              <span className="text-right">{usd(lvl.size)}</span>
+            </div>
+          ))}
+
+          <div className="pari-clob__mid">
+            <span className="col-span-2 text-center">
+              {midPrice != null ? `${(midPrice * 100).toFixed(1)}% chance` : '—'}
+            </span>
           </div>
-        </div>
 
-        <div className="w-px bg-slate-800 mx-1 self-stretch" />
-
-        <div className="flex-1 min-w-0">
-          <p className="px-2 pb-0.5 text-[10px] uppercase tracking-widest text-red-500/70">
-            Asks · YES sellers
-          </p>
-          <div className="flex justify-between px-2 pb-1 text-[10px] uppercase tracking-wide text-slate-500">
-            <span>Price</span><span>Size</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="border-t border-slate-800" />
-
-      {/* Rows */}
-      <div className="flex mt-0.5">
-
-        {/* Bids */}
-        <div className="flex-1 min-w-0">
-          {isLoading
-            ? Array.from({ length: LEVELS }).map((_, i) => <SkeletonRow key={i} />)
-            : <>
-                {bids.map((lvl, i) => (
-                  <div
-                    key={`bid-${i}`}
-                    className={`flex items-center justify-between px-2 py-[5px] rounded-sm ${
-                      i === 0
-                        ? 'bg-emerald-950/60 text-emerald-300 font-semibold'
-                        : 'text-emerald-600 hover:bg-slate-800/40'
-                    }`}
-                  >
-                    <span>{pct(lvl.price)}</span>
-                    <span className={i === 0 ? 'text-emerald-400' : 'text-slate-500'}>
-                      {usd(lvl.size)}
-                    </span>
-                  </div>
-                ))}
-                <EmptyFill count={LEVELS - bids.length} />
-              </>
-          }
-        </div>
-
-        <div className="w-px bg-slate-800 mx-1 self-stretch" />
-
-        {/* Asks */}
-        <div className="flex-1 min-w-0">
-          {isLoading
-            ? Array.from({ length: LEVELS }).map((_, i) => <SkeletonRow key={i} />)
-            : <>
-                {asks.map((lvl, i) => (
-                  <div
-                    key={`ask-${i}`}
-                    className={`flex items-center justify-between px-2 py-[5px] rounded-sm ${
-                      i === 0
-                        ? 'bg-red-950/60 text-red-300 font-semibold'
-                        : 'text-red-600 hover:bg-slate-800/40'
-                    }`}
-                  >
-                    <span>{pct(lvl.price)}</span>
-                    <span className={i === 0 ? 'text-red-400' : 'text-slate-500'}>
-                      {usd(lvl.size)}
-                    </span>
-                  </div>
-                ))}
-                <EmptyFill count={LEVELS - asks.length} />
-              </>
-          }
-        </div>
-      </div>
-
-      {/* Mid price / empty state */}
-      <div className="border-t border-slate-800 mt-0.5" />
-      <div className="flex items-center justify-center gap-3 py-2">
-        <div className="flex-1 h-px bg-slate-800/60" />
-        {isLoading ? (
-          <div className="h-4 w-24 rounded bg-slate-800 animate-pulse" />
-        ) : isEmpty || midPrice == null ? (
-          <span className="text-slate-600 text-[11px] whitespace-nowrap">No orders</span>
-        ) : (
-          <span className="text-slate-200 text-sm font-semibold whitespace-nowrap">
-            {(midPrice * 100).toFixed(1)}% chance
-          </span>
-        )}
-        <div className="flex-1 h-px bg-slate-800/60" />
-      </div>
+          {bids.map((lvl, i) => (
+            <div key={`bid-${i}`} className="pari-clob__row pari-clob__row--downbet">
+              <span>{pct(lvl.price)}</span>
+              <span className="text-right">{usd(lvl.size)}</span>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   )
 }

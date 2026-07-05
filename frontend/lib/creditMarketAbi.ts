@@ -131,6 +131,13 @@ export const CREDIT_MARKET_ABI = [
     outputs: [{ name: '', type: 'uint256' }],
   },
   {
+    name: 'cumulativeFundingPerYES',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
     name: 'lastFundingTime',
     type: 'function',
     stateMutability: 'view',

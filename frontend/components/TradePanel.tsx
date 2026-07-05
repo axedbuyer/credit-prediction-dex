@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { useAccount, useBalance, useReadContract, useWriteContract, useSignTypedData, useChainId } from 'wagmi'
+import { useAccount, useBalance, useReadContract, useWriteContract, useSignTypedData, useChainId, usePublicClient } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { waitForTransactionReceipt } from '@wagmi/core'
 import { parseUnits, formatUnits } from 'viem'
@@ -30,15 +30,25 @@ type Side = 'YES' | 'NO'
 type Direction = 'BUY' | 'SELL'
 type Status = 'idle' | 'minting' | 'signing' | 'submitting' | 'success' | 'error'
 
+// Raw StoredOrder shape from GET /orderbook — the book is shared across YES
+// and NO orders for the market (tokenIn/tokenOut disambiguate which), so
+// best-bid/best-ask must be filtered to the side currently being traded
+// before use, or a NO order's price (not comparable to a YES price on the
+// same axis) makes the book look crossed and skews the displayed mid price.
+type RawOrder = { price: number; tokenIn: string; tokenOut: string }
 type OrderBookData = {
-  bids: { price: number; size: number }[]
-  asks: { price: number; size: number }[]
+  bids: RawOrder[]
+  asks: RawOrder[]
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function pctDisplay(p: number) {
   return `${(p * 100).toFixed(1)}%`
+}
+
+function sideLabel(s: Side): 'Upbet' | 'Downbet' {
+  return s === 'YES' ? 'Upbet' : 'Downbet'
 }
 
 async function fetchOrderBook(marketId: string): Promise<OrderBookData> {
@@ -74,6 +84,7 @@ interface TradePanelProps {
 export function TradePanel({ marketId, initialSide, initialDirection }: TradePanelProps) {
   const { address, isConnected } = useAccount()
   const chainId = useChainId()
+  const publicClient = usePublicClient()
   const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
 
   const [side, setSide] = useState<Side>(initialSide ?? 'YES')
@@ -93,8 +104,14 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     throwOnError: false,
   })
 
-  const bestBid = obData?.bids[0]?.price
-  const bestAsk = obData?.asks[0]?.price
+  // Filter the shared book down to whichever side is currently selected
+  // (Upbet/YES or Downbet/NO) before deriving best bid/ask.
+  const sideToken = (side === 'YES' ? contracts.yesToken : contracts.noToken).toLowerCase()
+  const sideBids = obData?.bids.filter(o => o.tokenOut.toLowerCase() === sideToken) ?? []
+  const sideAsks = obData?.asks.filter(o => o.tokenIn.toLowerCase()  === sideToken) ?? []
+
+  const bestBid = sideBids[0]?.price
+  const bestAsk = sideAsks[0]?.price
   const midPrice =
     bestBid != null && bestAsk != null
       ? (bestBid + bestAsk) / 2
@@ -170,7 +187,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
   const isValidAmount = usdcAmt > 0 && !isNaN(usdcAmt)
 
   const tokenPrice = side === 'YES' ? limitPrice : 1 - limitPrice
-  const tokenCostDisplay = `${side} costs ${(tokenPrice * 100).toFixed(1)}¢ per $1`
+  const tokenCostDisplay = `${sideLabel(side)} costs ${(tokenPrice * 100).toFixed(1)}¢ per $1`
 
   const dailyCarryPct = (limitPrice / 365) * 100
   const dailyCarryDisplay =
@@ -269,7 +286,18 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       const amountIn = direction === 'BUY' ? usdcAmountWei : tokenAmountWei
       const minAmountOut = direction === 'BUY' ? tokenAmountWei : usdcAmountWei
 
-      const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600)
+      // The demo chain is time-warped well ahead of wall-clock time, so a
+      // wall-clock expiry would already be in the past on-chain. Compute
+      // expiry from the CHAIN's own latest block timestamp instead, falling
+      // back to wall-clock + 1h only if the block fetch fails.
+      let expiry: bigint
+      try {
+        const block = await publicClient?.getBlock()
+        if (!block) throw new Error('no public client')
+        expiry = block.timestamp + 3600n
+      } catch {
+        expiry = BigInt(Math.floor(Date.now() / 1000) + 3600)
+      }
       const nonce  = BigInt(Date.now())
 
       const domain = {
@@ -351,7 +379,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     }
   }, [
     address, isValidAmount, isFrozen, carryShortfall, usdcAmt, limitPrice, side, direction,
-    yesBalance, noBalance, contracts, marketId,
+    yesBalance, noBalance, contracts, marketId, publicClient,
     writeContractAsync, signTypedDataAsync,
   ])
 
@@ -363,49 +391,53 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     : isFrozen               ? 'Position frozen'
     : busy                   ? statusLabel(status)
     : carryShortfall         ? 'Increase price or amount to cover carry'
-    : `Place ${direction} ${side} order`
+    : `Place ${direction} ${sideLabel(side)} order`
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">Place Order</h2>
+      <p className="pari-eyebrow">Place Order</p>
 
       {/* Frozen banner — flagged positions are fully locked (mint, redeem, any CLOB trade) */}
       {isFrozen && (
-        <div className="rounded-lg border border-red-700/60 bg-red-950/60 px-3 py-2.5 text-xs text-red-300">
+        <div className="border border-danger-a28 bg-danger-a10 px-3 py-2.5 text-xs text-danger">
           Your position is frozen pending liquidation. Cure it from your Portfolio or wait
           for a claim.
         </div>
       )}
 
-      {/* Side toggle */}
-      <div className="flex rounded-lg overflow-hidden border border-slate-700 text-sm font-medium">
-        {(['YES', 'NO'] as Side[]).map((s) => (
-          <button
-            key={s}
-            onClick={() => setSide(s)}
-            className={`flex-1 py-2 transition-colors ${
-              side === s
-                ? s === 'YES'
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-red-600 text-white'
-                : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            {s}
-          </button>
-        ))}
+      {/* Side toggle: Upbet (YES, danger) / Downbet (NO, teal) */}
+      <div className="grid grid-cols-2 gap-2">
+        {(['YES', 'NO'] as Side[]).map((s) => {
+          const selected = side === s
+          const upbet = s === 'YES'
+          return (
+            <button
+              key={s}
+              onClick={() => setSide(s)}
+              className={`pari-b-btn ${
+                selected
+                  ? upbet
+                    ? 'pari-b-btn--danger'
+                    : 'pari-b-btn--secondary'
+                  : 'bg-surface-2 text-text-muted border border-subtle'
+              }`}
+            >
+              {upbet ? 'Upbet' : 'Downbet'}
+            </button>
+          )
+        })}
       </div>
 
       {/* Direction toggle */}
-      <div className="flex rounded-lg overflow-hidden border border-slate-700 text-sm font-medium">
+      <div className="grid grid-cols-2 gap-2">
         {(['BUY', 'SELL'] as Direction[]).map((d) => (
           <button
             key={d}
             onClick={() => setDirection(d)}
-            className={`flex-1 py-1.5 transition-colors ${
+            className={`pari-b-btn ${
               direction === d
-                ? 'bg-slate-600 text-slate-100'
-                : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+                ? 'pari-b-btn--secondary'
+                : 'bg-surface-2 text-text-muted border border-subtle'
             }`}
           >
             {d}
@@ -414,9 +446,9 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       </div>
 
       {/* USDC amount */}
-      <div>
-        <label className="block text-xs text-slate-400 mb-1">USDC amount</label>
-        <div className="flex gap-2">
+      <div className="pari-b-field">
+        <label className="pari-b-label">USDC Amount</label>
+        <div className="flex gap-2 items-end">
           <input
             type="number"
             min="0"
@@ -424,30 +456,30 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
             placeholder="0.00"
             value={usdcInput}
             onChange={(e) => setUsdcInput(e.target.value)}
-            className="flex-1 rounded bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-slate-500"
+            className="pari-b-input tabular flex-1"
           />
           <button
             onClick={() => {
               if (usdcBalance) setUsdcInput(formatUnits(usdcBalance.value, 6))
             }}
-            className="rounded bg-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-600 transition-colors"
+            className="pari-b-btn pari-b-btn--secondary"
           >
-            MAX
+            Max
           </button>
         </div>
         {usdcBalance && (
-          <p className="mt-1 text-[11px] text-slate-500">
+          <p className="text-xs text-text-muted tabular">
             Balance: {parseFloat(formatUnits(usdcBalance.value, 6)).toFixed(2)} USDC
           </p>
         )}
       </div>
 
       {/* Limit price */}
-      <div>
-        <label className="block text-xs text-slate-400 mb-1">
-          Limit price
+      <div className="pari-b-field">
+        <label className="pari-b-label">
+          Limit Price
           {midPrice != null && (
-            <span className="ml-1 text-slate-500">(mid: {(midPrice * 100).toFixed(1)}%)</span>
+            <span className="ml-1 normal-case text-text-muted">(mid: {(midPrice * 100).toFixed(1)}%)</span>
           )}
         </label>
         <div className="relative">
@@ -459,29 +491,29 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
             placeholder={midPrice != null ? (midPrice * 100).toFixed(1) : '50.0'}
             value={limitInput}
             onChange={(e) => setLimitInput(e.target.value)}
-            className="w-full rounded bg-slate-800 border border-slate-700 px-3 py-2 pr-16 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-slate-500"
+            className="pari-b-input tabular pr-16"
           />
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-500">
-            % prob
+          <span className="absolute right-0 top-1/2 -translate-y-1/2 text-xs uppercase tracking-wide text-text-muted">
+            % chance
           </span>
         </div>
       </div>
 
       {/* Contextual info */}
-      <div className="rounded bg-slate-800/60 px-3 py-2 text-[11px] text-slate-400 space-y-1">
+      <div className="border border-subtle bg-surface-2 px-3 py-2 text-xs text-text-2 tabular space-y-1">
         <p>{tokenCostDisplay}</p>
         {dailyCarryDisplay && <p>{dailyCarryDisplay}</p>}
         {direction === 'SELL' && tokenBalance != null && (
           <p>
-            {side} balance: {tokenBalance.toFixed(2)}
+            {sideLabel(side)} balance: {tokenBalance.toFixed(2)}
             {tokenBalance === 0 && ' — will mint first'}
           </p>
         )}
         {carryOwedDisplay && (
-          <p className={carryShortfall ? 'text-red-400' : undefined}>
+          <p className={carryShortfall ? 'text-danger' : undefined}>
             Carry owed: {carryOwedDisplay}
             {minSellPricePct !== null && (
-              <> — minimum sell price to cover it: {minSellPricePct.toFixed(1)}%</>
+              <> — minimum sell price to cover carry: {minSellPricePct.toFixed(1)}%</>
             )}
           </p>
         )}
@@ -494,25 +526,19 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       <button
         onClick={handleSubmit}
         disabled={!isConnected || !isValidAmount || busy || isFrozen || carryShortfall}
-        className={`w-full rounded-lg py-2.5 text-sm font-semibold transition-colors ${
-          !isConnected || !isValidAmount || busy || isFrozen || carryShortfall
-            ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
-            : side === 'YES'
-            ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-            : 'bg-red-600 hover:bg-red-500 text-white'
-        }`}
+        className={`pari-b-btn w-full py-3 ${side === 'YES' ? 'pari-b-btn--danger' : 'pari-b-btn--primary'}`}
       >
         {buttonLabel}
       </button>
 
       {/* Status feedback */}
       {status === 'success' && (
-        <div className="rounded bg-emerald-950/60 border border-emerald-800/50 px-3 py-2 text-xs text-emerald-300">
-          Order placed — ID: <span className="font-mono">{successOrderId}</span>
+        <div className="border border-teal-a22 bg-teal-a10 px-3 py-2 text-xs text-teal">
+          Order placed — ID: <span className="tabular">{successOrderId}</span>
         </div>
       )}
       {status === 'error' && (
-        <div className="rounded bg-red-950/60 border border-red-800/50 px-3 py-2 text-xs text-red-300">
+        <div className="border border-danger-a28 bg-danger-a10 px-3 py-2 text-xs text-danger">
           {errorMsg}
         </div>
       )}

@@ -428,16 +428,23 @@ Price P represents the market-implied annual default probability
 
 ## UX / Naming Conventions
 
-**Never use in UI:** hazard rate, bps, basis points, protection buyer/seller, notional, token
+**Product name:** Pari ("Pari — Tradable Credit For All"). Brand assets: `Pari Brand
+Guidelines.html` + design tokens vendored at `frontend/styles/pari/` (Direction A "Analyst"
+for nav/landing/portfolio, Direction B "Trader" for market/orderbook/liquidate).
+
+**Never use in UI:** hazard rate, bps, basis points, protection buyer/seller, notional,
+token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
 
 **Always use in UI:**
-- "YES" / "NO" (not long/short)
+- "Upbet" / "Downbet" (Upbet = YES internally = long default risk, pays carry;
+  Downbet = NO internally = earns carry). Colors: Upbet = `--color-danger`,
+  Downbet = `--color-teal`; positive P&L stays `--color-success`.
 - "X% annual probability"
 - "Daily carry" (not funding rate)
 - Market title: "Will MicroStrategy have a credit event in the next 12 months?"
 - Price: "23.4% chance"
-- YES costs 23.4¢ per $1 / NO costs 76.6¢ per $1
-- "Your position: $500 YES @ 23.4% entry"
+- Upbet costs 23.4¢ per $1 / Downbet costs 76.6¢ per $1
+- "Your position: $500 Upbet @ 23.4% entry"
 
 ---
 

@@ -290,9 +290,9 @@ export default function AdminPage() {
     return (
       <div className="mx-auto max-w-3xl px-4 py-8 space-y-6">
         <WarningBanner />
-        <h1 className="text-2xl font-bold text-slate-100">Admin</h1>
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-10 text-center">
-          <p className="text-slate-400">Connect your wallet to access admin controls.</p>
+        <h1 className="font-serif text-2xl text-text-1">Admin</h1>
+        <div className="pari-a-card text-center">
+          <p className="text-text-2">Connect your wallet to access admin controls.</p>
         </div>
       </div>
     )
@@ -303,8 +303,8 @@ export default function AdminPage() {
       <WarningBanner />
 
       <div>
-        <h1 className="text-2xl font-bold text-slate-100">Admin</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <h1 className="font-serif text-2xl text-text-1">Admin</h1>
+        <p className="mt-1 text-sm text-text-2">
           Will MicroStrategy have a credit event in the next 12 months?
         </p>
       </div>
@@ -318,7 +318,7 @@ export default function AdminPage() {
       {/* ── 1. Market Status ──────────────────────────────────────────────────── */}
       <Section title="Market Status">
         {isLoading ? (
-          <div className="h-28 animate-pulse rounded bg-slate-800" />
+          <div className="h-28 animate-pulse rounded bg-surface-2" />
         ) : (
           <div className="grid grid-cols-2 gap-x-8 gap-y-4 sm:grid-cols-3">
             <Stat
@@ -326,12 +326,12 @@ export default function AdminPage() {
               value={currentMark !== undefined ? pctDisplay(currentMark) : '—'}
             />
             <Stat
-              label="YES supply"
-              value={yesTotalSupply !== undefined ? `${tokenDisplay(yesTotalSupply)} YES` : '—'}
+              label="Upbet supply"
+              value={yesTotalSupply !== undefined ? `${tokenDisplay(yesTotalSupply)} Upbet` : '—'}
             />
             <Stat
-              label="NO supply"
-              value={noTotalSupply !== undefined ? `${tokenDisplay(noTotalSupply)} NO` : '—'}
+              label="Downbet supply"
+              value={noTotalSupply !== undefined ? `${tokenDisplay(noTotalSupply)} Downbet` : '—'}
             />
             <Stat
               label="USDC in contract"
@@ -361,13 +361,13 @@ export default function AdminPage() {
       <Section title="Credit Event Controls">
         <div className="space-y-3">
           {creditEventConfirmed && (
-            <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-300">
-              Credit event confirmed. YES holders can now settle at $1.00.
+            <div className="rounded border border-success/30 bg-success/10 px-4 py-3 text-sm text-success">
+              Credit event confirmed. Upbet holders can now settle at $1.00.
             </div>
           )}
-          <p className="text-sm text-slate-400">
-            Confirms a credit event on-chain. Pauses the market and enables YES settlement
-            at $1.00 per token. <span className="text-red-400 font-medium">Irreversible.</span>
+          <p className="text-sm text-text-2">
+            Confirms a credit event on-chain. Pauses the market and enables Upbet holders
+            to settle at $1.00 each. <span className="text-danger font-medium">Irreversible.</span>
           </p>
           <button
             onClick={() => setConfirmModal(true)}
@@ -376,18 +376,18 @@ export default function AdminPage() {
               creditEventConfirmed === true ||
               creditEventStatus === 'pending'
             }
-            className="rounded-lg bg-red-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="pari-a-btn pari-a-btn--danger"
           >
             {creditEventStatus === 'pending' ? 'Confirming…' : 'Confirm Credit Event'}
           </button>
           {!hasOracleRole && (
-            <p className="text-xs text-slate-500">Requires ORACLE_ROLE on OracleRouter.</p>
+            <p className="text-xs text-text-muted">Requires ORACLE_ROLE on OracleRouter.</p>
           )}
           {creditEventStatus === 'success' && (
-            <p className="text-xs text-emerald-400">Credit event confirmed on-chain.</p>
+            <p className="text-xs text-success">Credit event confirmed on-chain.</p>
           )}
           {creditEventStatus === 'error' && creditEventError && (
-            <p className="text-xs text-red-400">{creditEventError}</p>
+            <p className="text-xs text-danger">{creditEventError}</p>
           )}
         </div>
       </Section>
@@ -395,7 +395,7 @@ export default function AdminPage() {
       {/* ── 3. Market Controls ────────────────────────────────────────────────── */}
       <Section title="Market Controls">
         <div className="space-y-3">
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-text-2">
             Pausing halts mint and redeem. Use during credit event determination window.
           </p>
           <button
@@ -405,11 +405,8 @@ export default function AdminPage() {
               isPaused === undefined ||
               pauseStatus === 'pending'
             }
-            className={`rounded-lg px-5 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-              isPaused
-                ? 'bg-emerald-700 hover:bg-emerald-600 text-white'
-                : 'bg-amber-700 hover:bg-amber-600 text-white'
-            }`}
+            className={isPaused ? 'pari-a-btn pari-a-btn--primary' : 'pari-a-btn pari-a-btn--secondary'}
+            style={!isPaused ? { borderColor: 'var(--color-warning)', color: 'var(--color-warning)' } : undefined}
           >
             {pauseStatus === 'pending'
               ? 'Processing…'
@@ -418,15 +415,15 @@ export default function AdminPage() {
               : 'Pause Market'}
           </button>
           {!hasPauserRole && (
-            <p className="text-xs text-slate-500">Requires PAUSER_ROLE on CreditMarket.</p>
+            <p className="text-xs text-text-muted">Requires PAUSER_ROLE on CreditMarket.</p>
           )}
           {pauseStatus === 'success' && lastPauseAction && (
-            <p className="text-xs text-emerald-400">
+            <p className="text-xs text-success">
               Market {lastPauseAction === 'pause' ? 'paused' : 'unpaused'} successfully.
             </p>
           )}
           {pauseStatus === 'error' && pauseError && (
-            <p className="text-xs text-red-400">{pauseError}</p>
+            <p className="text-xs text-danger">{pauseError}</p>
           )}
         </div>
       </Section>
@@ -435,30 +432,30 @@ export default function AdminPage() {
       <Section title="Funding Accrual">
         <div className="space-y-3">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-400">Cumulative funding per YES</span>
-            <span className="font-mono text-slate-200">
+            <span className="text-text-2">Cumulative carry per Upbet</span>
+            <span className="font-mono tabular text-text-1">
               {cumulativeFunding !== undefined
                 ? formatUnits(cumulativeFunding, 18)
                 : '—'}
             </span>
           </div>
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-text-muted">
             The funding keeper runs every 8h automatically. Trigger manually here if needed.
           </p>
           <button
             onClick={handleAccrueFunding}
             disabled={fundingStatus === 'pending'}
-            className="rounded-lg border border-slate-600 bg-slate-800 px-5 py-2.5 text-sm font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="pari-a-btn pari-a-btn--secondary"
           >
             {fundingStatus === 'pending' ? 'Accruing…' : 'Trigger Funding Accrual'}
           </button>
           {fundingStatus === 'success' && (
-            <p className="text-xs text-emerald-400">
+            <p className="text-xs text-success">
               Funding accrued. Updated cumulative shown above.
             </p>
           )}
           {fundingStatus === 'error' && fundingError && (
-            <p className="text-xs text-red-400">{fundingError}</p>
+            <p className="text-xs text-danger">{fundingError}</p>
           )}
         </div>
       </Section>
@@ -470,27 +467,27 @@ export default function AdminPage() {
           onClick={() => setConfirmModal(false)}
         >
           <div
-            className="w-full max-w-md rounded-xl border border-red-900 bg-slate-950 p-6 shadow-2xl"
+            className="w-full max-w-md rounded border border-danger-a28 bg-surface-1 p-6 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="text-lg font-bold text-red-400">Confirm Credit Event</h2>
-            <p className="mt-3 text-sm text-slate-300">
-              This will trigger settlement for all YES holders. YES tokens will redeem at
-              $1.00 USDC each. NO tokens will be worth $0.
+            <h2 className="font-serif text-lg text-danger">Confirm Credit Event</h2>
+            <p className="mt-3 text-sm text-text-2">
+              This will trigger settlement for all Upbet holders. Upbet redeems at
+              $1.00 USDC each. Downbet will be worth $0.
             </p>
-            <p className="mt-2 text-sm font-semibold text-red-400">
+            <p className="mt-2 text-sm font-semibold text-danger">
               This action is irreversible.
             </p>
             <div className="mt-6 flex gap-3">
               <button
                 onClick={() => setConfirmModal(false)}
-                className="flex-1 rounded-lg border border-slate-700 bg-slate-800 py-2.5 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+                className="pari-a-btn pari-a-btn--secondary flex-1"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmCreditEvent}
-                className="flex-1 rounded-lg bg-red-700 py-2.5 text-sm font-semibold text-white hover:bg-red-600 transition-colors"
+                className="pari-a-btn pari-a-btn--danger flex-1"
               >
                 Confirm
               </button>
@@ -506,7 +503,7 @@ export default function AdminPage() {
 
 function WarningBanner() {
   return (
-    <div className="rounded-lg border border-amber-700/60 bg-amber-950/40 px-4 py-3 text-sm font-semibold text-amber-300">
+    <div className="rounded border border-warning/40 bg-warning/10 px-4 py-3 text-sm font-semibold text-warning">
       Internal tool. Authorized personnel only.
     </div>
   )
@@ -514,8 +511,8 @@ function WarningBanner() {
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
-      <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-slate-400">
+    <div className="pari-a-card">
+      <h2 className="mb-4 text-[11px] font-semibold uppercase tracking-[0.22em] text-text-muted">
         {title}
       </h2>
       {children}
@@ -533,17 +530,11 @@ function RoleBadge({
   loading: boolean
 }) {
   if (loading) {
-    return <div className="h-7 w-36 animate-pulse rounded-full bg-slate-800" />
+    return <div className="h-7 w-36 animate-pulse rounded-full bg-surface-2" />
   }
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${
-        granted
-          ? 'border-emerald-700/50 bg-emerald-950/60 text-emerald-300'
-          : 'border-slate-700 bg-slate-900 text-slate-500'
-      }`}
-    >
-      {granted ? '✓' : '✗'} {label}{granted ? '' : ' — no access'}
+    <span className={`pari-badge ${granted ? 'pari-badge--success' : 'pari-badge--neutral'}`}>
+      {label}{granted ? '' : ' — no access'}
     </span>
   )
 }
@@ -559,11 +550,11 @@ function Stat({
   highlight?: boolean
   warn?: boolean
 }) {
-  const valueClass = highlight ? 'text-emerald-400' : warn ? 'text-amber-400' : 'text-slate-100'
+  const valueClass = highlight ? 'text-success' : warn ? 'text-warning' : 'text-text-1'
   return (
     <div>
-      <p className="mb-0.5 text-xs text-slate-500">{label}</p>
-      <p className={`text-sm font-semibold ${valueClass}`}>{value}</p>
+      <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-text-muted">{label}</p>
+      <p className={`font-serif text-sm tabular ${valueClass}`}>{value}</p>
     </div>
   )
 }

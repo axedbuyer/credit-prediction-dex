@@ -2,22 +2,48 @@
 
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 import Link from 'next/link'
+import { usePathname } from 'next/navigation'
+import { PariLogo } from '@/components/PariLogo'
+
+const navLinks = [
+  { href: '/market/mstr', label: 'Market' },
+  { href: '/portfolio', label: 'Portfolio' },
+  { href: '/liquidate', label: 'Liquidate' },
+]
 
 export function Header() {
+  const pathname = usePathname()
+
   return (
-    <header className="border-b border-slate-800 bg-slate-900">
-      <div className="mx-auto max-w-7xl px-4 py-3 flex items-center justify-between">
-        <nav className="flex items-center gap-6">
-          <Link href="/market/mstr" className="font-semibold text-slate-100 text-sm tracking-tight">
-            Credit DEX
-          </Link>
-          <Link href="/market/mstr" className="text-sm text-slate-400 hover:text-slate-200 transition-colors">
-            Market
-          </Link>
-          <Link href="/portfolio" className="text-sm text-slate-400 hover:text-slate-200 transition-colors">
-            Portfolio
-          </Link>
-        </nav>
+    <header className="pari-nav">
+      <Link href="/" className="pari-wordmark">
+        <PariLogo size={26} />
+        <span className="pari-wordmark__text">Pari</span>
+      </Link>
+
+      <nav className="flex items-center gap-6">
+        {navLinks.map((link) => {
+          const isActive = pathname?.startsWith(link.href)
+          return (
+            <Link
+              key={link.href}
+              href={link.href}
+              className={
+                isActive
+                  ? 'text-sm text-teal transition-colors'
+                  : 'text-sm text-text-2 hover:text-text-1 transition-colors'
+              }
+            >
+              {link.label}
+            </Link>
+          )
+        })}
+      </nav>
+
+      <div className="ml-auto flex items-center gap-6">
+        <Link href="/admin" className="text-xs text-text-muted hover:text-text-2 transition-colors">
+          Admin
+        </Link>
         <ConnectButton />
       </div>
     </header>

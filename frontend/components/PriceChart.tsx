@@ -5,10 +5,11 @@ import { usePublicClient, useChainId } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { parseAbiItem } from 'viem'
 import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import { CREDIT_MARKET_ABI } from '@/lib/creditMarketAbi'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type TimeRange = '1D' | '1W' | '1M'
+type TimeRange = '1D' | '1W' | '1M' | 'ALL'
 
 type PricePoint = {
   time: number  // unix seconds — Lightweight Charts UTCTimestamp
@@ -17,7 +18,10 @@ type PricePoint = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const RANGE_SECONDS: Record<TimeRange, number> = {
+// 'ALL' has no fixed window — it fits the chart to every point instead (see
+// the zoom effect below), since the full history can span far more than a
+// month (e.g. scripts/demo seeds ~13 months of simulated chart history).
+const RANGE_SECONDS: Partial<Record<TimeRange, number>> = {
   '1D': 86_400,
   '1W': 604_800,
   '1M': 2_592_000,
@@ -26,49 +30,17 @@ const RANGE_SECONDS: Record<TimeRange, number> = {
 // ~27h at 2s/block on Base — keeps within public RPC limits
 const BLOCK_RANGE_CAP = 50_000n
 
-const TOKENS_MINTED = parseAbiItem(
-  'event TokensMinted(address indexed user, uint256 usdcAmount, uint256 yesAmount, uint256 noAmount)'
+const YEAR_SECONDS = 365n * 86_400n
+
+const FUNDING_ACCRUED = parseAbiItem(
+  'event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp)'
 )
 
-// ── Chart theme ───────────────────────────────────────────────────────────────
-
-const CHART_OPTS = {
-  layout: {
-    background: { color: 'transparent' },
-    textColor: '#94a3b8',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-    fontSize: 11,
-  },
-  grid: {
-    vertLines: { color: '#1e293b' },
-    horzLines: { color: '#1e293b' },
-  },
-  rightPriceScale: {
-    borderColor: '#1e293b',
-    scaleMargins: { top: 0.12, bottom: 0.08 },
-  },
-  timeScale: {
-    borderColor: '#1e293b',
-    timeVisible: true,
-    secondsVisible: false,
-    fixLeftEdge: false,
-    fixRightEdge: false,
-  },
-  crosshair: {
-    vertLine: { color: '#475569', width: 1 as const, style: 2 },
-    horzLine: { color: '#475569', width: 1 as const, style: 2 },
-  },
-  handleScroll: true,
-  handleScale: true,
-} as const
-
-const AREA_OPTS = {
-  lineColor: '#3b82f6',
-  topColor: 'rgba(59,130,246,0.25)',
-  bottomColor: 'rgba(59,130,246,0.02)',
-  lineWidth: 2 as const,
-  priceLineVisible: false,
-  lastValueVisible: false,
+// wad (1e18-scaled, 1e18 == 100%) -> percent. Bigint division happens before
+// the cast to Number so precision survives values well past
+// Number.MAX_SAFE_INTEGER at the 1e18 scale.
+function wadToPercent(wad: bigint): number {
+  return Number(wad / 10n ** 10n) / 1e6
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -82,7 +54,7 @@ export function PriceChart({ marketId }: PriceChartProps) {
   const publicClient = usePublicClient()
   const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
 
-  const [range, setRange] = useState<TimeRange>('1W')
+  const [range, setRange] = useState<TimeRange>('ALL')
 
   const containerRef = useRef<HTMLDivElement>(null)
   // Use `any` to stay version-agnostic between LC v4 (addAreaSeries) and v5 (addSeries)
@@ -92,6 +64,10 @@ export function PriceChart({ marketId }: PriceChartProps) {
   const seriesRef = useRef<any>(null)
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
+  // Mark series derived from consecutive FundingAccrued events: between events
+  // i and i+1, mark_i = (cumYES_{i+1} - cumYES_i) * 365d / (t_{i+1} - t_i).
+  // A live tail point (via currentMark + latest block) keeps the chart moving
+  // between accrual epochs — e.g. during a demo time-warp.
 
   const { data: points = [], isLoading } = useQuery<PricePoint[]>({
     queryKey: ['price-history', chainId, contracts.creditMarket, marketId],
@@ -103,29 +79,50 @@ export function PriceChart({ marketId }: PriceChartProps) {
 
       const logs = await publicClient.getLogs({
         address: contracts.creditMarket,
-        event: TOKENS_MINTED,
+        event: FUNDING_ACCRUED,
         fromBlock,
         toBlock: 'latest',
       })
 
-      if (logs.length === 0) return []
+      // Chronological order (block, then log index tie-break). The event
+      // carries its own block.timestamp arg, so no per-block RPC lookup needed.
+      const sorted = [...logs].sort((a, b) => {
+        if (a.blockNumber !== b.blockNumber) return a.blockNumber! < b.blockNumber! ? -1 : 1
+        return (a.logIndex ?? 0) - (b.logIndex ?? 0)
+      })
 
-      // Fetch timestamps for each unique block in one pass
-      const blockNums = [...new Set(logs.map((l) => l.blockNumber!))]
-      const blocks = await Promise.all(
-        blockNums.map((n) => publicClient.getBlock({ blockNumber: n }))
-      )
-      const tsMap = new Map(blocks.map((b) => [b.number, Number(b.timestamp)]))
+      const events = sorted.map((l) => ({
+        cumYES: l.args.cumulativeFundingPerYES!,
+        ts: Number(l.args.timestamp!),
+      }))
 
-      return logs
-        .filter((l) => l.args.usdcAmount && l.args.usdcAmount > 0n)
-        .map((l) => ({
-          time: tsMap.get(l.blockNumber!) ?? 0,
-          value: (Number(l.args.yesAmount!) / Number(l.args.usdcAmount!)) * 100,
-        }))
-        .filter((p) => p.time > 0)
+      const derived: PricePoint[] = []
+      for (let i = 0; i < events.length - 1; i++) {
+        const dt = events[i + 1].ts - events[i].ts
+        if (dt === 0) continue // skip same-block duplicate accruals
+        const deltaCum = events[i + 1].cumYES - events[i].cumYES
+        const markWad = (deltaCum * YEAR_SECONDS) / BigInt(dt)
+        derived.push({ time: events[i].ts, value: wadToPercent(markWad) })
+      }
+
+      // Live tail point at the current mark / latest block timestamp.
+      try {
+        const [mark, block] = await Promise.all([
+          publicClient.readContract({
+            address: contracts.creditMarket,
+            abi: CREDIT_MARKET_ABI,
+            functionName: 'currentMark',
+          }),
+          publicClient.getBlock(),
+        ])
+        derived.push({ time: Number(block.timestamp), value: wadToPercent(mark as bigint) })
+      } catch {
+        // no-op — fall back to whatever derived history we have
+      }
+
+      return derived
         .sort((a, b) => a.time - b.time)
-        // Dedupe by time (LC requires unique timestamps)
+        // Dedupe by time (LC requires unique ascending timestamps)
         .filter((p, i, arr) => i === 0 || p.time !== arr[i - 1].time)
     },
     refetchInterval: 30_000,
@@ -144,16 +141,54 @@ export function PriceChart({ marketId }: PriceChartProps) {
     import('lightweight-charts').then(({ createChart, ColorType, AreaSeries }) => {
       if (aborted || !containerRef.current) return
 
+      // Resolve token colors at mount — Lightweight Charts renders to canvas
+      // and cannot read CSS custom properties itself, so these read the
+      // computed value once and pass literal colors into the JS options.
+      const styles = getComputedStyle(document.documentElement)
+      const teal      = styles.getPropertyValue('--color-teal-400').trim()   || '#00C4B4'
+      const tealFill  = styles.getPropertyValue('--color-teal-a16').trim()   || 'rgba(0, 196, 180, 0.16)'
+      const tealFaint = styles.getPropertyValue('--color-teal-a10').trim()   || 'rgba(0, 196, 180, 0.08)'
+      const textMuted = styles.getPropertyValue('--color-text-muted').trim() || '#7A8499'
+
       const chart = createChart(containerRef.current, {
-        ...CHART_OPTS,
         layout: {
-          ...CHART_OPTS.layout,
           background: { type: ColorType.Solid, color: 'transparent' },
+          textColor: textMuted,
+          fontFamily: 'Barlow, system-ui, -apple-system, sans-serif',
+          fontSize: 11,
         },
+        grid: {
+          vertLines: { color: tealFaint },
+          horzLines: { color: tealFaint },
+        },
+        rightPriceScale: {
+          borderColor: tealFaint,
+          scaleMargins: { top: 0.12, bottom: 0.08 },
+        },
+        timeScale: {
+          borderColor: tealFaint,
+          timeVisible: true,
+          secondsVisible: false,
+          fixLeftEdge: false,
+          fixRightEdge: false,
+        },
+        crosshair: {
+          vertLine: { color: teal, width: 1 as const, style: 2 },
+          horzLine: { color: teal, width: 1 as const, style: 2 },
+        },
+        handleScroll: true,
+        handleScale: true,
         autoSize: true,
       })
 
-      const series = chart.addSeries(AreaSeries, AREA_OPTS)
+      const series = chart.addSeries(AreaSeries, {
+        lineColor: teal,
+        topColor: tealFill,
+        bottomColor: 'rgba(0, 196, 180, 0.02)',
+        lineWidth: 2 as const,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      })
 
       series.applyOptions({
         priceFormat: {
@@ -189,9 +224,20 @@ export function PriceChart({ marketId }: PriceChartProps) {
 
   useEffect(() => {
     if (!chartRef.current || points.length === 0) return
-    const now = Math.floor(Date.now() / 1000)
+    // Anchor "now" to the latest data point's (chain) timestamp, not real
+    // wall-clock Date.now(). On a chain whose time has been fast-forwarded
+    // (scripts/demo's warp.sh jumps chain time ~13 months ahead to seed
+    // chart history), using real time here would put every zoom window in
+    // the past relative to the data — 1D/1W/1M would show only the sliver
+    // of history recorded before the first warp, never the seeded climb.
+    // In production, chain time tracks real time anyway, so this is a no-op.
+    if (range === 'ALL') {
+      chartRef.current.timeScale().fitContent()
+      return
+    }
+    const now = points[points.length - 1].time
     chartRef.current.timeScale().setVisibleRange({
-      from: now - RANGE_SECONDS[range],
+      from: now - RANGE_SECONDS[range]!,
       to: now,
     })
   }, [range, points])
@@ -207,27 +253,27 @@ export function PriceChart({ marketId }: PriceChartProps) {
       <div className="flex items-center justify-between mb-3">
         <div className="min-h-[28px]">
           {isLoading ? (
-            <div className="h-5 w-48 rounded bg-slate-800 animate-pulse" />
+            <div className="h-5 w-48 rounded bg-surface-2 animate-pulse" />
           ) : latestPrice != null ? (
-            <p className="text-xl font-bold text-slate-100">
+            <p className="font-serif text-xl text-text-1 tabular">
               {latestPrice.toFixed(1)}%{' '}
-              <span className="text-sm font-normal text-slate-400">
-                annual default probability
+              <span className="font-sans text-xs uppercase tracking-widest text-text-muted">
+                annual probability
               </span>
             </p>
           ) : null}
         </div>
 
         <div className="flex gap-1">
-          {(['1D', '1W', '1M'] as TimeRange[]).map((r) => (
+          {(['1D', '1W', '1M', 'ALL'] as TimeRange[]).map((r) => (
             <button
               key={r}
               onClick={() => setRange(r)}
-              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+              className={
                 range === r
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
+                  ? 'pari-b-btn pari-b-btn--secondary'
+                  : 'pari-b-btn bg-transparent text-text-muted hover:text-teal'
+              }
             >
               {r}
             </button>
@@ -240,14 +286,16 @@ export function PriceChart({ marketId }: PriceChartProps) {
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="flex flex-col items-center gap-2">
-              <div className="h-3 w-40 rounded bg-slate-800 animate-pulse" />
-              <div className="h-3 w-24 rounded bg-slate-800 animate-pulse" />
+              <div className="h-3 w-40 rounded bg-surface-2 animate-pulse" />
+              <div className="h-3 w-24 rounded bg-surface-2 animate-pulse" />
             </div>
           </div>
         )}
         {isEmpty && (
           <div className="absolute inset-0 flex items-center justify-center">
-            <p className="text-slate-500 text-sm">No price history yet</p>
+            <p className="text-xs uppercase tracking-widest text-text-muted">
+              No price history yet
+            </p>
           </div>
         )}
         <div

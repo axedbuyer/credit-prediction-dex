@@ -25,6 +25,10 @@ import {
 const ONE_E18 = 10n ** 18n
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000' as const
 
+function sideLabel(side: 'YES' | 'NO'): string {
+  return side === 'YES' ? 'Upbet' : 'Downbet'
+}
+
 function usdcDisplay(raw: bigint): string {
   return `$${parseFloat(formatUnits(raw, 6)).toFixed(2)}`
 }
@@ -194,14 +198,14 @@ export default function PortfolioPage() {
   if (!isConnected) {
     return (
       <div className="mx-auto max-w-4xl px-4 py-8">
-        <h1 className="text-2xl font-bold text-slate-100">Portfolio</h1>
-        <div className="mt-8 rounded-lg border border-slate-800 bg-slate-900 p-10 text-center">
-          <p className="text-slate-400">Connect your wallet to view positions.</p>
+        <h1 className="font-serif text-2xl text-text-1">Portfolio</h1>
+        <div className="mt-8 pari-a-card text-center">
+          <p className="text-text-2">Connect your wallet to view positions.</p>
         </div>
         {/* Dev preview — all PositionCard states (only in development) */}
         {process.env.NODE_ENV === 'development' && (
-          <div className="mt-10 border-t border-dashed border-slate-700 pt-6 space-y-4">
-            <p className="text-[10px] font-mono uppercase tracking-widest text-slate-600">
+          <div className="mt-10 border-t border-dashed border-subtle pt-6 space-y-4">
+            <p className="text-[10px] font-mono uppercase tracking-widest text-text-muted">
               ↓ dev preview — position card states
             </p>
             <PositionCard side="YES" _dev={DEV_YES_HEALTHY}
@@ -239,8 +243,8 @@ export default function PortfolioPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8">
-      <h1 className="text-2xl font-bold text-slate-100">Portfolio</h1>
-      <p className="mt-1 text-sm text-slate-400">
+      <h1 className="font-serif text-2xl text-text-1">Portfolio</h1>
+      <p className="mt-1 text-sm text-text-2">
         Will MicroStrategy have a credit event in the next 12 months?
       </p>
 
@@ -250,7 +254,7 @@ export default function PortfolioPage() {
           {[0, 1].map((i) => (
             <div
               key={i}
-              className="h-40 rounded-lg border border-slate-800 bg-slate-900 animate-pulse"
+              className="h-40 rounded border border-subtle bg-surface-1 animate-pulse"
             />
           ))}
         </div>
@@ -258,11 +262,11 @@ export default function PortfolioPage() {
 
       {/* Empty state */}
       {hasNoPositions && (
-        <div className="mt-8 rounded-lg border border-slate-800 bg-slate-900 p-10 text-center">
-          <p className="text-slate-400">No positions yet.</p>
+        <div className="mt-8 pari-a-card text-center">
+          <p className="text-text-2">No positions yet.</p>
           <Link
             href="/market/mstr"
-            className="mt-4 inline-block rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-500 transition-colors"
+            className="pari-a-btn pari-a-btn--primary mt-4 inline-flex"
           >
             Go to market to trade
           </Link>
@@ -303,15 +307,15 @@ export default function PortfolioPage() {
 
           {/* Position value summary — net of carry */}
           {(hasYES || hasNO) && (
-            <div className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-5">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3 pari-a-card">
               {hasYES && (
                 <Stat
-                  label="YES value (net of carry)"
+                  label="Upbet value (net of carry)"
                   value={usdcDisplay(yesNetValue)}
                 />
               )}
               {hasNO && (
-                <Stat label="NO value" value={usdcDisplay(noNetValue)} />
+                <Stat label="Downbet value" value={usdcDisplay(noNetValue)} />
               )}
               {hasYES && carryNet !== undefined && (
                 <Stat
@@ -326,20 +330,20 @@ export default function PortfolioPage() {
 
           {/* Redeem section */}
           {hasBoth && (
-            <div className="rounded-lg border border-slate-700 bg-slate-900 p-5">
-              <h2 className="mb-1 text-sm font-semibold text-slate-200">Redeem</h2>
-              <p className="mb-4 text-xs text-slate-400">
-                Burn {tokenDisplay(redeemable)} paired YES + NO tokens and receive{' '}
+            <div className="pari-a-card">
+              <h2 className="mb-1 font-serif text-lg text-text-1">Redeem</h2>
+              <p className="mb-4 text-xs text-text-2">
+                Redeem {tokenDisplay(redeemable)} matched Upbet + Downbet pairs for{' '}
                 {usdcDisplay(redeemable)} USDC
               </p>
               <div className="mb-4 flex items-center justify-between text-sm">
-                <span className="text-slate-400">You receive (net of carry owed)</span>
-                <span className="font-semibold text-slate-100">
+                <span className="text-text-2">You receive (net of carry owed)</span>
+                <span className="font-serif tabular text-text-1">
                   {usdcDisplay(redeemableNet)}
                 </span>
               </div>
               {isClaimable && (
-                <p className="mb-3 text-xs text-red-400">
+                <p className="mb-3 text-xs text-danger">
                   Redeem is disabled while your position is frozen — cure it above first.
                 </p>
               )}
@@ -347,29 +351,29 @@ export default function PortfolioPage() {
                 onClick={handleRedeem}
                 disabled={redeemStatus === 'pending' || redeemable === 0n || !!isClaimable}
                 title={isClaimable ? 'Redeem is disabled while frozen — cure first' : undefined}
-                className="w-full rounded-lg bg-slate-600 py-2.5 text-sm font-semibold text-slate-100 hover:bg-slate-500 disabled:opacity-50 transition-colors"
+                className="pari-a-btn pari-a-btn--secondary w-full"
               >
                 {redeemStatus === 'pending'
                   ? 'Redeeming…'
-                  : `Redeem ${tokenDisplay(redeemable)} tokens for USDC`}
+                  : `Redeem ${tokenDisplay(redeemable)} pairs for USDC`}
               </button>
               {redeemStatus === 'success' && (
-                <p className="mt-2 text-xs text-emerald-400">Redeemed successfully.</p>
+                <p className="mt-2 text-xs text-success">Redeemed successfully.</p>
               )}
             </div>
           )}
 
           {/* Shared tx error */}
           {txError && (
-            <p className="text-center text-xs text-red-400">{txError}</p>
+            <p className="text-center text-xs text-danger">{txError}</p>
           )}
         </div>
       )}
 
       {/* Dev preview — all PositionCard states (only in development) */}
       {process.env.NODE_ENV === 'development' && (
-        <div className="mt-10 border-t border-dashed border-slate-700 pt-6 space-y-4">
-          <p className="text-[10px] font-mono uppercase tracking-widest text-slate-600">
+        <div className="mt-10 border-t border-dashed border-subtle pt-6 space-y-4">
+          <p className="text-[10px] font-mono uppercase tracking-widest text-text-muted">
             ↓ dev preview — position card states
           </p>
           <PositionCard side="YES" _dev={DEV_YES_HEALTHY}
@@ -407,16 +411,16 @@ export default function PortfolioPage() {
           onClick={() => setTradeModal(null)}
         >
           <div
-            className="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-950 p-5 shadow-2xl"
+            className="w-full max-w-sm rounded border border-subtle bg-surface-1 p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-200">
-                Sell {tradeModal}
+              <h2 className="font-serif text-lg text-text-1">
+                Sell {sideLabel(tradeModal)}
               </h2>
               <button
                 onClick={() => setTradeModal(null)}
-                className="text-xl leading-none text-slate-500 hover:text-slate-300"
+                className="text-xl leading-none text-text-muted hover:text-text-1"
                 aria-label="Close"
               >
                 ×
@@ -450,17 +454,19 @@ function Stat({
   dim?: boolean
 }) {
   const valueClass = highlight
-    ? 'text-emerald-400'
+    ? 'text-success'
     : warn
-    ? 'text-red-400'
+    ? 'text-danger'
     : dim
-    ? 'text-slate-500'
-    : 'text-slate-100'
+    ? 'text-text-muted'
+    : 'text-text-1'
 
   return (
     <div>
-      <p className="mb-0.5 text-xs text-slate-500">{label}</p>
-      <p className={`text-sm font-semibold ${valueClass}`}>{value}</p>
+      <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-text-muted">
+        {label}
+      </p>
+      <p className={`font-serif text-sm tabular ${valueClass}`}>{value}</p>
     </div>
   )
 }

@@ -125,10 +125,10 @@ function usdcDisplay(raw: bigint): string {
 }
 
 function epochsColorClass(epochs: bigint | undefined): string {
-  if (epochs === undefined) return 'text-slate-400'
-  if (epochs > 30n)  return 'text-emerald-400'
-  if (epochs >= 7n)  return 'text-amber-400'
-  return 'text-red-400'
+  if (epochs === undefined) return 'text-text-2'
+  if (epochs > 30n)  return 'text-success'
+  if (epochs >= 7n)  return 'text-warning'
+  return 'text-danger'
 }
 
 // -- Component ---------------------------------------------------------------
@@ -148,6 +148,7 @@ export function PositionCard({
   _dev,
 }: PositionCardProps) {
   const isYES = side === 'YES'
+  const sideLabel = isYES ? 'Upbet' : 'Downbet'
   const isReal = !_dev && userAddress !== ZERO_ADDR
 
   const { data, refetch } = useReadContracts({
@@ -266,10 +267,9 @@ export function PositionCard({
   }, [isReal, usdcAddress, cureCost, paddedApproval, creditMarketAddress, writeContractAsync, refetch, onCured])
 
   const { text: pnlText, neg: pnlNeg } = signedWadToPct(pnlRaw)
-  const pnlColor = pnlRaw === undefined ? 'text-slate-100' : pnlNeg ? 'text-red-400' : 'text-emerald-400'
+  const pnlColor = pnlRaw === undefined ? 'text-text-1' : pnlNeg ? 'text-danger' : 'text-success'
 
-  const borderColor = isYES ? 'border-emerald-900/50' : 'border-red-900/50'
-  const labelColor  = isYES ? 'text-emerald-400' : 'text-red-400'
+  const isFrozen = isYES && isClaimable
 
   const carryLabel = carryNet === undefined
     ? null
@@ -278,39 +278,45 @@ export function PositionCard({
     : `Carry owed: ${usdcDisplay(-carryNet)}`
 
   return (
-    <div className={`rounded-lg border ${borderColor} bg-slate-900 p-5`}>
+    <div
+      className="pari-a-card"
+      style={isFrozen ? { borderColor: 'var(--color-warning)' } : undefined}
+    >
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <span className={`text-xs font-semibold uppercase tracking-wider ${labelColor}`}>
-          {side} Position
+      <div className="flex items-center justify-between mb-4 gap-2">
+        <span className={`pari-badge ${isYES ? 'pari-badge--danger' : 'pari-badge--teal'}`}>
+          {sideLabel} position
         </span>
-        {isYES && creditEventConfirmed && (
-          <span className="rounded-full border border-emerald-700/50 bg-emerald-900/60 px-2 py-0.5 text-xs text-emerald-300">
-            Credit event confirmed
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {isFrozen && (
+            <span className="pari-badge pari-badge--warning">Frozen — cure required</span>
+          )}
+          {isYES && creditEventConfirmed && (
+            <span className="pari-badge pari-badge--success">Credit event confirmed</span>
+          )}
+        </div>
       </div>
 
       {/* Frozen state (YES only) — takes priority over the plain seizable warning */}
-      {isYES && isClaimable && (
-        <div className="mb-4 rounded-lg border border-red-700/60 bg-red-900/30 px-3 py-2.5">
-          <p className="mb-1 text-xs font-semibold text-red-400">
+      {isFrozen && (
+        <div className="mb-4 rounded border border-warning/30 bg-warning/10 px-3 py-2.5">
+          <p className="mb-1 text-xs font-semibold text-warning">
             Position frozen — flagged for liquidation
           </p>
-          <p className="mb-2 text-[11px] text-red-300/80">
+          <p className="mb-2 text-[11px] leading-relaxed text-text-2">
             Trading and redeeming are locked until this is cured or claimed. Cure now to
-            keep your {side} and resume normally — you keep the position and pay only the
-            frozen carry owed.
+            keep your {sideLabel} and resume normally — you keep the position and pay only
+            the frozen carry owed.
           </p>
           <div className="mb-2 flex items-center justify-between text-xs">
-            <span className="text-red-300/80">Cure cost</span>
-            <span className="font-semibold text-red-200">{usdcDisplay(cureCost)}</span>
+            <span className="text-text-2">Cure cost</span>
+            <span className="font-serif tabular text-text-1">{usdcDisplay(cureCost)}</span>
           </div>
           <button
             onClick={handleCure}
             disabled={cureStatus === 'pending' || cureStatus === 'success' || !isReal}
-            className="w-full rounded-lg bg-red-600 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+            className="pari-a-btn pari-a-btn--primary w-full"
           >
             {cureStatus === 'pending'
               ? 'Curing…'
@@ -321,20 +327,20 @@ export function PositionCard({
               : 'Cure — no payment due'}
           </button>
           {cureStatus === 'error' && cureError && (
-            <p className="mt-2 text-xs text-red-400">{cureError}</p>
+            <p className="mt-2 text-xs text-danger">{cureError}</p>
           )}
         </div>
       )}
 
       {/* Liquidatable banner (YES only, not yet flagged) */}
       {isYES && !isClaimable && isSeizable && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-red-700/60 bg-red-900/30 px-3 py-2.5">
-          <p className="text-xs font-semibold text-red-400">
+        <div className="mb-4 flex items-center justify-between rounded border border-danger-a28 bg-danger-a10 px-3 py-2.5">
+          <p className="text-xs font-semibold text-danger">
             This position is liquidatable now
           </p>
           <Link
             href="/liquidate"
-            className="ml-3 shrink-0 text-xs font-semibold text-red-300 underline hover:text-red-200"
+            className="ml-3 shrink-0 text-xs font-semibold text-danger underline hover:opacity-80"
           >
             View →
           </Link>
@@ -347,21 +353,23 @@ export function PositionCard({
         <Stat label="Current equity" value={wadToPct(equity)} />
         <Stat label="P&L"            value={pnlText}              colorClass={pnlColor} />
         <Stat label="Breakeven"      value={wadToPct(breakevenMark)} />
-        <Stat label="Tokens"         value={`${tokenAmount(balance)} ${side}`} />
+        <Stat label="Size"           value={`${tokenAmount(balance)} ${sideLabel}`} />
         {carryLabel && (
           <Stat
             label="Carry"
             value={carryLabel}
-            colorClass={carryNet !== undefined && carryNet < 0n ? 'text-red-400' : 'text-emerald-400'}
+            colorClass={carryNet !== undefined && carryNet < 0n ? 'text-danger' : 'text-success'}
           />
         )}
       </div>
 
-      {/* Days remaining — YES only, prominent */}
+      {/* Epochs to expire — YES only, prominent */}
       {isYES && (
-        <div className="mb-5 rounded-lg border border-slate-800 bg-slate-800/40 px-4 py-3">
-          <p className="mb-0.5 text-xs text-slate-500">Days remaining</p>
-          <p className={`text-lg font-bold ${epochsColorClass(epochsToExpire)}`}>
+        <div className="mb-5 rounded border border-subtle bg-surface-2 px-4 py-3">
+          <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-text-muted">
+            Days remaining
+          </p>
+          <p className={`font-serif text-lg tabular ${epochsColorClass(epochsToExpire)}`}>
             {epochsToExpire !== undefined ? `${epochsToExpire} days` : '—'}
           </p>
         </div>
@@ -371,23 +379,23 @@ export function PositionCard({
       <div className="flex gap-2">
         <button
           onClick={onSell}
-          className="flex-1 rounded-lg border border-slate-700 bg-slate-800 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 transition-colors"
+          className="pari-a-btn pari-a-btn--secondary flex-1"
         >
-          Sell {side}
+          Sell {sideLabel}
         </button>
         {isYES && creditEventConfirmed && (
           <button
             onClick={onSettle}
             disabled={settleStatus === 'pending'}
-            className="flex-1 rounded-lg bg-emerald-600 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+            className="pari-a-btn pari-a-btn--primary flex-1"
           >
-            {settleStatus === 'pending' ? 'Settling…' : 'Settle YES for USDC'}
+            {settleStatus === 'pending' ? 'Settling…' : `Settle ${sideLabel} for USDC`}
           </button>
         )}
       </div>
 
       {settleStatus === 'success' && (
-        <p className="mt-2 text-xs text-emerald-400">YES tokens settled for USDC.</p>
+        <p className="mt-2 text-xs text-success">{sideLabel} settled for USDC.</p>
       )}
     </div>
   )
@@ -398,7 +406,7 @@ export function PositionCard({
 function Stat({
   label,
   value,
-  colorClass = 'text-slate-100',
+  colorClass = 'text-text-1',
 }: {
   label: string
   value: string
@@ -406,8 +414,10 @@ function Stat({
 }) {
   return (
     <div>
-      <p className="mb-0.5 text-xs text-slate-500">{label}</p>
-      <p className={`text-sm font-semibold ${colorClass}`}>{value}</p>
+      <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-text-muted">
+        {label}
+      </p>
+      <p className={`font-serif text-sm tabular ${colorClass}`}>{value}</p>
     </div>
   )
 }

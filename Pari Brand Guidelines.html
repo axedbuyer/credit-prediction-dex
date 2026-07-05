@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pari — Brand Guidelines</title>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,700;1,400;1,500&family=Barlow:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ── TOKENS ───────────────────────────────────────── */
+:root {
+  --bg: #0C0D12; --s1: #13141D; --s2: #1A1C26; --s3: #20222E;
+  --bd: rgba(0,196,180,.16); --bs: rgba(255,255,255,.06);
+  --t1: #EDF1F7; --t2: #B0B8CC; --tm: #7A8499; --td: #3A3F56;
+  --tl: #00C4B4; --tla: rgba(0,196,180,.1); --re: #D95B5B; --am: #D4A84C;
+  --ser: 'EB Garamond', Georgia, serif;
+  --san: 'Barlow', system-ui, sans-serif;
+}
+[data-theme=light] {
+  --bg: #F4F6FA; --s1: #fff; --s2: #ECEEF5; --s3: #E0E3EE;
+  --bd: rgba(0,152,140,.26); --bs: rgba(0,0,0,.07);
+  --t1: #0D0F1A; --t2: #3A3F56; --tm: #6E7990; --td: #C0C6D6;
+  --tl: #009990; --tla: rgba(0,153,144,.08); --re: #C44040;
+}
+/* ── RESET ────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { font-family: var(--san); background: var(--bg); color: var(--t1); transition: background .3s, color .3s; }
+button, input { font-family: var(--san); }
+/* ── NAV ──────────────────────────────────────────── */
+nav {
+  position: fixed; inset: 0 0 auto; z-index: 99; height: 52px;
+  display: flex; align-items: center; padding: 0 52px;
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  backdrop-filter: blur(14px); border-bottom: 1px solid var(--bs);
+}
+.nl { display: flex; align-items: center; gap: 10px; text-decoration: none; margin-right: 28px; }
+.nl-t { font-family: var(--ser); font-size: 21px; font-style: italic; color: var(--t1); letter-spacing: -.01em; }
+.nlk { display: flex; list-style: none; flex: 1; }
+.nlk a { display: block; padding: 0 18px; height: 52px; line-height: 52px; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--tm); text-decoration: none; transition: color .2s; }
+.nlk a:hover { color: var(--tl); }
+.nctrl { display: flex; gap: 6px; }
+.tbtn { padding: 5px 14px; border-radius: 3px; border: 1px solid var(--bd); background: transparent; color: var(--tm); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; transition: all .18s; }
+.tbtn:hover, .tbtn.on { border-color: var(--tl); color: var(--tl); }
+/* ── LAYOUT ───────────────────────────────────────── */
+.w { max-width: 1280px; margin: 0 auto; padding: 0 52px; }
+.sec { padding: 88px 0; }
+.slb { font-size: 11px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--tl); margin-bottom: 10px; }
+.stl { font-family: var(--ser); font-size: 42px; font-weight: 400; line-height: 1.1; margin-bottom: 48px; }
+hr { border: none; border-top: 1px solid var(--bs); }
+/* ── COVER ────────────────────────────────────────── */
+.cover {
+  min-height: 100vh; display: flex; align-items: center;
+  position: relative; overflow: hidden; padding-top: 52px;
+}
+.cover::before {
+  content: ''; position: absolute; inset: 0;
+  background-image: radial-gradient(circle, rgba(0,196,180,.22) 1px, transparent 1px);
+  background-size: 52px 52px; pointer-events: none; opacity: .25;
+}
+.glow { position: absolute; border-radius: 50%; pointer-events: none; background: radial-gradient(circle, rgba(0,196,180,.08) 0%, transparent 65%); }
+.cover-nm { font-family: var(--ser); font-size: 128px; font-weight: 400; line-height: .93; margin-bottom: 18px; letter-spacing: -.02em; font-style: italic; color: var(--tl); }
+.cover-tg { font-size: 19px; font-weight: 300; color: var(--t2); letter-spacing: .03em; margin-bottom: 30px; max-width: 540px; line-height: 1.55; }
+.pills { display: flex; gap: 8px; flex-wrap: wrap; }
+.pill { padding: 6px 16px; border: 1px solid var(--bd); border-radius: 2px; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--tm); }
+/* ── LOGO ─────────────────────────────────────────── */
+.lgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--bs); border: 1px solid var(--bs); }
+.lc { padding: 44px 48px; background: var(--bg); display: flex; flex-direction: column; align-items: flex-start; gap: 20px; min-height: 210px; }
+.lc.dk { background: #09090E; }
+.lc.lt { background: #F4F5F9; }
+.lc.tc { background: #00C4B4; }
+.lc-lbl { font-size: 10px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--tm); margin-top: auto; }
+.lc.lt .lc-lbl, .lc.tc .lc-lbl { color: rgba(0,0,0,.38); }
+/* ── PALETTE ──────────────────────────────────────── */
+.pal2 { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; }
+.palrow { display: flex; gap: 4px; margin-bottom: 10px; }
+.sw { flex: 1; height: 66px; border-radius: 3px; display: flex; flex-direction: column; justify-content: flex-end; padding: 6px 8px; }
+.swn { font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.swh { font-size: 9px; font-family: monospace; opacity: .55; }
+.tscale { display: flex; border-radius: 3px; overflow: hidden; margin: 12px 0 22px; }
+.tsi { flex: 1; padding: 11px 8px; display: flex; flex-direction: column; gap: 2px; }
+.tsn { font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.tsh { font-size: 9px; font-family: monospace; opacity: .55; }
+.pal-h { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--tm); margin-bottom: 12px; margin-top: 28px; }
+.pal-h:first-child { margin-top: 0; }
+.tkrow { display: grid; grid-template-columns: 140px 1fr 1fr; border-bottom: 1px solid var(--bs); padding: 8px 12px; font-size: 12px; align-items: center; }
+.tkrow.hd { background: var(--s2); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--tm); }
+.tkrow:last-child { border-bottom: none; }
+.tkcode { color: var(--tl); font-family: monospace; font-size: 11px; }
+.tkval { color: var(--t2); }
+/* ── TYPOGRAPHY ───────────────────────────────────── */
+.ty-sec { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--tm); margin: 40px 0 20px; }
+.tyrow { display: grid; grid-template-columns: 164px 1fr 80px; align-items: baseline; padding: 14px 0; border-bottom: 1px solid var(--bs); gap: 20px; }
+.tymeta { font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--tm); line-height: 1.45; }
+.tymeta code { display: block; font: 9px/1.4 monospace; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--td); margin-top: 2px; }
+.tyuse { font-size: 10px; color: var(--td); text-align: right; line-height: 1.4; }
+/* ── COMPONENTS ───────────────────────────────────── */
+.dirg { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--bs); border: 1px solid var(--bs); }
+.cp { padding: 44px; background: var(--bg); }
+.cpb { background: #070810; }
+.dtag { font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--tl); margin-bottom: 4px; }
+.dname { font-family: var(--ser); font-size: 24px; font-weight: 400; margin-bottom: 24px; color: var(--t1); line-height: 1.15; }
+.dname small { font-family: var(--san); font-size: 12px; font-weight: 400; color: var(--tm); display: block; margin-top: 3px; font-style: normal; }
+.csec { font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--tm); margin: 20px 0 8px; }
+.crow { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
+/* Buttons A */
+.btn { display: inline-flex; align-items: center; padding: 10px 22px; border-radius: 3px; font-size: 13px; font-weight: 600; letter-spacing: .02em; transition: all .18s; border: none; cursor: pointer; }
+.bpa { background: var(--tl); color: #0C0D12; }
+.bpa:hover { filter: brightness(1.08); }
+.bsa { background: transparent; border: 1px solid var(--bd); color: var(--t1); }
+.bsa:hover { border-color: var(--tl); color: var(--tl); }
+.bda { background: rgba(217,91,91,.1); border: 1px solid rgba(217,91,91,.28); color: var(--re); }
+/* Buttons B */
+.btnb { display: inline-flex; align-items: center; padding: 8px 18px; border-radius: 1px; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; transition: all .18s; border: none; cursor: pointer; }
+.bpb { background: #00C4B4; color: #000; }
+.bsb { background: transparent; border: 1px solid rgba(0,196,180,.32); color: #00C4B4; }
+.bdb { background: rgba(217,91,91,.1); border: 1px solid rgba(217,91,91,.3); color: #D95B5B; }
+/* Cards A */
+.ca { background: var(--s1); border: 1px solid var(--bd); border-radius: 4px; padding: 18px 22px; flex: 1; min-width: 0; }
+.ca-t { font-family: var(--ser); font-size: 18px; font-weight: 500; margin-bottom: 2px; }
+.ca-s { font-size: 12px; color: var(--tm); line-height: 1.4; margin-bottom: 6px; }
+.ca-v { font-family: var(--ser); font-size: 38px; font-weight: 400; color: var(--tl); line-height: 1; }
+.ca-u { font-size: 12px; color: var(--t2); margin-top: 2px; }
+/* Cards B */
+.cb { background: #0C0E14; border: 1px solid rgba(0,196,180,.12); border-radius: 1px; padding: 12px 14px; flex: 1; min-width: 0; }
+.cb-h { font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: rgba(0,196,180,.42); border-bottom: 1px solid rgba(0,196,180,.07); padding-bottom: 5px; margin-bottom: 7px; }
+.cb-v { font-size: 34px; font-weight: 600; color: #00C4B4; line-height: 1; }
+.cb-s { font-size: 10px; color: rgba(255,255,255,.25); margin-top: 2px; letter-spacing: .04em; }
+/* Badges */
+.bdg { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 2px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.bdg::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.btl { background: rgba(0,196,180,.12); color: #00C4B4; }
+.bre { background: rgba(217,91,91,.12); color: #D95B5B; }
+.bgy { background: var(--s2); color: var(--tm); }
+/* Inputs A */
+.inpl { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 5px; color: var(--tm); }
+.inp-a { width: 100%; padding: 10px 13px; background: var(--s2); border: 1px solid var(--bs); border-radius: 3px; color: var(--t1); font-size: 13px; outline: none; transition: border-color .18s; }
+.inp-a::placeholder { color: var(--td); }
+.inp-a:focus { border-color: var(--tl); }
+/* Inputs B */
+.inpl-b { font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 4px; color: rgba(0,196,180,.4); }
+.inp-b { width: 100%; padding: 7px 10px; background: transparent; border: none; border-bottom: 1px solid rgba(0,196,180,.18); color: #00C4B4; font-size: 13px; letter-spacing: .04em; outline: none; transition: border-color .18s; }
+.inp-b::placeholder { color: rgba(0,196,180,.28); }
+.inp-b:focus { border-bottom-color: #00C4B4; }
+/* CLOB B */
+.clob { background: #0A0C12; border: 1px solid rgba(0,196,180,.1); border-radius: 1px; overflow: hidden; font-size: 11px; }
+.clob-h { display: grid; grid-template-columns: 80px 1fr 52px; padding: 6px 12px; background: rgba(0,196,180,.05); border-bottom: 1px solid rgba(0,196,180,.08); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: rgba(0,196,180,.38); }
+.clob-r { display: grid; grid-template-columns: 80px 1fr 52px; padding: 5px 12px; border-bottom: 1px solid rgba(255,255,255,.03); }
+.clob-mid { display: grid; grid-template-columns: 80px 1fr 52px; padding: 6px 12px; background: rgba(0,196,180,.07); border-bottom: 1px solid rgba(0,196,180,.1); font-weight: 600; color: #00C4B4; }
+/* Footer */
+.foot { padding: 28px 52px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--bs); }
+/* Animation */
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+.blink { animation: pulse 2.5s ease-in-out infinite; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ NAV ═══════════ -->
+<nav>
+  <a class="nl" href="#brand">
+    <svg width="26" height="26" viewBox="0 0 64 64" fill="none" style="color:var(--tl)">
+      <circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M10 50 C18 50,46 14,54 14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="32" cy="32" r="3.5" fill="currentColor" class="blink"/>
+    </svg>
+    <span class="nl-t">Pari</span>
+  </a>
+  <ul class="nlk">
+    <li><a href="#logo">Logo</a></li>
+    <li><a href="#palette">Palette</a></li>
+    <li><a href="#type">Type</a></li>
+    <li><a href="#components">Components</a></li>
+  </ul>
+  <div class="nctrl">
+    <button class="tbtn on" id="btn-dark" onclick="setTheme('dark')">Dark</button>
+    <button class="tbtn" id="btn-light" onclick="setTheme('light')">Light</button>
+  </div>
+</nav>
+
+<!-- ═══════════ 00 COVER ═══════════ -->
+<div id="brand" class="cover">
+  <div class="glow" style="width:900px;height:900px;top:-260px;right:-180px"></div>
+  <div class="glow" style="width:500px;height:500px;bottom:-160px;left:-100px"></div>
+  <div class="w" style="width:100%;display:grid;grid-template-columns:1fr 290px;align-items:center;gap:80px">
+    <div>
+      <div class="slb" style="margin-bottom:18px">Brand Guidelines · June 2026</div>
+      <div class="cover-nm">Pari</div>
+      <div style="font-size:13px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:var(--tm);margin-bottom:22px">Credit Prediction Market</div>
+      <div class="cover-tg">The first open credit prediction market — trade, hedge, and earn on institutional default probabilities on-chain.</div>
+      <div class="pills">
+        <span class="pill">Pioneering</span>
+        <span class="pill">Analytical</span>
+        <span class="pill">Audacious</span>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+      <svg width="220" height="220" viewBox="0 0 64 64" fill="none" style="color:var(--tl)">
+        <circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="1.5"/>
+        <!-- reference axes -->
+        <line x1="10" y1="32" x2="54" y2="32" stroke="currentColor" stroke-width=".5" stroke-dasharray="2 3" opacity=".18"/>
+        <line x1="32" y1="10" x2="32" y2="54" stroke="currentColor" stroke-width=".5" stroke-dasharray="2 3" opacity=".18"/>
+        <!-- probability sigmoid: M 10 50 C 18 50, 46 14, 54 14 — midpoint is exactly (32,32) -->
+        <path d="M10 50 C18 50,46 14,54 14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        <!-- pari midpoint dot -->
+        <circle cx="32" cy="32" r="3.5" fill="currentColor" class="blink"/>
+      </svg>
+      <div style="text-align:center">
+        <div style="font-family:var(--ser);font-size:28px;font-style:italic;color:var(--t1)">Pari</div>
+        <div style="font-size:9px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:var(--tm);margin-top:3px">Credit Markets</div>
+      </div>
+    </div>
+  </div>
+</div>
+<hr>
+
+<!-- ═══════════ 01 LOGO ═══════════ -->
+<section id="logo" class="sec">
+  <div class="w">
+    <div class="slb">01</div>
+    <div class="stl">Logo System</div>
+  </div>
+  <div style="max-width:1280px;margin:0 auto;padding:0 52px">
+    <div class="lgrid">
+
+      <!-- Primary — dark bg -->
+      <div class="lc dk">
+        <div style="display:flex;align-items:center;gap:14px">
+          <svg width="44" height="44" viewBox="0 0 64 64" fill="none">
+            <circle cx="32" cy="32" r="28" stroke="#00C4B4" stroke-width="1.5"/>
+            <path d="M10 50 C18 50,46 14,54 14" stroke="#00C4B4" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="32" cy="32" r="3.5" fill="#00C4B4"/>
+          </svg>
+          <div>
+            <div style="font-family:'EB Garamond',Georgia,serif;font-size:30px;font-style:italic;color:#EDF1F7;line-height:1">Pari</div>
+            <div style="font-size:9px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:#7A8499;margin-top:2px">Credit Markets</div>
+          </div>
+        </div>
+        <div class="lc-lbl">Primary · On Dark</div>
+      </div>
+
+      <!-- Primary — light bg -->
+      <div class="lc lt">
+        <div style="display:flex;align-items:center;gap:14px">
+          <svg width="44" height="44" viewBox="0 0 64 64" fill="none">
+            <circle cx="32" cy="32" r="28" stroke="#009990" stroke-width="1.5"/>
+            <path d="M10 50 C18 50,46 14,54 14" stroke="#009990" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="32" cy="32" r="3.5" fill="#009990"/>
+          </svg>
+          <div>
+            <div style="font-family:'EB Garamond',Georgia,serif;font-size:30px;font-style:italic;color:#0D0F1A;line-height:1">Pari</div>
+            <div style="font-size:9px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:#7A8499;margin-top:2px">Credit Markets</div>
+          </div>
+        </div>
+        <div class="lc-lbl">Primary · On Light</div>
+      </div>
+
+      <!-- Icon on brand teal -->
+      <div class="lc tc">
+        <svg width="52" height="52" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="28" stroke="rgba(0,0,0,.28)" stroke-width="1.5"/>
+          <path d="M10 50 C18 50,46 14,54 14" stroke="rgba(0,0,0,.65)" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="32" cy="32" r="3.5" fill="rgba(0,0,0,.65)"/>
+        </svg>
+        <div class="lc-lbl">Icon Only · On Brand</div>
+      </div>
+
+      <!-- Compact / nav lockup -->
+      <div class="lc dk">
+        <div style="display:flex;align-items:center;gap:10px">
+          <svg width="28" height="28" viewBox="0 0 64 64" fill="none">
+            <circle cx="32" cy="32" r="28" stroke="#00C4B4" stroke-width="1.5"/>
+            <path d="M10 50 C18 50,46 14,54 14" stroke="#00C4B4" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="32" cy="32" r="3.5" fill="#00C4B4"/>
+          </svg>
+          <span style="font-family:'EB Garamond',Georgia,serif;font-size:24px;font-style:italic;color:#EDF1F7">Pari</span>
+        </div>
+        <div class="lc-lbl">Compact · Nav / App Bar</div>
+      </div>
+
+      <!-- Wordmark only — light -->
+      <div class="lc lt">
+        <div>
+          <div style="font-family:'EB Garamond',Georgia,serif;font-size:32px;font-style:italic;color:#0D0F1A;line-height:1">Pari</div>
+          <div style="font-size:9px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:#7A8499;margin-top:3px">Credit Markets</div>
+        </div>
+        <div class="lc-lbl">Wordmark Only</div>
+      </div>
+
+      <!-- Clear space rule -->
+      <div class="lc">
+        <div style="position:relative;display:inline-block">
+          <div style="border:1px dashed rgba(0,196,180,.32);padding:20px;position:relative">
+            <svg width="36" height="36" viewBox="0 0 64 64" fill="none">
+              <circle cx="32" cy="32" r="28" stroke="#00C4B4" stroke-width="1.5"/>
+              <path d="M10 50 C18 50,46 14,54 14" stroke="#00C4B4" stroke-width="2.5" stroke-linecap="round"/>
+              <circle cx="32" cy="32" r="3.5" fill="#00C4B4"/>
+            </svg>
+            <div style="position:absolute;top:-1px;left:50%;transform:translate(-50%,-100%);font-size:9px;color:var(--tl);font-weight:700;letter-spacing:.06em;padding-bottom:2px">x / 2</div>
+            <div style="position:absolute;left:-1px;top:50%;transform:translate(-100%,-50%);font-size:9px;color:var(--tl);font-weight:700;letter-spacing:.06em;padding-right:2px;white-space:nowrap">x / 2</div>
+          </div>
+        </div>
+        <div class="lc-lbl">Clear Space = ½ icon height on all sides</div>
+      </div>
+
+    </div>
+  </div>
+</section>
+<hr>
+
+<!-- ═══════════ 02 PALETTE ═══════════ -->
+<section id="palette" class="sec">
+  <div class="w">
+    <div class="slb">02</div>
+    <div class="stl">Color System</div>
+    <div class="pal2">
+
+      <!-- LEFT: Dark foundations + teal scale + semantic -->
+      <div>
+        <div class="pal-h">Background — Dark</div>
+        <div class="palrow">
+          <div class="sw" style="background:#0C0D12;border:1px solid rgba(255,255,255,.08)"><span class="swn" style="color:#7A8499">BG</span><span class="swh" style="color:#7A8499">#0C0D12</span></div>
+          <div class="sw" style="background:#13141D"><span class="swn" style="color:#7A8499">S-1</span><span class="swh" style="color:#7A8499">#13141D</span></div>
+          <div class="sw" style="background:#1A1C26"><span class="swn" style="color:#7A8499">S-2</span><span class="swh" style="color:#7A8499">#1A1C26</span></div>
+          <div class="sw" style="background:#20222E"><span class="swn" style="color:#7A8499">S-3</span><span class="swh" style="color:#7A8499">#20222E</span></div>
+          <div class="sw" style="background:#3A3F56"><span class="swn" style="color:#EDF1F7">Dim</span><span class="swh" style="color:#EDF1F7">#3A3F56</span></div>
+        </div>
+        <div class="palrow">
+          <div class="sw" style="background:#EDF1F7"><span class="swn" style="color:#0C0D12">T-1</span><span class="swh" style="color:#0C0D12">#EDF1F7</span></div>
+          <div class="sw" style="background:#B0B8CC"><span class="swn" style="color:#0C0D12">T-2</span><span class="swh" style="color:#0C0D12">#B0B8CC</span></div>
+          <div class="sw" style="background:#7A8499"><span class="swn" style="color:#EDF1F7">Muted</span><span class="swh" style="color:#EDF1F7">#7A8499</span></div>
+        </div>
+
+        <div class="pal-h">Teal Scale</div>
+        <div class="tscale">
+          <div class="tsi" style="background:#C0F5F2"><span class="tsn" style="color:#006B65">050</span><span class="tsh" style="color:#006B65">#C0F5F2</span></div>
+          <div class="tsi" style="background:#8EECEA"><span class="tsn" style="color:#006B65">100</span><span class="tsh" style="color:#006B65">#8EECEA</span></div>
+          <div class="tsi" style="background:#5CDDD5"><span class="tsn" style="color:#006B65">200</span><span class="tsh" style="color:#006B65">#5CDDD5</span></div>
+          <div class="tsi" style="background:#2CCEC4"><span class="tsn" style="color:#fff">300</span><span class="tsh" style="color:#fff">#2CCEC4</span></div>
+          <div class="tsi" style="background:#00C4B4;box-shadow:inset 0 0 0 2px rgba(255,255,255,.3)"><span class="tsn" style="color:#fff">400★</span><span class="tsh" style="color:#fff">#00C4B4</span></div>
+          <div class="tsi" style="background:#009990"><span class="tsn" style="color:#fff">500</span><span class="tsh" style="color:#fff">#009990</span></div>
+          <div class="tsi" style="background:#006B65"><span class="tsn" style="color:#fff">600</span><span class="tsh" style="color:#fff">#006B65</span></div>
+        </div>
+
+        <div class="pal-h">Semantic</div>
+        <div class="palrow">
+          <div class="sw" style="background:#22C55E"><span class="swn" style="color:#fff">Success</span><span class="swh" style="color:#fff">#22C55E</span></div>
+          <div class="sw" style="background:#D4A84C"><span class="swn" style="color:#fff">Warning</span><span class="swh" style="color:#fff">#D4A84C</span></div>
+          <div class="sw" style="background:#D95B5B"><span class="swn" style="color:#fff">Danger</span><span class="swh" style="color:#fff">#D95B5B</span></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Light foundations + token reference -->
+      <div>
+        <div class="pal-h">Background — Light</div>
+        <div class="palrow">
+          <div class="sw" style="background:#F4F6FA;border:1px solid rgba(0,0,0,.08)"><span class="swn" style="color:#3A3F56">BG</span><span class="swh" style="color:#3A3F56">#F4F6FA</span></div>
+          <div class="sw" style="background:#fff;border:1px solid rgba(0,0,0,.08)"><span class="swn" style="color:#3A3F56">S-1</span><span class="swh" style="color:#3A3F56">#FFFFFF</span></div>
+          <div class="sw" style="background:#ECEEF5;border:1px solid rgba(0,0,0,.06)"><span class="swn" style="color:#3A3F56">S-2</span><span class="swh" style="color:#3A3F56">#ECEEF5</span></div>
+          <div class="sw" style="background:#E0E3EE;border:1px solid rgba(0,0,0,.05)"><span class="swn" style="color:#3A3F56">S-3</span><span class="swh" style="color:#3A3F56">#E0E3EE</span></div>
+          <div class="sw" style="background:#C0C6D6;border:1px solid rgba(0,0,0,.05)"><span class="swn" style="color:#3A3F56">Dim</span><span class="swh" style="color:#3A3F56">#C0C6D6</span></div>
+        </div>
+        <div class="palrow">
+          <div class="sw" style="background:#0D0F1A"><span class="swn" style="color:#EDF1F7">T-1</span><span class="swh" style="color:#EDF1F7">#0D0F1A</span></div>
+          <div class="sw" style="background:#3A3F56"><span class="swn" style="color:#EDF1F7">T-2</span><span class="swh" style="color:#EDF1F7">#3A3F56</span></div>
+          <div class="sw" style="background:#6E7990"><span class="swn" style="color:#EDF1F7">Muted</span><span class="swh" style="color:#EDF1F7">#6E7990</span></div>
+        </div>
+
+        <div class="pal-h">Token Reference</div>
+        <div style="background:var(--s1);border:1px solid var(--bs);border-radius:3px;overflow:hidden">
+          <div class="tkrow hd"><span>Token</span><span>Dark</span><span>Light</span></div>
+          <div class="tkrow"><span class="tkcode">--bg</span><span class="tkval">#0C0D12</span><span class="tkval">#F4F6FA</span></div>
+          <div class="tkrow"><span class="tkcode">--surface-1</span><span class="tkval">#13141D</span><span class="tkval">#FFFFFF</span></div>
+          <div class="tkrow"><span class="tkcode">--surface-2</span><span class="tkval">#1A1C26</span><span class="tkval">#ECEEF5</span></div>
+          <div class="tkrow"><span class="tkcode">--teal</span><span class="tkval">#00C4B4</span><span class="tkval">#009990</span></div>
+          <div class="tkrow"><span class="tkcode">--text-1</span><span class="tkval">#EDF1F7</span><span class="tkval">#0D0F1A</span></div>
+          <div class="tkrow"><span class="tkcode">--text-2</span><span class="tkval">#B0B8CC</span><span class="tkval">#3A3F56</span></div>
+          <div class="tkrow"><span class="tkcode">--text-muted</span><span class="tkval">#7A8499</span><span class="tkval">#6E7990</span></div>
+          <div class="tkrow"><span class="tkcode">--border</span><span class="tkval">teal @16%</span><span class="tkval">teal @26%</span></div>
+          <div class="tkrow"><span class="tkcode">--danger</span><span class="tkval">#D95B5B</span><span class="tkval">#C44040</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+<hr>
+
+<!-- ═══════════ 03 TYPOGRAPHY ═══════════ -->
+<section id="type" class="sec">
+  <div class="w">
+    <div class="slb">03</div>
+    <div class="stl">Typography</div>
+
+    <div class="ty-sec" style="margin-top:0">EB Garamond — Display &amp; Headings</div>
+    <div class="tyrow">
+      <div class="tymeta">Display<code>96px / weight 400</code></div>
+      <div style="font-family:var(--ser);font-size:72px;font-weight:400;line-height:.92">Credit <em style="color:var(--tl)">Risk</em></div>
+      <div class="tyuse">Cover<br>Hero</div>
+    </div>
+    <div class="tyrow">
+      <div class="tymeta">Heading 1<code>56px / weight 400</code></div>
+      <div style="font-family:var(--ser);font-size:44px;font-weight:400;line-height:1.05">Trade, Hedge &amp; <em style="color:var(--tl)">Earn</em></div>
+      <div class="tyuse">Section<br>title</div>
+    </div>
+    <div class="tyrow">
+      <div class="tymeta">Heading 2<code>36px / weight 400</code></div>
+      <div style="font-family:var(--ser);font-size:30px;font-weight:400;line-height:1.1">Microstrategy Default · Jun 2026</div>
+      <div class="tyuse">Card<br>heading</div>
+    </div>
+    <div class="tyrow">
+      <div class="tymeta">Data Display<code>64px / weight 400</code></div>
+      <div style="font-family:var(--ser);font-size:52px;font-weight:400;color:var(--tl);line-height:1">50.2%</div>
+      <div class="tyuse">Market<br>price</div>
+    </div>
+
+    <div class="ty-sec">Barlow — UI &amp; Body</div>
+    <div class="tyrow">
+      <div class="tymeta">Subtitle<code>20px / weight 300</code></div>
+      <div style="font-size:20px;font-weight:300;color:var(--t2);line-height:1.5;max-width:620px">Permissionless access to institutional credit instruments previously reserved for TradFi insiders.</div>
+      <div class="tyuse">Deck<br>subtitle</div>
+    </div>
+    <div class="tyrow">
+      <div class="tymeta">Body<code>14px / weight 400</code></div>
+      <div style="font-size:14px;font-weight:400;line-height:1.6;color:var(--t2);max-width:580px">50% market price represents the cumulative default probability. Upbetters pay periodic premiums; Downbetters earn yield without token emissions or farming rewards.</div>
+      <div class="tyuse">UI body</div>
+    </div>
+    <div class="tyrow">
+      <div class="tymeta">Label<code>11px / weight 600 UC</code></div>
+      <div style="font-size:11px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--tl)">Credit Betting Market · Expiry Jun 2026</div>
+      <div class="tyuse">Labels<br>Tags</div>
+    </div>
+    <div class="tyrow">
+      <div class="tymeta">Tabular Data<code>13px / weight 700</code></div>
+      <div style="font-size:13px;font-weight:700;letter-spacing:.02em;font-variant-numeric:tabular-nums;display:flex;gap:24px">
+        <span>0.502</span><span style="color:var(--tl)">+2.40%</span><span style="color:var(--tm)">$1,240,000</span>
+      </div>
+      <div class="tyuse">Table<br>data</div>
+    </div>
+  </div>
+</section>
+<hr>
+
+<!-- ═══════════ 04 COMPONENTS ═══════════ -->
+<section id="components" class="sec">
+  <div class="w" style="margin-bottom:28px">
+    <div class="slb">04</div>
+    <div class="stl" style="margin-bottom:12px">Components</div>
+    <p style="font-size:14px;color:var(--tm);max-width:640px;line-height:1.6">Two visual directions for the Pari platform. <strong style="color:var(--t1)">Direction A — The Analyst</strong> uses classical serif type and institutional spacing. <strong style="color:var(--t1)">Direction B — The Trader</strong> uses terminal density and precision.</p>
+  </div>
+  <div class="w">
+    <div class="dirg">
+
+      <!-- DIRECTION A: THE ANALYST -->
+      <div class="cp">
+        <div class="dtag">Direction A</div>
+        <div class="dname">The Analyst<small>Institutional elegance — Bloomberg meets fine finance</small></div>
+
+        <div class="csec">Buttons</div>
+        <div class="crow">
+          <button class="btn bpa">Trade Now</button>
+          <button class="btn bsa">View Market</button>
+          <button class="btn bda">Upbet Risk</button>
+        </div>
+
+        <div class="csec">Market Cards</div>
+        <div class="crow" style="width:100%;gap:10px">
+          <div class="ca">
+            <div class="ca-t">Microstrategy</div>
+            <div class="ca-s">Senior Unsecured · Jun 2026</div>
+            <div class="ca-v">50.2%</div>
+            <div class="ca-u">Implied yield 10.4%</div>
+          </div>
+          <div class="ca">
+            <div class="ca-t">Bybit Exchange</div>
+            <div class="ca-s">Platform Credit · Dec 2026</div>
+            <div class="ca-v">35.0%</div>
+            <div class="ca-u">Implied yield 7.1%</div>
+          </div>
+        </div>
+
+        <div class="csec">Status Badges</div>
+        <div class="crow">
+          <span class="bdg btl">Downbet</span>
+          <span class="bdg bre">Upbet</span>
+          <span class="bdg bgy">Pending</span>
+        </div>
+
+        <div class="csec">Input Field</div>
+        <div>
+          <div class="inpl">Notional Amount (USDC)</div>
+          <input class="inp-a" placeholder="50,000" type="text">
+        </div>
+
+        <div class="csec">Recent Trades</div>
+        <div class="ca" style="padding:0;overflow:hidden">
+          <div style="display:grid;grid-template-columns:1fr 80px 70px;padding:10px 18px;border-bottom:1px solid var(--bs);font-size:12px;align-items:center">
+            <span style="font-weight:500">MSTR Downbet</span>
+            <span style="color:var(--tl);font-family:'EB Garamond',serif;font-size:16px">50.2%</span>
+            <span style="color:var(--tm);text-align:right">$50K</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 80px 70px;padding:10px 18px;font-size:12px;align-items:center">
+            <span style="font-weight:500">BYBIT Upbet</span>
+            <span style="color:var(--re);font-family:'EB Garamond',serif;font-size:16px">35.0%</span>
+            <span style="color:var(--tm);text-align:right">$25K</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- DIRECTION B: THE TRADER -->
+      <div class="cp cpb">
+        <div class="dtag" style="color:#00C4B4">Direction B</div>
+        <div class="dname" style="color:#EDF1F7">The Trader<small>Terminal precision — Hyperliquid meets Bloomberg YAS</small></div>
+
+        <div class="csec" style="color:rgba(0,196,180,.38)">Buttons</div>
+        <div class="crow">
+          <button class="btnb bpb">Trade Now</button>
+          <button class="btnb bsb">View Market</button>
+          <button class="btnb bdb">Upbet Risk</button>
+        </div>
+
+        <div class="csec" style="color:rgba(0,196,180,.38)">Market Cards</div>
+        <div class="crow" style="width:100%;gap:8px">
+          <div class="cb">
+            <div class="cb-h">MSTR · Jun 2026</div>
+            <div class="cb-v">50.2%</div>
+            <div class="cb-s">Yld 10.4% · $2.4M Notional</div>
+          </div>
+          <div class="cb">
+            <div class="cb-h">BYBIT · Dec 2026</div>
+            <div class="cb-v">35.0%</div>
+            <div class="cb-s">Yld 7.1% · $1.1M Notional</div>
+          </div>
+        </div>
+
+        <div class="csec" style="color:rgba(0,196,180,.38)">Status Badges</div>
+        <div class="crow">
+          <span class="bdg btl">Downbet</span>
+          <span class="bdg bre">Upbet</span>
+          <span class="bdg" style="background:rgba(255,255,255,.05);color:rgba(255,255,255,.3)">Pending</span>
+        </div>
+
+        <div class="csec" style="color:rgba(0,196,180,.38)">Input Field</div>
+        <div>
+          <div class="inpl-b">Notional Amount (USDC)</div>
+          <input class="inp-b" placeholder="50,000" type="text">
+        </div>
+
+        <div class="csec" style="color:rgba(0,196,180,.38)">Order Book (CLOB)</div>
+        <div class="clob">
+          <div class="clob-h"><span>Price (DP%)</span><span>Notional</span><span style="text-align:right">Type</span></div>
+          <div class="clob-r" style="color:#D95B5B"><span>51.0%</span><span>$500K</span><span style="text-align:right;color:#3A3F56">—</span></div>
+          <div class="clob-r" style="color:#D95B5B"><span>50.5%</span><span>$50K</span><span style="text-align:right;color:rgba(255,255,255,.25)">User</span></div>
+          <div class="clob-mid"><span>50.2% ←</span><span>Market · Yld 10%</span><span style="text-align:right"></span></div>
+          <div class="clob-r" style="color:#00C4B4"><span>50.1%</span><span>$100K</span><span style="text-align:right;color:rgba(255,255,255,.25)">MM</span></div>
+          <div class="clob-r" style="color:#00C4B4;border-bottom:none"><span>49.0%</span><span>$500K</span><span style="text-align:right;color:#3A3F56">—</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<div class="foot w">
+  <div style="font-size:11px;color:var(--td);letter-spacing:.08em;text-transform:uppercase">Pari Brand Guidelines · Confidential · June 2026</div>
+  <div style="font-family:var(--ser);font-size:14px;font-style:italic;color:var(--tm)">Pioneering · Analytical · Audacious</div>
+</div>
+
+<script>
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  document.querySelectorAll('[id^=btn-]').forEach(b => b.classList.remove('on'));
+  document.getElementById('btn-' + t)?.classList.add('on');
+}
+</script>
+</body>
+</html>
