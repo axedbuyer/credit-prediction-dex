@@ -1,0 +1,10 @@
+{
+  "name": "demo-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone viem/tsx scripts that seed the local anvil demo stack. Not part of any workspace — has its own node_modules (tsx module-resolution quirk).",
+  "dependencies": {
+    "viem": "^2.21.0",
+    "tsx": "^4.7.0"
+  }
+}
