@@ -243,6 +243,17 @@ export class LiquidationKeeper {
 
 export function startServer(keeper: LiquidationKeeper, port: number): http.Server {
   const server = http.createServer((req, res) => {
+    // Permissive CORS — same rationale as order-book-server: this is a
+    // local dev/demo read-only API with no auth/cookies, consumed directly
+    // by the frontend's browser fetch(). Without this header the browser
+    // silently blocks the response and the UI falls back to placeholder
+    // fixtures even though /claimable itself returns real data.
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' })
+      res.end()
+      return
+    }
     if (req.method === 'GET' && req.url === '/claimable') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(keeper.getPositions()))

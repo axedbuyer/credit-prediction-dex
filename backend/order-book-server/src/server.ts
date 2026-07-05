@@ -96,6 +96,22 @@ async function runChainPreFilter(
 export function buildApp(store: OrderStore, config: AppConfig, chainReader?: IChainReader): FastifyInstance {
   const app = Fastify({ logger: false })
 
+  // Permissive CORS — this is a local-first dev/demo API (no auth, no cookies)
+  // consumed directly by the frontend's browser fetch() calls. Without this,
+  // GET /orderbook succeeds for server-side/curl callers but is silently
+  // blocked by the browser's CORS check, leaving the UI's order book empty
+  // even though the data is there. No credentials are used, so a wildcard
+  // origin is safe here.
+  app.addHook('onSend', async (_request, reply, payload) => {
+    reply.header('Access-Control-Allow-Origin', '*')
+    reply.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
+    reply.header('Access-Control-Allow-Headers', 'Content-Type')
+    return payload
+  })
+  app.options('*', async (_request, reply) => {
+    reply.status(204).send()
+  })
+
   // POST /order — validate EIP-712 sig, add to order book
   app.post<{ Body: OrderWire }>('/order', async (request, reply) => {
     const body = request.body
