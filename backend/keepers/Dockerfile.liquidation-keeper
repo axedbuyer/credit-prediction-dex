@@ -1,0 +1,37 @@
+# liquidation-keeper — exposes GET /claimable (flagged positions + formulaic claim
+# price P); read-only, never signs a transaction (claiming is permissionless and done
+# by third parties). Entry point: liquidation-keeper.ts, run DIRECTLY via
+# `node -r ts-node/register liquidation-keeper.ts` — the same pattern as
+# scripts/demo/demo-up.sh, so the image runs exactly what the demo stack runs.
+# (`npm run build` also emits dist/ for both keepers, but this image deliberately
+# stays on the proven ts-node path.)
+#
+# ts-node is a devDependency in package.json but IS required at runtime under this
+# execution model, so this image installs full `npm ci` (no --omit=dev / --production).
+#
+# Build context: this directory (backend/keepers/). Railway "Root Directory" =
+# backend/keepers, "RAILWAY_DOCKERFILE_PATH" = Dockerfile.liquidation-keeper (Railway's
+# default Dockerfile name is "Dockerfile"; a non-default filename requires this var).
+#
+# Build & run (verified locally with `npm ci`; image itself was NOT docker-built in this
+# environment — no docker binary available):
+#   docker build -f Dockerfile.liquidation-keeper -t liquidation-keeper .
+#   docker run --env-file .env -p 3003:3003 liquidation-keeper
+
+FROM node:20-slim
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY liquidation-keeper.ts ./
+
+RUN groupadd --system --gid 1001 nodejs \
+ && useradd --system --uid 1001 --gid nodejs appuser \
+ && chown -R appuser:nodejs /app
+USER appuser
+
+EXPOSE 3003
+CMD ["node", "-r", "ts-node/register", "liquidation-keeper.ts"]
