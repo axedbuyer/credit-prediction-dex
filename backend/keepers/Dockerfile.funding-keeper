@@ -1,0 +1,37 @@
+# funding-keeper — accrueFunding() every epoch; flags + freezes f_now for positions
+# breaching the seizure trigger. Entry point: funding-keeper.ts, run DIRECTLY via
+# `node -r ts-node/register funding-keeper.ts` — the same pattern as the package.json
+# "start" script and scripts/demo/demo-up.sh, so the image runs exactly what every
+# other environment runs. (`npm run build` also emits dist/ for both keepers, but this
+# image deliberately stays on the proven ts-node path.)
+#
+# ts-node is a devDependency in package.json but IS required at runtime under this
+# execution model, so this image installs full `npm ci` (no --omit=dev / --production).
+#
+# Build context: this directory (backend/keepers/). Railway "Root Directory" =
+# backend/keepers, "RAILWAY_DOCKERFILE_PATH" = Dockerfile.funding-keeper (Railway's
+# default Dockerfile name is "Dockerfile"; a non-default filename requires this var).
+#
+# Build & run (verified locally with `npm ci`; `npm run build` also verified but its
+# output is unused by this image — see above. Image itself was NOT docker-built in this
+# environment — no docker binary available):
+#   docker build -f Dockerfile.funding-keeper -t funding-keeper .
+#   docker run --env-file .env -p 3002:3002 funding-keeper
+
+FROM node:20-slim
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY funding-keeper.ts ./
+
+RUN groupadd --system --gid 1001 nodejs \
+ && useradd --system --uid 1001 --gid nodejs appuser \
+ && chown -R appuser:nodejs /app
+USER appuser
+
+EXPOSE 3002
+CMD ["node", "-r", "ts-node/register", "funding-keeper.ts"]

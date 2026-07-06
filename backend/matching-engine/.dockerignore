@@ -1,0 +1,10 @@
+# Applies only if this service is ever built with context = backend/matching-engine/
+# instead of the repo root (see Dockerfile header comment — repo-root context is
+# required for the normal build because of the settler.ts deployments-file dependency).
+node_modules
+dist
+.env
+.env.*
+!.env.example
+*.log
+src/__tests__
