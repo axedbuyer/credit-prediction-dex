@@ -136,5 +136,9 @@ export class MemoryOrderStore implements OrderStore {
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 export function createRedisClient(host = 'localhost', port = 6379): Redis {
+  // REDIS_URL (redis://:password@host:port) takes precedence — managed Redis
+  // (e.g. Railway) requires auth that bare host/port can't carry.
+  const url = process.env.REDIS_URL
+  if (url) return new Redis(url, { lazyConnect: true })
   return new Redis({ host, port, lazyConnect: true })
 }

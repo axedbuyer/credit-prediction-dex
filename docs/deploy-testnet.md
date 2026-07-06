@@ -155,7 +155,9 @@ Create one Railway project for this environment (e.g. "pari-sepolia"). Steps:
 Add a Railway-managed Redis plugin to the project. Note its private connection host/port
 (Railway exposes this as `${{Redis.RAILWAY_PRIVATE_DOMAIN}}` / `${{Redis.RAILWAY_TCP_PROXY_PORT}}`
 template variables you can reference from each service's env vars, or read them off the
-Redis plugin's "Connect" tab) — used as `REDIS_HOST`/`REDIS_PORT` below.
+Redis plugin's "Connect" tab). For each service that needs Redis, set
+`REDIS_URL=${{Redis.REDIS_URL}}` (Railway reference variable) — it carries the
+required auth password that bare `REDIS_HOST`/`REDIS_PORT` cannot.
 
 ### 3.1 order-book-server
 - New service → Deploy from GitHub repo → this monorepo.
@@ -163,7 +165,8 @@ Redis plugin's "Connect" tab) — used as `REDIS_HOST`/`REDIS_PORT` below.
 - Env vars (see `backend/order-book-server/.env.example` for the full annotated list):
   `USDC_ADDRESS`, `YES_TOKEN_ADDRESS`, `NO_TOKEN_ADDRESS`, `CLOB_SETTLEMENT_ADDRESS`,
   `CREDIT_MARKET_ADDRESS` (all from `deployments/base-sepolia.json` after §1),
-  `CHAIN_ID=84532`, `BASE_SEPOLIA_RPC_URL`, `PORT=3001`, `REDIS_HOST`, `REDIS_PORT`.
+  `CHAIN_ID=84532`, `BASE_SEPOLIA_RPC_URL`, `REDIS_URL=${{Redis.REDIS_URL}}` (leave
+  `PORT` unset — Railway injects it).
 - Networking: **public** (frontend calls this directly via `NEXT_PUBLIC_ORDER_BOOK_URL`
   — see §4). Generate a Railway domain or attach a custom one.
 - Health check: **no `/health` route exists on this service** (confirmed — only
@@ -179,7 +182,7 @@ Redis plugin's "Connect" tab) — used as `REDIS_HOST`/`REDIS_PORT` below.
   **private** URL of the order-book-server service, e.g.
   `http://order-book-server.railway.internal:3001` — use Railway's private networking
   hostname, not the public domain), `SETTLER_PRIVATE_KEY`, `BASE_SEPOLIA_RPC_URL`,
-  `REDIS_HOST`, `REDIS_PORT`. The three settler contract addresses MUST be set explicitly
+  `REDIS_URL=${{Redis.REDIS_URL}}`. The three settler contract addresses MUST be set explicitly
   in hosted environments — the `contracts/deployments/base-sepolia.json` fallback in
   `createSettler()` is local-dev only and does not exist inside the container.
 - Networking: **internal/private only** — this service exposes no HTTP server at all (it's
