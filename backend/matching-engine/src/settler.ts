@@ -466,14 +466,33 @@ export function createSettler(engine: MatchingEngine): Settler {
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
-  // Path: src/ → matching-engine/ → backend/ → project root → contracts/deployments/
-  const deploymentsPath = path.join(
-    __dirname, '..', '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
-  )
-  const deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8')) as {
-    clobSettlement: string
-    creditMarket: string
-    usdc: string
+  // Contract addresses: env vars take precedence; the checked-in deployments
+  // JSON is a local-dev fallback only (it does not exist inside containers).
+  const deployments = {
+    clobSettlement: process.env.CLOB_SETTLEMENT_ADDRESS,
+    creditMarket:   process.env.CREDIT_MARKET_ADDRESS,
+    usdc:           process.env.USDC_ADDRESS,
+  }
+  if (!deployments.clobSettlement || !deployments.creditMarket || !deployments.usdc) {
+    // Path: src/ → matching-engine/ → backend/ → project root → contracts/deployments/
+    const deploymentsPath = path.join(
+      __dirname, '..', '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
+    )
+    let file: { clobSettlement?: string; creditMarket?: string; usdc?: string }
+    try {
+      file = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8'))
+    } catch (err) {
+      throw new Error(
+        'settler: CLOB_SETTLEMENT_ADDRESS, CREDIT_MARKET_ADDRESS, and USDC_ADDRESS ' +
+        `are not all set, and the deployments fallback could not be read at ${deploymentsPath}: ${err}`,
+      )
+    }
+    deployments.clobSettlement ??= file.clobSettlement
+    deployments.creditMarket   ??= file.creditMarket
+    deployments.usdc           ??= file.usdc
+    if (!deployments.clobSettlement || !deployments.creditMarket || !deployments.usdc) {
+      throw new Error(`settler: missing contract address(es) in env and ${deploymentsPath}`)
+    }
   }
 
   const account = privateKeyToAccount(privateKey as `0x${string}`)
