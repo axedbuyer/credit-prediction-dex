@@ -12,7 +12,7 @@
     "skipLibCheck": true,
     "declaration": true
   },
-  "include": ["funding-keeper.ts"],
+  "include": ["funding-keeper.ts", "liquidation-keeper.ts"],
   "exclude": ["node_modules", "dist"],
   "ts-node": {
     "transpileOnly": true
