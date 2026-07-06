@@ -502,10 +502,14 @@ export function createSettler(engine: MatchingEngine): Settler {
   const walletClient = createWalletClient({ account, chain: baseSepolia, transport })
 
   const Redis = require('ioredis') as typeof import('ioredis').default
-  const redis = new Redis({
-    host: process.env.REDIS_HOST ?? 'localhost',
-    port: parseInt(process.env.REDIS_PORT ?? '6379'),
-  })
+  // REDIS_URL (redis://:password@host:port) takes precedence — managed Redis
+  // (e.g. Railway) requires auth that bare host/port can't carry.
+  const redis = process.env.REDIS_URL
+    ? new Redis(process.env.REDIS_URL)
+    : new Redis({
+        host: process.env.REDIS_HOST ?? 'localhost',
+        port: parseInt(process.env.REDIS_PORT ?? '6379'),
+      })
 
   return new Settler(
     engine,
