@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  contracts:
+    name: contracts (forge test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: forge test
+        working-directory: contracts
+        run: forge test -vv
+
+  backend-matching-engine:
+    name: backend / matching-engine (test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: npm ci
+        working-directory: backend/matching-engine
+        run: npm ci
+      - name: npm run test
+        working-directory: backend/matching-engine
+        run: npm run test
+
+  backend-order-book-server:
+    name: backend / order-book-server (test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: npm ci
+        working-directory: backend/order-book-server
+        run: npm ci
+      - name: npm run test
+        working-directory: backend/order-book-server
+        run: npm run test
+
+  backend-keepers:
+    name: backend / keepers (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: npm ci
+        working-directory: backend/keepers
+        run: npm ci
+      - name: npm run build
+        working-directory: backend/keepers
+        run: npm run build
+      - name: npm run test
+        working-directory: backend/keepers
+        run: npm run test
+
+  frontend:
+    name: frontend (type-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci
+      - name: npm run type-check
+        working-directory: frontend
+        run: npm run type-check

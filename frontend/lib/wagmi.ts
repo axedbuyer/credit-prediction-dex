@@ -3,7 +3,25 @@ import { baseSepolia } from 'wagmi/chains'
 import { connectorsForWallets } from '@rainbow-me/rainbowkit'
 import { metaMaskWallet, coinbaseWallet } from '@rainbow-me/rainbowkit/wallets'
 
-const projectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? 'placeholder'
+const rawProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+
+let projectId: string
+if (rawProjectId) {
+  projectId = rawProjectId
+} else if (process.env.NODE_ENV === 'production') {
+  // Shipping without a real project ID silently breaks WalletConnect (the QR/deep-link
+  // connector) in production — fail loudly at config creation instead of shipping it broken.
+  throw new Error(
+    'NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is not set. Get a project ID from ' +
+    'https://cloud.walletconnect.com and set it before building for production.',
+  )
+} else {
+  console.warn(
+    'NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is not set — using a placeholder for local ' +
+    'development. WalletConnect will not work; set this env var before deploying.',
+  )
+  projectId = 'placeholder'
+}
 
 const connectors = connectorsForWallets(
   [
