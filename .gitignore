@@ -15,10 +15,9 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/
 
-# Environment
-.env
-.env.local
-.env.*.local
+# Environment — ignore every .env variant (incl. backup copies) except examples
+.env*
+!.env*.example
 
 # Secrets
 *token*.txt
