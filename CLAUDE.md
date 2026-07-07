@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services are built and tested — 87
-contract tests, 77 off-chain tests, verified end-to-end with a 12/12 anvil smoke test.
+contract tests, 79 off-chain tests, verified end-to-end with a 12/12 anvil smoke test.
 Target network is Base Sepolia (testnet) ahead of Base mainnet.
 
 ---
