@@ -200,6 +200,16 @@ script run.
   events, a Safe-based role ceremony off the raw deployer EOA, a Foundry stateful
   invariant suite + Slither + external audit, mainnet plumbing, and a full credit-event
   dress rehearsal on Sepolia.
+- **Complementary matching (future, design decision 2026-07-07):** mint stays
+  permissionless — mint-and-sell-one-side is the supply mechanism of a complete-set
+  market (it grows open interest beyond team-MM inventory, and is the arb that keeps
+  `YES + NO = $1` across the two books), so it must never be gated at the contract
+  level. The UI keeps buy-first as the default path and frames mint-and-sell as the
+  carry-seller entry ("deposit USDC → sell the Upbet side → earn daily carry"). The
+  long-term resolution is Polymarket-style complementary matching in the engine: a YES
+  buy at `p` crossing a NO buy at `1−p` mints a fresh set from their combined $1 (and
+  the reverse cross merges/redeems), so every user is implicitly a minter without ever
+  seeing the mechanic.
 - **Funding Model v2 (future, not building now):** a per-wallet prepaid USDC buffer for
   liquidation runway, a Dutch-auction discount ramp instead of the current fixed
   formulaic claim price, and a non-linear token mark for correct convexity above ~10%
