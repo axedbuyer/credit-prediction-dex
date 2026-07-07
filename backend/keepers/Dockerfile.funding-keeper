@@ -6,7 +6,9 @@
 # image deliberately stays on the proven ts-node path.)
 #
 # ts-node is a devDependency in package.json but IS required at runtime under this
-# execution model, so this image installs full `npm ci` (no --omit=dev / --production).
+# execution model, so the install must force --include=dev: NODE_ENV=production alone
+# makes npm ci default to omit=dev, which would drop ts-node and crash the container
+# with "Cannot find module 'ts-node/register'".
 #
 # Build context: this directory (backend/keepers/). Railway "Root Directory" =
 # backend/keepers, "RAILWAY_DOCKERFILE_PATH" = Dockerfile.funding-keeper (Railway's
@@ -23,7 +25,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY tsconfig.json ./
 COPY funding-keeper.ts ./
