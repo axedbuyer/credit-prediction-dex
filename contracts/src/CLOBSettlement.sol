@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -25,7 +26,7 @@ interface ICreditMarket {
     function markDebtCollected(address user) external;
 }
 
-contract CLOBSettlement is ReentrancyGuard {
+contract CLOBSettlement is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     struct Order {
@@ -51,6 +52,21 @@ contract CLOBSettlement is ReentrancyGuard {
 
     mapping(address => mapping(uint256 => bool)) public usedNonces;
 
+    // ── trading fee ──────────────────────────────────────────────────────────
+    // Charged only on the carry-earning side of a trade: the YES seller and the
+    // NO buyer. YES buys and NO sells (flows that take on the funding-paying
+    // side) are fee-free by design. fee = feeBps × min(p, 1−p) × Q, where Q
+    // tokens carry exactly Q USDC of notional (tokens mint 1:1 with USDC, so
+    // `amount` IS the notional). The min(p, 1−p) base makes "buy NO at 1−p"
+    // cost the same as the equivalent "mint + sell YES at p" — a flat fee on
+    // USDC traded would send everyone around the fee through the mint route.
+    uint256 public constant MAX_FEE_BPS = 500;
+
+    uint256 public feeBps;            // fee rate in bps of min(p, 1−p) × Q
+    uint256 public insuranceShareBps; // share of each fee routed to insuranceFund
+    address public teamWallet;
+    address public insuranceFund;
+
     event OrderSettled(
         address indexed maker,
         address indexed taker,
@@ -60,6 +76,20 @@ contract CLOBSettlement is ReentrancyGuard {
         uint256 amountOut
     );
 
+    event FeeConfigUpdated(
+        uint256 feeBps,
+        address teamWallet,
+        address insuranceFund,
+        uint256 insuranceShareBps
+    );
+    event FeeCharged(
+        address indexed payer,
+        bool isYesSale,
+        uint256 fee,
+        uint256 toInsurance,
+        uint256 toTeam
+    );
+
     error InvalidSignature();
     error OrderExpired();
     error NonceUsed();
@@ -67,8 +97,10 @@ contract CLOBSettlement is ReentrancyGuard {
     error SlippageExceeded();
     error FundingShortfall();
     error PositionFrozen();
+    error FeeConfigInvalid();
 
-    constructor(address _creditMarket) {
+    constructor(address _creditMarket, address admin) {
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
         creditMarket = _creditMarket;
         usdc         = ICreditMarket(_creditMarket).usdc();
         yesToken     = ICreditMarket(_creditMarket).yesToken();
@@ -84,6 +116,39 @@ contract CLOBSettlement is ReentrancyGuard {
                 address(this)
             )
         );
+    }
+
+    // Fee starts at 0 (constructor leaves it unset); admin activates and can
+    // retune rate, recipients, and split without a redeploy.
+    function setFeeConfig(
+        uint256 _feeBps,
+        address _teamWallet,
+        address _insuranceFund,
+        uint256 _insuranceShareBps
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_feeBps > MAX_FEE_BPS || _insuranceShareBps > 10_000) revert FeeConfigInvalid();
+        if (_feeBps > 0 && (_teamWallet == address(0) || _insuranceFund == address(0))) {
+            revert FeeConfigInvalid();
+        }
+        feeBps            = _feeBps;
+        teamWallet        = _teamWallet;
+        insuranceFund     = _insuranceFund;
+        insuranceShareBps = _insuranceShareBps;
+        emit FeeConfigUpdated(_feeBps, _teamWallet, _insuranceFund, _insuranceShareBps);
+    }
+
+    // fee = feeBps × min(tradePrice, amount − tradePrice) / 10_000.
+    // `tradePrice` is the buyer's gross USDC leg, so for NO buys p is measured
+    // fee-inclusive — a second-order (feeBps²) deviation from the pure-price
+    // formula, accepted to keep the on-chain rule a single deterministic
+    // expression that off-chain callers can invert exactly.
+    // tradePrice ≥ amount (p ≥ $1) is economically nonsense but signable;
+    // there is no (1−p) side to price the fee on, so it clamps to 0.
+    function tradeFee(uint256 amount, uint256 tradePrice) public view returns (uint256) {
+        if (feeBps == 0 || tradePrice >= amount) return 0;
+        uint256 minSide =
+            tradePrice < amount - tradePrice ? tradePrice : amount - tradePrice;
+        return minSide * feeBps / 10_000;
     }
 
     // Returns the EIP-712 digest that each party must sign.
@@ -146,28 +211,51 @@ contract CLOBSettlement is ReentrancyGuard {
 
     // Split out of verifyAndSettle to give the funding-settlement + swap logic its
     // own stack frame (the combined function hits "stack too deep" under solc 0.8.24).
+    // Trade context lives in one memory struct (a single stack slot) — with the
+    // fee fields added, loose locals here blow solc 0.8.24's stack again even
+    // after the frame split.
+    struct TradeCtx {
+        address seller;
+        address buyer;
+        bool    isYesSale;
+        uint256 amount;          // tokens sold
+        uint256 tradePrice;      // buyer's gross USDC leg
+        uint256 sellerMinOut;    // seller's signed limit (needed net-of-fee on NO sales)
+        uint256 fee;
+        uint256 sellerProceeds;
+        uint256 debtToCollateral;
+    }
+
     function _settleFundingAndSwap(Order calldata makerOrder, Order calldata takerOrder) private {
         // ── identify seller/buyer and sale type ──────────────────────────────
         // The seller is whichever party sends YES/NO tokens and receives USDC.
         bool makerIsSeller = makerOrder.tokenIn == yesToken || makerOrder.tokenIn == noToken;
-        address seller = makerIsSeller ? makerOrder.maker : takerOrder.maker;
-        address buyer  = makerIsSeller ? takerOrder.maker : makerOrder.maker;
-        bool isYesSale = makerIsSeller
-            ? makerOrder.tokenIn == yesToken
-            : takerOrder.tokenIn == yesToken;
-        uint256 amount     = makerIsSeller ? makerOrder.amountIn : takerOrder.amountIn; // tokens sold
-        uint256 tradePrice = makerIsSeller ? takerOrder.amountIn : makerOrder.amountIn; // pure token value
+
+        TradeCtx memory t;
+        t.seller       = makerIsSeller ? makerOrder.maker : takerOrder.maker;
+        t.buyer        = makerIsSeller ? takerOrder.maker : makerOrder.maker;
+        t.isYesSale    = (makerIsSeller ? makerOrder.tokenIn : takerOrder.tokenIn) == yesToken;
+        t.amount       = makerIsSeller ? makerOrder.amountIn : takerOrder.amountIn;
+        t.tradePrice   = makerIsSeller ? takerOrder.amountIn : makerOrder.amountIn;
+        t.sellerMinOut = makerIsSeller ? makerOrder.minAmountOut : takerOrder.minAmountOut;
 
         // A flagged position is fully locked until claimed, cured, or settled
         // post-credit-event: no CLOB trade may move tokens in/out of it either side.
-        _requireNotFrozen(seller, buyer);
+        _requireNotFrozen(t.seller, t.buyer);
 
         // ── funding settlement (v1b1-2b-2: per-user, no pool, no tradePrice
         // coupling) — BEFORE the swap, on each party's full pre-trade balance.
         // A credit (positive delta) is already paid out directly by settleFunding;
         // a debit (negative delta) is only reported here, never pulled.
-        int256 sellerDelta = ICreditMarket(creditMarket).settleFunding(seller);
-        ICreditMarket(creditMarket).settleFunding(buyer);
+        int256 sellerDelta = ICreditMarket(creditMarket).settleFunding(t.seller);
+        ICreditMarket(creditMarket).settleFunding(t.buyer);
+
+        // ── trading fee ──────────────────────────────────────────────────────
+        // Fee-paying side is whoever moves toward the carry-earning side: the
+        // YES seller (fee joins the funding debit as a deduction from proceeds)
+        // or the NO buyer (fee rides inside their signed amountIn — the contract
+        // can never pull USDC beyond what a party signed for).
+        t.fee = tradeFee(t.amount, t.tradePrice);
 
         // ── seller proceeds ───────────────────────────────────────────────────
         // tradePrice is pure token value — funding never rides the swap leg except
@@ -175,30 +263,38 @@ contract CLOBSettlement is ReentrancyGuard {
         // an outstanding YES-side debit, which must be collected from this trade's
         // proceeds now (Option B): the debit stays in collateral, funded by the
         // buyer's payment, and the sale reverts (position fully unchanged) if the
-        // trade doesn't clear high enough to cover it.
-        uint256 sellerProceeds  = tradePrice;
-        uint256 debtToCollateral = 0;
-        if (isYesSale && sellerDelta < 0) {
-            uint256 owed = uint256(-sellerDelta);
-            if (tradePrice < owed) revert FundingShortfall();
-            sellerProceeds   = tradePrice - owed;
-            debtToCollateral = owed;
+        // trade doesn't clear high enough to cover it. The fee extends that
+        // safeguard: a YES sale that can't cover debit + fee reverts the same way.
+        t.sellerProceeds = t.tradePrice - t.fee;
+        if (t.isYesSale) {
+            uint256 owed = sellerDelta < 0 ? uint256(-sellerDelta) : 0;
+            if (t.tradePrice < owed + t.fee) revert FundingShortfall();
+            t.sellerProceeds   = t.tradePrice - owed - t.fee;
+            t.debtToCollateral = owed;
+        } else if (t.fee > 0) {
+            // NO sale: the buyer pays the fee, so the fee-free seller's limit
+            // must be honored NET of it — the gross check in verifyAndSettle is
+            // necessary but not sufficient here.
+            if (t.sellerProceeds < t.sellerMinOut) revert SlippageExceeded();
         }
 
         // ── atomic swap ──────────────────────────────────────────────────────
         // Token leg: seller's tokens move to the buyer.
-        IERC20(isYesSale ? yesToken : noToken).safeTransferFrom(seller, buyer, amount);
+        IERC20(t.isYesSale ? yesToken : noToken).safeTransferFrom(t.seller, t.buyer, t.amount);
 
         // USDC leg: buyer pays sellerProceeds to the seller; any collected debit
         // routes to CreditMarket (collateral) instead of the seller.
-        IERC20(usdc).safeTransferFrom(buyer, seller, sellerProceeds);
-        if (debtToCollateral > 0) {
-            IERC20(usdc).safeTransferFrom(buyer, creditMarket, debtToCollateral);
+        IERC20(usdc).safeTransferFrom(t.buyer, t.seller, t.sellerProceeds);
+        if (t.debtToCollateral > 0) {
+            IERC20(usdc).safeTransferFrom(t.buyer, creditMarket, t.debtToCollateral);
             // The debt amount now sits in collateral — clear the seller's ledger entry.
             // (Buyer's debit, and a NO-sale seller's debit, are intentionally left
             // uncollected here: they persist in fundingDebt and are collected later
             // at redeem/settleYES/a future YES sale/liquidation.)
-            ICreditMarket(creditMarket).markDebtCollected(seller);
+            ICreditMarket(creditMarket).markDebtCollected(t.seller);
+        }
+        if (t.fee > 0) {
+            _collectFee(t.buyer, t.isYesSale ? t.seller : t.buyer, t.isYesSale, t.fee);
         }
 
         emit OrderSettled(
@@ -209,6 +305,19 @@ contract CLOBSettlement is ReentrancyGuard {
             makerOrder.amountIn,
             takerOrder.amountIn
         );
+    }
+
+    // The fee is always pulled from the buyer's USDC as part of the trade's USDC
+    // leg — on a YES sale it's the slice of the buyer's payment carved out of the
+    // seller's proceeds (the seller is the payer); on a NO sale it's the slice of
+    // the buyer's signed amountIn on top of what the seller receives (the buyer
+    // is the payer). Fees never touch CreditMarket collateral.
+    function _collectFee(address buyer, address payer, bool isYesSale, uint256 fee) private {
+        uint256 toInsurance = fee * insuranceShareBps / 10_000;
+        uint256 toTeam      = fee - toInsurance;
+        if (toInsurance > 0) IERC20(usdc).safeTransferFrom(buyer, insuranceFund, toInsurance);
+        if (toTeam > 0)      IERC20(usdc).safeTransferFrom(buyer, teamWallet, toTeam);
+        emit FeeCharged(payer, isYesSale, fee, toInsurance, toTeam);
     }
 
     // Hoisted into its own frame (rather than inlined) to keep _settleFundingAndSwap's

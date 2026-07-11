@@ -50,7 +50,7 @@ contract IntegrationTest is Test {
         market   = new CreditMarket(
             admin, address(usdc), address(yesToken), address(noToken), MARK, 1 days
         );
-        clob   = new CLOBSettlement(address(market));
+        clob   = new CLOBSettlement(address(market), admin);
         router = new OracleRouter(admin, address(market));
 
         // ── grant roles ───────────────────────────────────────────────────
@@ -354,7 +354,7 @@ contract IntegrationV1bTest is Test {
         market            = new CreditMarket(
             admin, address(usdc), address(yesToken), address(noToken), MARK_5PCT, 1 days
         );
-        clob              = new CLOBSettlement(address(market));
+        clob              = new CLOBSettlement(address(market), admin);
         insuranceFund     = new InsuranceFund(admin, address(usdc));
         liquidationEngine = new LiquidationEngine(address(market), address(insuranceFund));
 

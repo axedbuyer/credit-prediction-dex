@@ -50,4 +50,8 @@ export interface AppConfig {
   // omitted and buildApp() skips freeze/funding pre-filter checks entirely).
   creditMarketAddress?: string
   rpcUrl?: string
+  // Trading fee in bps of min(p, 1−p) × Q — must mirror CLOBSettlement.feeBps.
+  // Drives the net-of-fee price basis for NO bids and the YES-sell pre-filter's
+  // fee component. Absent/0 ⇒ legacy gross pricing, no fee in the pre-filter.
+  feeBps?: number
 }

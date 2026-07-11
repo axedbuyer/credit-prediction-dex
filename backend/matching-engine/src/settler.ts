@@ -47,6 +47,15 @@ export const CLOB_SETTLEMENT_ABI = [
     type: 'error' as const,
     inputs: [],
   },
+  // Order amounts are static, so a SlippageExceeded pair reverts identically
+  // forever too. It only arises when the server's FEE_BPS disagrees with
+  // CLOBSettlement.feeBps (a NO bid priced gross crosses, but the fee-free
+  // seller's net check fails on-chain) — prune rather than wedge the level.
+  {
+    name: 'SlippageExceeded',
+    type: 'error' as const,
+    inputs: [],
+  },
 ] as const
 
 // ─── CreditMarket ABI (minimal — claimable() read only) ──────────────────────
@@ -200,6 +209,18 @@ class Settler extends EventEmitter {
       }
       if (revertName === 'PositionFrozen') {
         await this.handlePositionFrozen(maker, taker)
+        return
+      }
+      if (revertName === 'SlippageExceeded') {
+        // Deterministic for this pair (amounts are static; almost certainly a
+        // FEE_BPS ↔ on-chain feeBps mismatch). Either order might still match
+        // a different counterparty, but we can't tell which leg is "at fault"
+        // without re-deriving fee math here — remove both; makers can resubmit.
+        console.error(
+          `[settler] SlippageExceeded (fee-config mismatch?) — removing both ` +
+          `maker=${maker.id} taker=${taker.id}`,
+        )
+        await this.removeBoth(maker, taker)
         return
       }
 
@@ -372,7 +393,7 @@ class Settler extends EventEmitter {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-type DeterministicRevert = 'FundingShortfall' | 'PositionFrozen'
+type DeterministicRevert = 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded'
 
 // Decodes a deterministic, non-retryable custom-error revert out of a thrown
 // estimateContractGas error. viem wraps on-chain reverts in a BaseError chain;
@@ -387,7 +408,11 @@ function decodeSettlementError(err: unknown): DeterministicRevert | undefined {
     e => e instanceof ContractFunctionRevertedError,
   ) as ContractFunctionRevertedError | null
   const errorName = revertError?.data?.errorName
-  if (errorName === 'FundingShortfall' || errorName === 'PositionFrozen') return errorName
+  if (
+    errorName === 'FundingShortfall' ||
+    errorName === 'PositionFrozen' ||
+    errorName === 'SlippageExceeded'
+  ) return errorName
   return undefined
 }
 

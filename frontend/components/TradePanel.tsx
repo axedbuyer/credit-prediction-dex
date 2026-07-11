@@ -9,6 +9,7 @@ import { wagmiConfig } from '@/lib/wagmi'
 import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
 import { ORDER_BOOK_URL } from '@/lib/constants'
 import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
+import { FEE_BPS, tradeFee, minGrossForNet } from '@/lib/feeMath'
 
 // ── EIP-712 types ────────────────────────────────────────────────────────────
 
@@ -218,29 +219,60 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     }
   }
 
+  // ── Trade fee (charged on the carry-earning side only) ─────────────────────
+  // Upbet (YES) sell: fee comes out of the seller's proceeds on-chain, exactly
+  //   like the carry debit — mirror CLOBSettlement's tradeFee for the preview.
+  // Downbet (NO) buy: fee rides inside the buyer's signed amountIn — the order
+  //   signs GROSS (position cost + fee) so the fee-free seller still nets the
+  //   intended cost; minGrossForNet is the exact inversion of the on-chain check.
+  // Upbet buys and Downbet sells carry no trade fee.
+  const isYesSell = direction === 'SELL' && side === 'YES'
+  const isNoBuy   = direction === 'BUY'  && side === 'NO'
+  const feeWeiPreview: bigint =
+    usdcAmountWeiPreview !== null && tokenAmountWeiPreview !== null && tokenAmountWeiPreview > 0n
+      ? isYesSell
+        ? tradeFee(tokenAmountWeiPreview, usdcAmountWeiPreview)
+        : isNoBuy
+        ? minGrossForNet(usdcAmountWeiPreview, tokenAmountWeiPreview) - usdcAmountWeiPreview
+        : 0n
+      : 0n
+
+  const feeDisplay = feeWeiPreview > 0n
+    ? `$${parseFloat(formatUnits(feeWeiPreview, 6)).toFixed(2)}`
+    : null
+  const feePctLabel = `${(Number(FEE_BPS) / 100).toFixed(2).replace(/\.?0+$/, '')}%`
+
+  // The on-chain Option B check is tradePrice ≥ carry owed + fee.
   const carryShortfall =
     wantsCarryPreview &&
     carryOwed > 0n &&
     usdcAmountWeiPreview !== null &&
-    usdcAmountWeiPreview < carryOwed
+    usdcAmountWeiPreview < carryOwed + feeWeiPreview
 
-  // Minimum sell price (as annual-probability %) needed for THIS order's token quantity
-  // to clear carry owed: price = carryOwed / tokenAmountSold.
+  // Minimum sell price (as annual-probability %) needed for THIS order's token
+  // quantity to clear carry owed plus the trade fee: exact inversion of
+  // net(G) = G − fee(G) ≥ carryOwed, divided by tokens sold.
   const minSellPricePct =
     wantsCarryPreview && carryOwed > 0n && tokenAmountWeiPreview && tokenAmountWeiPreview > 0n
-      ? (Number(carryOwed) / Number(tokenAmountWeiPreview)) * 100
+      ? (Number(minGrossForNet(carryOwed, tokenAmountWeiPreview)) / Number(tokenAmountWeiPreview)) * 100
       : null
 
   const carryOwedDisplay = wantsCarryPreview && carryOwed > 0n
     ? `$${parseFloat(formatUnits(carryOwed, 6)).toFixed(2)}`
     : null
 
+  const sellDeductions = carryOwed + feeWeiPreview
   const sellProceedsAfterCarry =
-    wantsCarryPreview && carryOwed > 0n && usdcAmountWeiPreview !== null
+    isYesSell && sellDeductions > 0n && usdcAmountWeiPreview !== null
       ? formatUnits(
-          usdcAmountWeiPreview > carryOwed ? usdcAmountWeiPreview - carryOwed : 0n,
+          usdcAmountWeiPreview > sellDeductions ? usdcAmountWeiPreview - sellDeductions : 0n,
           6,
         )
+      : null
+
+  const noBuyTotalDisplay =
+    isNoBuy && feeWeiPreview > 0n && usdcAmountWeiPreview !== null
+      ? `$${parseFloat(formatUnits(usdcAmountWeiPreview + feeWeiPreview, 6)).toFixed(2)}`
       : null
 
   // ── Submit ─────────────────────────────────────────────────────────────────
@@ -283,7 +315,16 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       const tokenOut = direction === 'BUY'
         ? (side === 'YES' ? contracts.yesToken : contracts.noToken)
         : contracts.usdc
-      const amountIn = direction === 'BUY' ? usdcAmountWei : tokenAmountWei
+      // Downbet (NO) buys sign a GROSS amountIn — position cost plus the trade
+      // fee — because on-chain the fee is carved out of the buyer's USDC leg
+      // and the fee-free seller's limit is checked against the NET amount.
+      // Every other combination signs its amounts unchanged (no fee, or the
+      // fee is deducted from the Upbet seller's proceeds after the fact).
+      const grossUsdcIn =
+        direction === 'BUY' && side === 'NO'
+          ? minGrossForNet(usdcAmountWei, tokenAmountWei)
+          : usdcAmountWei
+      const amountIn = direction === 'BUY' ? grossUsdcIn : tokenAmountWei
       const minAmountOut = direction === 'BUY' ? tokenAmountWei : usdcAmountWei
 
       // The demo chain is time-warped well ahead of wall-clock time, so a
@@ -513,9 +554,18 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
           <p className={carryShortfall ? 'text-danger' : undefined}>
             Carry owed: {carryOwedDisplay}
             {minSellPricePct !== null && (
-              <> — minimum sell price to cover carry: {minSellPricePct.toFixed(1)}%</>
+              <> — minimum sell price to cover carry{feeWeiPreview > 0n ? ' + fee' : ''}: {minSellPricePct.toFixed(1)}%</>
             )}
           </p>
+        )}
+        {isYesSell && feeDisplay && (
+          <p>Trade fee ({feePctLabel}): {feeDisplay}</p>
+        )}
+        {noBuyTotalDisplay && (
+          <p>Total {noBuyTotalDisplay} — includes {feeDisplay} trade fee ({feePctLabel})</p>
+        )}
+        {((direction === 'BUY' && side === 'YES') || (direction === 'SELL' && side === 'NO')) && (
+          <p className="text-text-muted">No trade fee on this order</p>
         )}
         {sellProceedsAfterCarry !== null && !carryShortfall && (
           <p>You receive ≈ ${parseFloat(sellProceedsAfterCarry).toFixed(2)}</p>
