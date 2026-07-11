@@ -355,6 +355,98 @@ describe('POST /order — v1b1 chain pre-filter', () => {
   })
 })
 
+describe('POST /order — trading fee (feeBps=50)', () => {
+  const FEE_CONFIG: AppConfig = { ...TEST_CONFIG, feeBps: 50 }
+
+  let app: ReturnType<typeof buildApp>
+  let store: MemoryOrderStore
+
+  beforeEach(() => {
+    store = new MemoryOrderStore()
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  it('stores a NO bid at its NET price (buyer amountIn is fee-inclusive)', async () => {
+    app = buildApp(store, FEE_CONFIG)
+
+    // Gross 950e6 for 1000e6 NO → fee = min(950e6, 50e6) × 50/10000 = 250_000
+    const wire = await buildOrderWire(
+      MAKER,
+      {
+        tokenIn: MOCK_USDC as Address, tokenOut: MOCK_NO as Address,
+        amountIn: BigInt(950_000_000), minAmountOut: BigInt(1_000_000_000),
+      },
+      BigInt(200),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+    expect(res.statusCode).toBe(201)
+
+    const { orderId } = res.json<{ orderId: string }>()
+    const stored = await store.getOrder(orderId)
+    expect(stored?.price).toBeCloseTo(0.94975, 10) // net 949.75e6 / 1000e6, not gross 0.95
+  })
+
+  it('stores a YES bid at its GROSS price (YES buys are fee-free)', async () => {
+    app = buildApp(store, FEE_CONFIG)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      {
+        tokenIn: MOCK_USDC as Address, tokenOut: MOCK_YES as Address,
+        amountIn: BigInt(50_000_000), minAmountOut: BigInt(1_000_000_000),
+      },
+      BigInt(201),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+    expect(res.statusCode).toBe(201)
+
+    const { orderId } = res.json<{ orderId: string }>()
+    const stored = await store.getOrder(orderId)
+    expect(stored?.price).toBeCloseTo(0.05, 10)
+  })
+
+  it('rejects a YES sell that covers the debit but not debit + fee', async () => {
+    // D = 30e6; minAmountOut 30_000_001 clears D but not D + fee (150_000)
+    const reader = mockChainReader({ fundingDebt: BigInt(30_000_000), previewDelta: BigInt(0) })
+    app = buildApp(store, FEE_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      {
+        tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address,
+        amountIn: BigInt(1_000_000_000), minAmountOut: BigInt(30_000_001),
+      },
+      BigInt(202),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+
+    expect(res.statusCode).toBe(400)
+    const body = res.json<{ error: string; minSellProceeds: string }>()
+    expect(body.error).toBe('FundingShortfall')
+    // Exact inversion of net(G) = G − fee(G): ceil(30e6 × 10000 / 9950)
+    expect(body.minSellProceeds).toBe('30150754')
+  })
+
+  it('accepts a YES sell priced at the minSellProceeds hint', async () => {
+    const reader = mockChainReader({ fundingDebt: BigInt(30_000_000), previewDelta: BigInt(0) })
+    app = buildApp(store, FEE_CONFIG, reader)
+
+    const wire = await buildOrderWire(
+      MAKER,
+      {
+        tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address,
+        amountIn: BigInt(1_000_000_000), minAmountOut: BigInt(30_150_754),
+      },
+      BigInt(203),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: wire })
+    expect(res.statusCode).toBe(201)
+  })
+})
+
 describe('GET /orderbook', () => {
   let app: ReturnType<typeof buildApp>
   let store: MemoryOrderStore

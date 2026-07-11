@@ -41,7 +41,7 @@ contract CLOBSettlementTest is Test {
         market   = new CreditMarket(
             admin, address(usdc), address(yesToken), address(noToken), 0.23e18, 1 days
         );
-        clob = new CLOBSettlement(address(market));
+        clob = new CLOBSettlement(address(market), admin);
 
         // Wire token roles for CreditMarket
         yesToken.grantRole(yesToken.MINTER_ROLE(), address(market));
@@ -472,5 +472,208 @@ contract CLOBSettlementTest is Test {
 
         vm.expectRevert(CLOBSettlement.PositionFrozen.selector);
         clob.verifyAndSettle(mo, ms, to_, ts);
+    }
+
+    // ─── trading fee: YES sells and NO buys pay; YES buys and NO sells don't ──
+
+    address teamWallet    = makeAddr("team-wallet");
+    address insuranceSink = makeAddr("insurance-sink");
+
+    // 50 bps of min(p, 1−p) × Q, split 50/50 team wallet / insurance fund.
+    function _enableFee() internal {
+        clob.setFeeConfig(50, teamWallet, insuranceSink, 5_000);
+    }
+
+    function test_SetFeeConfig_OnlyAdmin() public {
+        vm.prank(maker);
+        vm.expectRevert(); // AccessControlUnauthorizedAccount
+        clob.setFeeConfig(50, teamWallet, insuranceSink, 5_000);
+    }
+
+    function test_SetFeeConfig_Validation() public {
+        vm.expectRevert(CLOBSettlement.FeeConfigInvalid.selector);
+        clob.setFeeConfig(501, teamWallet, insuranceSink, 5_000); // > MAX_FEE_BPS
+
+        vm.expectRevert(CLOBSettlement.FeeConfigInvalid.selector);
+        clob.setFeeConfig(50, teamWallet, insuranceSink, 10_001); // share > 100%
+
+        vm.expectRevert(CLOBSettlement.FeeConfigInvalid.selector);
+        clob.setFeeConfig(50, address(0), insuranceSink, 5_000); // no team recipient
+
+        vm.expectRevert(CLOBSettlement.FeeConfigInvalid.selector);
+        clob.setFeeConfig(50, teamWallet, address(0), 5_000); // no insurance recipient
+    }
+
+    // YES trade at p = 0.05: fee = 50e18 × 50 / 10_000 = 0.25e18, paid by the
+    // SELLER out of proceeds; the buyer's total spend is exactly tradePrice.
+    function test_Fee_YESSale_SellerPays_BuyerDoesNot() public {
+        _enableFee();
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 50e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 1_000e18, 50e18, expiry, 0
+        );
+
+        uint256 makerUsdcBefore = usdc.balanceOf(maker);
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+        uint256 marketUsdcBefore = usdc.balanceOf(address(market));
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        // min(50, 1000−50) = 50e18 → fee = 0.25e18, split 0.125 / 0.125.
+        assertEq(usdc.balanceOf(maker), makerUsdcBefore - 50e18, "YES buyer pays pure tradePrice, fee-free");
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - 0.25e18, "YES seller nets tradePrice minus fee");
+        assertEq(usdc.balanceOf(insuranceSink), 0.125e18, "insurance half");
+        assertEq(usdc.balanceOf(teamWallet),    0.125e18, "team half");
+        assertEq(usdc.balanceOf(address(market)), marketUsdcBefore, "fees never touch collateral");
+    }
+
+    // NO trade: the BUYER's signed amountIn is gross (fee-inclusive); the
+    // fee-free seller receives amountIn − fee, and route equivalence holds:
+    // the fee at gross 950e18 equals the YES-sale fee at 50e18 (both 0.25e18,
+    // both priced off the same 50e18 min-side).
+    function test_Fee_NOBuy_BuyerPays_SellerDoesNot() public {
+        _enableFee();
+
+        uint256 expiry = block.timestamp + 1 hours;
+        // Buyer signs gross 950e18; fee = min(950, 50) × 0.005 = 0.25e18;
+        // seller's limit (949e18) is checked against the NET 949.75e18.
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(noToken), 950e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(noToken), address(usdc), 1_000e18, 949e18, expiry, 0
+        );
+
+        uint256 makerUsdcBefore = usdc.balanceOf(maker);
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        assertEq(usdc.balanceOf(maker), makerUsdcBefore - 950e18, "NO buyer pays their signed gross total");
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 950e18 - 0.25e18, "NO seller receives gross minus buyer's fee");
+        assertEq(usdc.balanceOf(insuranceSink), 0.125e18, "insurance half");
+        assertEq(usdc.balanceOf(teamWallet),    0.125e18, "team half");
+    }
+
+    // NO sale where net proceeds would fall below the fee-free seller's signed
+    // limit: gross passes the legacy check but net does not → SlippageExceeded.
+    function test_Fee_NOBuy_NetBelowSellerLimit_Reverts() public {
+        _enableFee();
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(noToken), 950e18, 1_000e18, expiry, 0
+        );
+        // Seller demands the full 950e18 — net 949.75e18 can't satisfy it.
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(noToken), address(usdc), 1_000e18, 950e18, expiry, 0
+        );
+        bytes memory ms = _sign(makerKey, mo);
+        bytes memory ts = _sign(takerKey, to_);
+
+        vm.expectRevert(CLOBSettlement.SlippageExceeded.selector);
+        clob.verifyAndSettle(mo, ms, to_, ts);
+    }
+
+    // Option B safeguard extends to the fee: a YES sale clearing above the
+    // funding debit but below debit + fee still reverts, position unchanged.
+    function test_Fee_YESSale_DebitPlusFeeShortfall_Reverts() public {
+        _enableFee();
+        _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18);
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        // owed = 30e18; fee at tradePrice 30.1e18 = 0.1505e18; 30.1 < 30.2505 → revert.
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 30.1e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 1_000e18, 30.1e18, expiry, 0
+        );
+        bytes memory ms = _sign(makerKey, mo);
+        bytes memory ts = _sign(takerKey, to_);
+
+        uint256 takerYesBefore = yesToken.balanceOf(taker);
+
+        vm.expectRevert(CLOBSettlement.FundingShortfall.selector);
+        clob.verifyAndSettle(mo, ms, to_, ts);
+
+        assertEq(yesToken.balanceOf(taker), takerYesBefore, "position unchanged after failed sell");
+        assertFalse(market.claimable(taker), "failed sell never flags the position");
+    }
+
+    // Debit AND fee both deducted when the YES sale clears high enough.
+    function test_Fee_YESSale_StacksWithFundingDebit() public {
+        _enableFee();
+        _stripTakerToPureYes();
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18);
+        vm.warp(block.timestamp + 365 days);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        // owed = 30e18; tradePrice 50e18 → fee = 0.25e18; seller nets 19.75e18.
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 50e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 1_000e18, 50e18, expiry, 0
+        );
+
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - 30e18 - 0.25e18,
+            "seller nets tradePrice minus debit minus fee");
+        assertEq(market.fundingDebt(taker), 0, "debt collected via markDebtCollected");
+    }
+
+    // feeBps = 0 (constructor default): all legacy paths charge nothing — the
+    // rest of this suite runs without _enableFee() and doubles as coverage.
+    function test_Fee_ZeroConfig_NoCharge() public {
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), address(yesToken), 50e18, 1_000e18, expiry, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, address(yesToken), address(usdc), 1_000e18, 50e18, expiry, 0
+        );
+
+        uint256 takerUsdcBefore = usdc.balanceOf(taker);
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18, "no fee when unconfigured");
+    }
+
+    function test_TradeFee_Formula() public {
+        _enableFee();
+        // p < 0.5: min side is tradePrice.
+        assertEq(clob.tradeFee(1_000e18, 50e18), 0.25e18);
+        // p > 0.5: min side is amount − tradePrice; equals the complementary trade's fee.
+        assertEq(clob.tradeFee(1_000e18, 950e18), 0.25e18);
+        // p = 0.5: both sides equal.
+        assertEq(clob.tradeFee(1_000e18, 500e18), 2.5e18);
+        // p ≥ 1: clamps to zero.
+        assertEq(clob.tradeFee(1_000e18, 1_000e18), 0);
+        assertEq(clob.tradeFee(1_000e18, 1_500e18), 0);
+    }
+
+    function testFuzz_Fee_NeverExceedsHalfPercentOfMinSide(
+        uint128 amountRaw, uint128 priceRaw
+    ) public {
+        _enableFee();
+        uint256 amount     = uint256(amountRaw) + 1;
+        uint256 tradePrice = uint256(priceRaw) % amount; // p in [0, 1)
+        uint256 fee = clob.tradeFee(amount, tradePrice);
+        uint256 minSide = tradePrice < amount - tradePrice ? tradePrice : amount - tradePrice;
+        assertEq(fee, minSide * 50 / 10_000, "fee formula");
+        assertLe(fee, tradePrice, "fee always coverable by the USDC leg");
     }
 }

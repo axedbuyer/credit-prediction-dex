@@ -22,6 +22,10 @@ contract Deploy is Script {
     // 23% initial mark — team-set reference to MSTR CDS spread
     uint256 constant INITIAL_MARK = 0.23e18;
 
+    // Trading fee: 50 bps of min(p, 1-p) x Q, split 50/50 team wallet / insurance fund.
+    uint256 constant FEE_BPS             = 50;
+    uint256 constant INSURANCE_SHARE_BPS = 5_000;
+
     function run() external {
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer    = vm.addr(deployerKey);
@@ -46,7 +50,7 @@ contract Deploy is Script {
         );
 
         // ── 3. CLOB settlement ────────────────────────────────────────────────
-        CLOBSettlement clob = new CLOBSettlement(address(market));
+        CLOBSettlement clob = new CLOBSettlement(address(market), deployer);
 
         // ── 4. oracle router ──────────────────────────────────────────────────
         OracleRouter oracleRouter = new OracleRouter(deployer, address(market));
@@ -85,6 +89,12 @@ contract Deploy is Script {
         yesToken.grantRole(yesToken.CLOB_ROLE(),                  address(liquidationEngine));
         market.grantRole(market.LIQUIDATOR_ROLE(),                 address(liquidationEngine));
         insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(),   address(liquidationEngine));
+
+        // ── 8. trading fee ────────────────────────────────────────────────────
+        // TEAM_WALLET defaults to the deployer; admin-editable later via setFeeConfig.
+        address teamWallet = vm.envOr("TEAM_WALLET", deployer);
+        clob.setFeeConfig(FEE_BPS, teamWallet, address(insuranceFund), INSURANCE_SHARE_BPS);
+        console.log("Fee config: 50 bps, team wallet", teamWallet);
 
         vm.stopBroadcast();
 

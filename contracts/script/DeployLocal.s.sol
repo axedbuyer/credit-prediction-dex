@@ -61,7 +61,7 @@ contract DeployLocal is Script {
         );
 
         // ── 3. CLOB settlement ────────────────────────────────────────────────
-        CLOBSettlement clob = new CLOBSettlement(address(market));
+        CLOBSettlement clob = new CLOBSettlement(address(market), deployer);
 
         // ── 4. oracle router ──────────────────────────────────────────────────
         OracleRouter oracleRouter = new OracleRouter(deployer, address(market));
@@ -90,6 +90,9 @@ contract DeployLocal is Script {
         yesToken.grantRole(yesToken.CLOB_ROLE(),                  address(liquidationEngine));
         market.grantRole(market.LIQUIDATOR_ROLE(),                 address(liquidationEngine));
         insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(),   address(liquidationEngine));
+
+        // ── trading fee: 50 bps of min(p, 1-p) x Q, split 50/50 team/insurance ─
+        clob.setFeeConfig(50, deployer, address(insuranceFund), 5_000);
 
         vm.stopBroadcast();
 

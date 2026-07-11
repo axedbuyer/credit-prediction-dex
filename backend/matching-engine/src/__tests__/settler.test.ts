@@ -24,7 +24,7 @@ const CONFIG: SettlerConfig = {
 // A real ContractFunctionRevertedError, decoded from actual ABI-encoded revert
 // data — exercises the same decode path (`err.walk` / `.data.errorName`) that
 // real viem estimateContractGas failures produce, rather than a hand-rolled stub.
-function makeRevertError(errorName: 'FundingShortfall' | 'PositionFrozen') {
+function makeRevertError(errorName: 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded') {
   const data = encodeErrorResult({ abi: CLOB_SETTLEMENT_ABI, errorName, args: [] })
   return new ContractFunctionRevertedError({
     abi: CLOB_SETTLEMENT_ABI,
@@ -303,6 +303,23 @@ describe('Settler — deterministic revert handling', () => {
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf-err', 'ask')
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-pf-err', 'bid')
+  }, 10_000)
+
+  it('SlippageExceeded (fee-config mismatch): both orders removed, no tx submitted', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('SlippageExceeded')),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-slip', 'ask'), makeOrder('bid-slip', 'bid'))
+
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-slip', 'ask')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-slip', 'bid')
   }, 10_000)
 
   it('generic RPC error (not a deterministic revert) → nothing removed', async () => {

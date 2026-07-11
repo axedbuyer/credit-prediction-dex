@@ -5,6 +5,7 @@ import type { AppConfig, Order, OrderWire, StoredOrder } from './types'
 import type { OrderStore } from './orderbook'
 import type { IChainReader } from './chain'
 import { verifyOrderSignature, verifyCancelSignature } from './validation'
+import { tradeFee, netNoBidProceeds, minGrossForNet } from './fee'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -29,13 +30,27 @@ function wireToOrder(wire: OrderWire): Order {
  *
  * Both ratios are comparable within the same token pair and give a monotonic
  * ordering that matches the human price — higher bid = more USDC offered per token.
+ *
+ * NO bids are the one fee-adjusted case: the NO buyer's signed amountIn is
+ * gross (fee-inclusive), but on-chain the fee-free seller receives — and has
+ * their limit checked against — the NET amount. Pricing NO bids gross would
+ * cross pairs the contract then rejects with SlippageExceeded, so the stored
+ * price uses net proceeds. YES bids are fee-free; on asks the fee (YES side)
+ * is the seller's own burden and never moves the crossing price.
  */
-function derivePrice(wire: OrderWire, usdcAddress: string): number {
-  const isUsdcIn = wire.tokenIn.toLowerCase() === usdcAddress.toLowerCase()
-  const amtIn = Number(BigInt(wire.amountIn))
-  const minOut = Number(BigInt(wire.minAmountOut))
-  if (isUsdcIn) return minOut === 0 ? 0 : amtIn / minOut
-  return amtIn === 0 ? 0 : minOut / amtIn
+function derivePrice(wire: OrderWire, config: AppConfig): number {
+  const isUsdcIn = wire.tokenIn.toLowerCase() === config.usdcAddress.toLowerCase()
+  const amtIn = BigInt(wire.amountIn)
+  const minOut = BigInt(wire.minAmountOut)
+  if (isUsdcIn) {
+    if (minOut === 0n) return 0
+    const isNoBid = wire.tokenOut.toLowerCase() === config.noTokenAddress.toLowerCase()
+    const usdcLeg = isNoBid
+      ? netNoBidProceeds(minOut, amtIn, BigInt(config.feeBps ?? 0))
+      : amtIn
+    return Number(usdcLeg) / Number(minOut)
+  }
+  return amtIn === 0n ? 0 : Number(minOut) / Number(amtIn)
 }
 
 function deriveSide(wire: OrderWire, usdcAddress: string): 'bid' | 'ask' {
@@ -73,13 +88,20 @@ async function runChainPreFilter(
 
       // Net debit D = fundingDebt − previewDelta (previewDelta = noCredit − yesOwed,
       // mirroring settleFunding's `debit = fundingDebt + yesOwed` netted against
-      // noCredit). Only relevant when positive.
+      // noCredit). Only relevant when positive. The on-chain check is
+      // tradePrice ≥ debit + fee, so the trading fee on this YES sell joins the
+      // required proceeds; minSellProceeds inverts net(G) = G − fee(G) exactly.
       const netDebit = debt - previewDelta
-      if (netDebit > 0n && order.minAmountOut < netDebit) {
+      const feeBps = BigInt(config.feeBps ?? 0)
+      const fee = tradeFee(order.amountIn, order.minAmountOut, feeBps)
+      if (netDebit > 0n && order.minAmountOut < netDebit + fee) {
         return {
           rejected: true,
           status: 400,
-          body: { error: 'FundingShortfall', minSellProceeds: netDebit.toString() },
+          body: {
+            error: 'FundingShortfall',
+            minSellProceeds: minGrossForNet(netDebit, order.amountIn, feeBps).toString(),
+          },
         }
       }
     }
@@ -158,7 +180,7 @@ export function buildApp(store: OrderStore, config: AppConfig, chainReader?: ICh
 
     const orderId = uuidv4()
     const side = deriveSide(body, config.usdcAddress)
-    const price = derivePrice(body, config.usdcAddress)
+    const price = derivePrice(body, config)
 
     const stored: StoredOrder = { ...body, id: orderId, side, price, timestamp: Date.now() }
     await store.saveOrder(orderId, stored)

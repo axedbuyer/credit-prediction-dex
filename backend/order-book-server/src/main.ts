@@ -38,6 +38,10 @@ async function main() {
     chainId: parseInt(process.env.CHAIN_ID ?? '84532'),
     port: parseInt(process.env.PORT ?? '3001'),
     rpcUrl: process.env.BASE_SEPOLIA_RPC_URL,
+    // Must mirror CLOBSettlement.feeBps on-chain. Overstating is safe (NO bids
+    // sort slightly low, marginal crosses are skipped); understating produces
+    // deterministic SlippageExceeded reverts that the settler prunes.
+    feeBps: parseInt(process.env.FEE_BPS ?? '50'),
   }
 
   const redis = createRedisClient(

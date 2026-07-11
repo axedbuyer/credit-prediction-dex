@@ -23,9 +23,12 @@ CTF in V2 if needed.
 below for the full spec — display layer, seizure trigger, and LiquidationEngine.sol's
 formulaic (no Dutch auction) claim price.
 
-**Status:** base MVP + funding model + off-chain services are built and tested — 87
-contract tests, 79 off-chain tests, verified end-to-end with a 12/12 anvil smoke test.
-Target network is Base Sepolia (testnet) ahead of Base mainnet.
+**Status:** base MVP + funding model + off-chain services + trading fees are built and
+tested — 97 contract tests, 55 off-chain tests, verified end-to-end with a 12/12 anvil
+smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
+Base mainnet. NOTE: the trading fee changed CLOBSettlement's constructor — the Base
+Sepolia deployment of 2026-07-06 predates it and needs a CLOBSettlement redeploy +
+CLOB_ROLE rewiring before fees are live on testnet.
 
 ---
 
@@ -42,6 +45,7 @@ Target network is Base Sepolia (testnet) ahead of Base mainnet.
 | Liquidation | Formulaic price = funding owed; YES token TRANSFERS to liquidator (never burned); NO untouched |
 | Price primitive | Hazard rate displayed as annual default probability (%) |
 | Liquidity mechanism | Polymarket-style off-chain CLOB, on-chain USDC settlement |
+| Trading fee | 50 bps × min(p, 1−p) × Q, charged ONLY on the carry-earning side (YES sells + NO buys); YES buys + NO sells are fee-free; split 50/50 team wallet / InsuranceFund, admin-editable via CLOBSettlement.setFeeConfig |
 | Protocol token | None |
 | Leverage | None — fully collateralized |
 | LP vault | None in MVP — team wallet seeds initial liquidity |
@@ -127,6 +131,39 @@ The signature is passed alongside the order, not embedded in it: on-chain
 takerSig)` takes this 7-field `Order` plus two detached signatures (selector `0x538df8d8`).
 Off-chain callers must match this exact ABI shape.
 
+### Trading fee (CLOBSettlement)
+
+```
+fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
+      feeBps × min(tradePrice, amount − tradePrice) / 10_000
+      (Q tokens carry Q USDC of notional; tradePrice is the buyer's gross USDC leg)
+```
+
+- **Who pays:** ONLY the carry-earning side — the YES seller and the NO buyer. YES buys
+  and NO sells (flows that take on the funding-paying side) are fee-free. Maker/taker
+  is irrelevant.
+- **Why min(p, 1−p):** "buy NO at 1−p" ≡ "mint + sell YES at p" — the min-side base makes
+  both routes cost the same fee, so mint can't be used to dodge it. (Measuring p on the
+  gross leg is a second-order feeBps² deviation, accepted for on-chain simplicity.)
+- **YES sale:** fee is deducted from seller proceeds exactly like the funding debit;
+  the Option B safeguard extends to it — `tradePrice < debit + fee` reverts
+  FundingShortfall with the position unchanged.
+- **NO buy:** the contract can never pull USDC beyond a signed amountIn, so the buyer's
+  signed `amountIn` is GROSS (position cost + fee); the fee-free seller's `minAmountOut`
+  is checked against the NET amount (revert SlippageExceeded otherwise). The frontend
+  sizes gross via the exact piecewise inversion `minGrossForNet` (lib/feeMath.ts,
+  mirrored in order-book-server/src/fee.ts — keep all three in lockstep with
+  CLOBSettlement.tradeFee).
+- **Routing:** fee splits `insuranceShareBps` to InsuranceFund, remainder to teamWallet
+  (launch: 50 bps, 50/50). Admin-editable via `setFeeConfig` (DEFAULT_ADMIN_ROLE,
+  MAX_FEE_BPS = 500 cap); constructor leaves fee at 0 until configured. Fees NEVER touch
+  CreditMarket collateral.
+- **Off-chain:** order-book-server stores NO bids at their NET price (sorting/crossing
+  basis; FEE_BPS env must mirror the chain — overstating skips marginal crosses,
+  understating causes SlippageExceeded reverts) and includes the fee in the YES-sell
+  FundingShortfall pre-filter + minSellProceeds hint. The matching-engine settler prunes
+  SlippageExceeded pairs (deterministic for static amounts) like FundingShortfall.
+
 ### Backend Services
 
 ```
@@ -137,9 +174,9 @@ Off-chain callers must match this exact ABI shape.
                       error, on-chain check backstops.
 /matching-engine    — price-time priority matching; submits matched pairs via
                       CLOBSettlement.verifyAndSettle. Decodes FundingShortfall/
-                      PositionFrozen reverts at gas-estimation and prunes the offending
-                      order(s) instead of retrying (other reverts keep the retry
-                      behavior). Wires the settler when SETTLER_PRIVATE_KEY +
+                      PositionFrozen/SlippageExceeded reverts at gas-estimation and
+                      prunes the offending order(s) instead of retrying (other reverts
+                      keep the retry behavior). Wires the settler when SETTLER_PRIVATE_KEY +
                       BASE_SEPOLIA_RPC_URL are set (log-only fallback otherwise).
 /funding-keeper     — accrueFunding() every epoch; flags + freezes f_now for any
                       position breaching the seizure trigger.
@@ -158,7 +195,10 @@ Off-chain callers must match this exact ABI shape.
     Lightweight Charts; live annual-carry display)
   TradePanel  — signs EIP-712 orders; disables trading with an explanatory banner when
     the wallet is claimable/frozen; on YES sells shows "minimum sell price to cover
-    carry" and surfaces the server's FundingShortfall response inline; 6-decimal math.
+    carry + fee" and surfaces the server's FundingShortfall response inline; on NO buys
+    signs a gross fee-inclusive amountIn and shows "Total … includes … trade fee";
+    fee-free combos say "No trade fee on this order"; 6-decimal math (lib/feeMath.ts,
+    NEXT_PUBLIC_FEE_BPS env, default 50).
   PositionCard — Cost Basis, Equity, P&L, Breakeven Mark; YES adds Epochs To Expire with
     a warning as it nears zero. A distinct frozen panel shows a client-side cure-cost
     estimate (fundingDebt + frozenFunding×yesBal/1e18 minus pending NO credit — NOT
@@ -352,7 +392,12 @@ on-chain check is the backstop; this filter is pure UX.
 Documented for the roadmap only. v2 would add a per-wallet prepaid USDC buffer (so YES
 holders get runway before liquidation, rather than relying solely on token-value headroom)
 and a Dutch-auction discount ramp (rather than a fixed formulaic price), plus a non-linear
-token mark V=(1−e^(−s)) for correct convexity at high hazard rates. The current model
+token mark V=(1−e^(−s)) for correct convexity at high hazard rates. Also a v2 candidate
+(decided 2026-07-11): `prepayFunding()` — voluntary cash settlement of accrued funding for
+UNFLAGGED holders (zeroes fundingDebt, resets snapshots, pushes the seizure trigger away);
+a mild precursor of the buffer. Explicitly NOT building a fee-only top-up for
+FundingShortfall-blocked YES sales — the blocked band is ≤ fee-width (~0.5% of proceeds)
+and the escape is one price tick; cure() remains exclusively the flagged-position exit. The current model
 already has the core liquidator mechanism and the no-free-option guarantee — v2 only adds
 runway and pricing refinements. Build only after the current model validates PMF and the
 no-buffer tradeoff (tighter, more frequent liquidations) proves to be a real UX problem.
@@ -458,7 +503,8 @@ token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
 ❌ ISDA oracle relayer (multisig only)
 ❌ USDC bond module for credit event disputes
 ❌ Subgraph / The Graph (direct RPC polling only)
-❌ Fee distribution (fees accumulate in contract)
+❌ Fee distributor contract (trading fees route directly 50/50 to team wallet +
+   InsuranceFund at settlement time — no accrual, no claim flow)
 ❌ Referral system
 ❌ Governance
 ❌ Insurance fund withdrawals (fund only receives in MVP)
