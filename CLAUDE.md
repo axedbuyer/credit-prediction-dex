@@ -26,9 +26,9 @@ formulaic (no Dutch auction) claim price.
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
 tested — 97 contract tests, 55 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
-Base mainnet. NOTE: the trading fee changed CLOBSettlement's constructor — the Base
-Sepolia deployment of 2026-07-06 predates it and needs a CLOBSettlement redeploy +
-CLOB_ROLE rewiring before fees are live on testnet.
+Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
+(script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
+the pre-fee contract, fee config live at 50 bps 50/50 — fees are active on testnet.
 
 ---
 
