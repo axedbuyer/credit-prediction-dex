@@ -7,6 +7,7 @@ import { createPublicClient, createWalletClient, http, parseAbi, type Address } 
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
 import { signOrder, toWire, postOrder, nextNonce, type OrderInput } from './clob'
+import { minGrossForNet } from '../../frontend/lib/feeMath'
 import deployments from '../../contracts/deployments/base-sepolia.json'
 
 const RPC = process.env.BASE_SEPOLIA_RPC_URL ?? 'https://sepolia.base.org'
@@ -50,9 +51,13 @@ function sellOrder(token: Address, qty: number, price: number): OrderInput {
   }
 }
 function buyOrder(token: Address, qty: number, price: number): OrderInput {
+  const qty6 = BigInt(Math.round(qty * 1e6))
+  const net = BigInt(Math.round(qty * price * 1e6))
   return {
     maker: account.address, tokenIn: USDC, tokenOut: token,
-    amountIn: BigInt(Math.round(qty * price * 1e6)), minAmountOut: BigInt(Math.round(qty * 1e6)),
+    // NO buys pay the carry-side fee inside the signed amountIn — sign GROSS so
+    // the bid rests at the intended net price (YES buys are fee-free).
+    amountIn: token === NO ? minGrossForNet(net, qty6) : net, minAmountOut: qty6,
     expiry: BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600), nonce: nextNonce(),
   }
 }
