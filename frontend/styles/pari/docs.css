@@ -1,0 +1,256 @@
+/**
+ * Pari Docs — Prose Styles
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Direction A ("The Analyst") typography for long-form documentation content.
+ * Import once alongside tokens.css / components.css (currently wired into
+ * app/layout.tsx). Consumed by app/docs/layout.tsx, which wraps every docs
+ * page's children in a `.docs-prose` container.
+ *
+ * Primitives:
+ *   Prose root      .docs-prose
+ *   Placeholder     .docs-placeholder
+ *   Table scroll    .docs-table-wrap
+ *   Callout         .docs-callout (+ --info | --warning | --danger)
+ *   Formula block   .docs-formula
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+.docs-prose {
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--color-text-2);
+}
+
+/* ── Headings ───────────────────────────────────────────────────────────── */
+.docs-prose h1,
+.docs-prose h2,
+.docs-prose h3 {
+  font-family: var(--font-serif);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-1);
+  line-height: var(--leading-snug);
+}
+
+.docs-prose h1 {
+  font-size: var(--text-3xl);
+  margin-bottom: var(--space-4);
+}
+
+.docs-prose h2 {
+  font-size: var(--text-2xl);
+  margin-top: var(--space-12);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.docs-prose h3 {
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  margin-top: var(--space-8);
+  margin-bottom: var(--space-2);
+}
+
+.docs-prose > *:first-child {
+  margin-top: 0;
+}
+
+/* ── Body text ──────────────────────────────────────────────────────────── */
+.docs-prose p {
+  margin: var(--space-4) 0;
+}
+
+.docs-prose a {
+  color: var(--color-teal);
+  text-decoration: underline;
+  text-decoration-color: var(--color-teal-a32);
+  text-underline-offset: 2px;
+}
+.docs-prose a:hover {
+  text-decoration-color: var(--color-teal);
+}
+
+.docs-prose strong {
+  color: var(--color-text-1);
+  font-weight: var(--weight-semibold);
+}
+
+.docs-prose em {
+  font-style: italic;
+}
+
+/* ── Lists ──────────────────────────────────────────────────────────────── */
+.docs-prose ul,
+.docs-prose ol {
+  margin: var(--space-4) 0;
+  padding-left: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.docs-prose ul {
+  list-style: disc;
+}
+
+.docs-prose ol {
+  list-style: decimal;
+}
+
+.docs-prose li {
+  padding-left: var(--space-1);
+}
+
+.docs-prose li > ul,
+.docs-prose li > ol {
+  margin: var(--space-2) 0 0;
+}
+
+/* ── Divider ────────────────────────────────────────────────────────────── */
+.docs-prose hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: var(--space-8) 0;
+}
+
+/* ── Placeholder (stub pages) ──────────────────────────────────────────── */
+.docs-placeholder {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: var(--space-2);
+}
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+/* Wrap any wide table in <div className="docs-table-wrap"> for horizontal
+   scroll on narrow content panes (e.g. long contract addresses). */
+.docs-table-wrap {
+  overflow-x: auto;
+  margin: var(--space-6) 0;
+}
+
+.docs-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  margin: var(--space-6) 0;
+}
+
+.docs-table-wrap table {
+  margin: 0;
+}
+
+.docs-prose th {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--color-teal);
+  padding: 10px 14px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--color-dim);
+}
+
+.docs-prose td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--color-text-2);
+}
+
+.docs-prose tr:last-child td {
+  border-bottom: none;
+}
+
+.docs-prose td[data-numeric],
+.docs-prose th[data-numeric] {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Code ───────────────────────────────────────────────────────────────── */
+.docs-prose code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 0.9em;
+  color: var(--color-text-1);
+  background: var(--color-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm-a);
+  padding: 1px 6px;
+}
+
+.docs-prose pre {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-1);
+  background: var(--color-surface-1);
+  border: 1px solid var(--border-brand);
+  border-radius: var(--radius-md-a);
+  padding: var(--space-4);
+  margin: var(--space-6) 0;
+  overflow-x: auto;
+}
+
+.docs-prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ── Blockquote ─────────────────────────────────────────────────────────── */
+.docs-prose blockquote {
+  margin: var(--space-6) 0;
+  padding: var(--space-1) var(--space-5);
+  border-left: 2px solid var(--border-brand-em);
+  color: var(--color-text-2);
+  font-style: italic;
+}
+
+/* ── Callout ────────────────────────────────────────────────────────────── */
+.docs-callout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-6) 0;
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--color-teal);
+  border-radius: var(--radius-md-a);
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+}
+
+.docs-callout p {
+  margin: 0;
+}
+
+.docs-callout--info {
+  border-left-color: var(--color-teal);
+}
+
+.docs-callout--warning {
+  border-left-color: var(--color-warning);
+}
+
+.docs-callout--danger {
+  border-left-color: var(--color-danger);
+}
+
+/* ── Formula block ──────────────────────────────────────────────────────── */
+.docs-formula {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: var(--text-sm);
+  color: var(--color-text-1);
+  background: var(--color-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md-a);
+  padding: var(--space-4) var(--space-5);
+  margin: var(--space-6) 0;
+  overflow-x: auto;
+  white-space: pre;
+}

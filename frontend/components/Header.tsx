@@ -9,6 +9,7 @@ const navLinks = [
   { href: '/market/mstr', label: 'Market' },
   { href: '/portfolio', label: 'Portfolio' },
   { href: '/liquidate', label: 'Liquidate' },
+  { href: '/docs', label: 'Docs' },
 ]
 
 export function Header() {
