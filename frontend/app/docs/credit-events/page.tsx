@@ -72,6 +72,18 @@ export default function CreditEventsPage() {
         In the MVP you cannot raise a motion on-chain; contact the team with evidence
         (bankruptcy filing, missed-payment notice).
       </p>
+      <p>
+        On the roadmap, Pari&rsquo;s oracle will follow the rulings of the{' '}
+        <a
+          href="https://www.cdsdeterminationscommittees.org/"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Credit Derivatives Determinations Committees
+        </a>{' '}
+        — the panel that rules on these same credit events in TradFi. Their live and past
+        determinations are public on that site.
+      </p>
     </div>
   )
 }
