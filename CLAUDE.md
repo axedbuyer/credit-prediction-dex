@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 97 contract tests, 55 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 98 contract tests, 55 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
 Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
 (script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
