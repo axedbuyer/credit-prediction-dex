@@ -676,4 +676,118 @@ contract CLOBSettlementTest is Test {
         assertEq(fee, minSide * 50 / 10_000, "fee formula");
         assertLe(fee, tradePrice, "fee always coverable by the USDC leg");
     }
+
+    // ─── conservation: settlement moves USDC, never creates or destroys it ─────
+
+    // Every account a settlement can touch on the USDC leg. Captured as one memory
+    // struct for the same reason CLOBSettlement uses TradeCtx — five loose locals
+    // twice over blows the stack here.
+    struct UsdcBal {
+        uint256 buyer;
+        uint256 seller;
+        uint256 market;
+        uint256 insurance;
+        uint256 team;
+    }
+
+    function _snapUsdc() internal view returns (UsdcBal memory b) {
+        b.buyer     = usdc.balanceOf(maker);
+        b.seller    = usdc.balanceOf(taker);
+        b.market    = usdc.balanceOf(address(market));
+        b.insurance = usdc.balanceOf(insuranceSink);
+        b.team      = usdc.balanceOf(teamWallet);
+    }
+
+    function _totalUsdc(UsdcBal memory b) internal pure returns (uint256) {
+        return b.buyer + b.seller + b.market + b.insurance + b.team;
+    }
+
+    // Asserted at the only observable point in the trade lifecycle: a snapshot
+    // before verifyAndSettle and the deltas after. Signature checks, funding
+    // settlement, the token leg, the USDC leg and fee collection all run inside one
+    // atomic nonReentrant call over a callback-free ERC-20, so there is no
+    // intra-settlement state to probe — and conservation is a property of the whole
+    // transaction, not of any step within it.
+    //
+    // Generalizes the fixed-input buyer-side checks in
+    // test_Fee_YESSale_SellerPays_BuyerDoesNot / test_Fee_NOBuy_BuyerPays_SellerDoesNot
+    // across price, size, funding load and both sides, and closes the gap in
+    // test_Fee_YESSale_StacksWithFundingDebit — the one path where all three USDC
+    // legs (seller proceeds, debtToCollateral, the two-way fee split) are live at
+    // once, but only the seller's leg is asserted there.
+    function testFuzz_SettlementConservesUsdc(
+        uint128 amountRaw, uint128 priceRaw, uint64 markRaw, bool yesSale
+    ) public {
+        _enableFee();
+
+        // Isolate the taker on one side so the funding leg has a definite sign: a
+        // pure YES holder owes a debit, a pure NO holder is owed a credit. Both run
+        // while cumulative funding is still zero, so snapshots stay at 0.
+        if (yesSale) _stripTakerToPureYes();
+        else         _stripTakerToPureNo();
+
+        // Funding credits are paid out of CreditMarket's own collateral, and the
+        // taker's tokens were minted directly in setUp (bypassing market.mint()), so
+        // back them here — same reason as test_NOSaleBack_SellerGets_*.
+        usdc.mint(address(market), 1_000e18);
+
+        // A mark of ≤1% keeps one year of carry on the taker's full 1,000e18 balance
+        // at or below 10e18, comfortably under the price floor chosen below.
+        uint256 mark = bound(uint256(markRaw), 0, 0.01e18);
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(mark);                 // elapsed == 0: sets the rate, accrues nothing
+        vm.warp(block.timestamp + 365 days);  // → cumFundingPerYES == cumFundingPerNO == mark
+
+        uint256 amount = bound(uint256(amountRaw), 100e18, 1_000e18);
+        // settleFunding nets the seller's FULL balance, not the amount sold, so the
+        // funding leg is sized off 1,000e18 regardless of trade size.
+        uint256 owed = 1_000e18 * mark / 1e18;
+
+        // Floor the price above owed plus a 1% margin. The fee is at most 0.5% of the
+        // min side, i.e. ≤0.25% of amount, so every draw clears owed + fee without
+        // vm.assume rejection — FundingShortfall has its own dedicated test.
+        uint256 tradePrice = bound(uint256(priceRaw), owed + amount / 100 + 1, amount - 1);
+        uint256 fee = clob.tradeFee(amount, tradePrice);
+
+        // The buyer's signed amountIn is gross on both sides; on a NO sale the
+        // fee-free seller's limit has to be net of the fee or the net check trips.
+        address token = yesSale ? address(yesToken) : address(noToken);
+        CLOBSettlement.Order memory mo = _order(
+            maker, address(usdc), token, tradePrice, amount, block.timestamp + 1 hours, 0
+        );
+        CLOBSettlement.Order memory to_ = _order(
+            taker, token, address(usdc), amount,
+            yesSale ? tradePrice : tradePrice - fee, block.timestamp + 1 hours, 0
+        );
+
+        UsdcBal memory b0 = _snapUsdc();
+        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        UsdcBal memory b1 = _snapUsdc();
+
+        // (1) Closure: seller proceeds, collateral, insurance and team are the only
+        // sinks, and every USDC unit leaving one account lands in exactly one other.
+        assertEq(_totalUsdc(b1), _totalUsdc(b0), "settlement neither creates nor destroys USDC");
+        assertEq(usdc.balanceOf(address(clob)), 0, "CLOBSettlement never custodies USDC");
+
+        // (2) No over-pull: the buyer signed for tradePrice and can never be charged
+        // beyond it — the fee rides inside that amount on a NO buy and is carved out
+        // of the seller's proceeds on a YES sale. Exact rather than bounded because
+        // the buyer holds no YES/NO here, so their own settleFunding leg moves nothing.
+        assertEq(b0.buyer - b1.buyer, tradePrice, "buyer pays exactly the amountIn they signed");
+
+        // (3) The fee split is exhaustive — no dust is stranded between the two sinks.
+        assertEq(
+            (b1.insurance - b0.insurance) + (b1.team - b0.team),
+            fee,
+            "fee splits exhaustively between insurance and team"
+        );
+
+        // (4) Collateral moves by the funding leg alone: fees never touch it, and the
+        // complete-set invariant makes the NO credit equal the YES debit at the same mark.
+        if (yesSale) {
+            assertEq(b1.market - b0.market, owed, "collected YES debit is the only collateral inflow");
+        } else {
+            assertEq(b0.market - b1.market, owed, "paid NO credit is the only collateral outflow");
+        }
+    }
 }

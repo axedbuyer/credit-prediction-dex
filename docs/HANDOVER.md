@@ -37,7 +37,7 @@ or the other docs. Read it alongside — not instead of — the canonical refere
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 97 Foundry tests (`cd contracts && forge test`), 55 Vitest tests
+- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 55 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
