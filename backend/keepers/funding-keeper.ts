@@ -349,6 +349,36 @@ export function startHealthServer(keeper: FundingKeeper, port: number): http.Ser
   return server
 }
 
+// ─── Contract address resolution (env var wins; deployments file is a local-dev
+// fallback that does not exist inside containers, e.g. Railway) ───────────────
+
+export function resolveCreditMarketAddress(
+  env: NodeJS.ProcessEnv = process.env,
+  // Path: keepers/ → ../../ → project root → contracts/deployments/
+  deploymentsPath: string = path.join(
+    __dirname, '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
+  ),
+): string {
+  if (env.CREDIT_MARKET_ADDRESS) return env.CREDIT_MARKET_ADDRESS
+
+  let deployments: { creditMarket?: string }
+  try {
+    deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8'))
+  } catch (err) {
+    throw new Error(
+      `CREDIT_MARKET_ADDRESS is not set and ${deploymentsPath} could not be read: ${err}. ` +
+      'Set CREDIT_MARKET_ADDRESS (hosted images do not include the deployments file).',
+    )
+  }
+  if (!deployments.creditMarket) {
+    throw new Error(
+      `CREDIT_MARKET_ADDRESS is not set and ${deploymentsPath} has no "creditMarket" key. ` +
+      'Set CREDIT_MARKET_ADDRESS (hosted images do not include the deployments file).',
+    )
+  }
+  return deployments.creditMarket
+}
+
 // ─── Production entry point ───────────────────────────────────────────────────
 
 function main(): void {
@@ -358,20 +388,7 @@ function main(): void {
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
-  // CREDIT_MARKET_ADDRESS env var takes precedence over the deployments file
-  let creditMarketAddress: string
-  if (process.env.CREDIT_MARKET_ADDRESS) {
-    creditMarketAddress = process.env.CREDIT_MARKET_ADDRESS
-  } else {
-    // Path: keepers/ → ../../ → project root → contracts/deployments/
-    const deploymentsPath = path.join(
-      __dirname, '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
-    )
-    const deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8')) as {
-      creditMarket: string
-    }
-    creditMarketAddress = deployments.creditMarket
-  }
+  const creditMarketAddress = resolveCreditMarketAddress()
 
   // TRACKED_HOLDERS env var: comma-separated list of YES holder addresses to monitor
   const trackedHolders: Address[] = (process.env.TRACKED_HOLDERS ?? '')

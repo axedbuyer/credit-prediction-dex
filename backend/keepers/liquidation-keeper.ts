@@ -274,29 +274,59 @@ export function startServer(keeper: LiquidationKeeper, port: number): http.Serve
   return server
 }
 
+// ─── Contract address resolution (env vars win; deployments file is a local-dev
+// fallback that does not exist inside containers, e.g. Railway) ───────────────
+
+export function resolveAddresses(
+  env: NodeJS.ProcessEnv = process.env,
+  deploymentsPath: string = path.join(
+    __dirname, '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
+  ),
+): { creditMarketAddress: string; yesTokenAddress: string } {
+  let creditMarketAddress: string | undefined = env.CREDIT_MARKET_ADDRESS
+  let yesTokenAddress: string | undefined     = env.YES_TOKEN_ADDRESS
+
+  if (!creditMarketAddress || !yesTokenAddress) {
+    let deployments: { creditMarket?: string; yesToken?: string }
+    try {
+      deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8'))
+    } catch (err) {
+      const missing = [
+        !creditMarketAddress ? 'CREDIT_MARKET_ADDRESS' : null,
+        !yesTokenAddress ? 'YES_TOKEN_ADDRESS' : null,
+      ].filter(Boolean).join(', ')
+      throw new Error(
+        `${missing} is not set and ${deploymentsPath} could not be read: ${err}. ` +
+        `Set ${missing} (hosted images do not include the deployments file).`,
+      )
+    }
+    creditMarketAddress ??= deployments.creditMarket
+    yesTokenAddress     ??= deployments.yesToken
+  }
+
+  if (!creditMarketAddress) {
+    throw new Error(
+      `CREDIT_MARKET_ADDRESS is not set and ${deploymentsPath} has no "creditMarket" key. ` +
+      'Set CREDIT_MARKET_ADDRESS (hosted images do not include the deployments file).',
+    )
+  }
+  if (!yesTokenAddress) {
+    throw new Error(
+      `YES_TOKEN_ADDRESS is not set and ${deploymentsPath} has no "yesToken" key. ` +
+      'Set YES_TOKEN_ADDRESS (hosted images do not include the deployments file).',
+    )
+  }
+
+  return { creditMarketAddress, yesTokenAddress }
+}
+
 // ─── Production entry point ───────────────────────────────────────────────────
 
 function main(): void {
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
-  let creditMarketAddress: string | undefined = process.env.CREDIT_MARKET_ADDRESS
-  let yesTokenAddress: string | undefined     = process.env.YES_TOKEN_ADDRESS
-
-  if (!creditMarketAddress || !yesTokenAddress) {
-    const deploymentsPath = path.join(
-      __dirname, '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
-    )
-    const deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8')) as {
-      creditMarket: string
-      yesToken: string
-    }
-    creditMarketAddress ??= deployments.creditMarket
-    yesTokenAddress     ??= deployments.yesToken
-  }
-
-  if (!creditMarketAddress) throw new Error('CREDIT_MARKET_ADDRESS is required')
-  if (!yesTokenAddress)     throw new Error('YES_TOKEN_ADDRESS is required')
+  const { creditMarketAddress, yesTokenAddress } = resolveAddresses()
 
   const trackedHolders: Address[] = (process.env.TRACKED_HOLDERS ?? '')
     .split(',')
