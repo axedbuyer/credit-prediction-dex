@@ -1,8 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import {
   LiquidationKeeper,
   startServer,
   computePosition,
+  resolveAddresses,
   type IPublicClient,
   type KeeperConfig,
 } from '../liquidation-keeper'
@@ -446,6 +450,75 @@ describe('GET /health', () => {
       expect(() => new Date(body.lastPolledAt)).not.toThrow()
     } finally {
       await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+})
+
+// ─── resolveAddresses ───────────────────────────────────────────────────────────
+
+describe('resolveAddresses', () => {
+  function withTmpDeploymentsFile(contents: string | null): { deploymentsPath: string; cleanup: () => void } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'liquidation-keeper-test-'))
+    const deploymentsPath = path.join(dir, 'base-sepolia.json')
+    if (contents !== null) fs.writeFileSync(deploymentsPath, contents)
+    return { deploymentsPath, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) }
+  }
+
+  it('prefers env vars over the deployments file', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
+      JSON.stringify({ creditMarket: '0xFileCM', yesToken: '0xFileYES' }),
+    )
+    try {
+      const { creditMarketAddress, yesTokenAddress } = resolveAddresses(
+        { CREDIT_MARKET_ADDRESS: '0xEnvCM', YES_TOKEN_ADDRESS: '0xEnvYES' } as NodeJS.ProcessEnv,
+        deploymentsPath,
+      )
+      expect(creditMarketAddress).toBe('0xEnvCM')
+      expect(yesTokenAddress).toBe('0xEnvYES')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falls back to the deployments file for whichever address is unset', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
+      JSON.stringify({ creditMarket: '0xFileCM', yesToken: '0xFileYES' }),
+    )
+    try {
+      const { creditMarketAddress, yesTokenAddress } = resolveAddresses(
+        { CREDIT_MARKET_ADDRESS: '0xEnvCM' } as NodeJS.ProcessEnv,
+        deploymentsPath,
+      )
+      expect(creditMarketAddress).toBe('0xEnvCM')
+      expect(yesTokenAddress).toBe('0xFileYES')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('throws a clear error naming both env vars when the file is missing', () => {
+    const missingPath = path.join(os.tmpdir(), 'does-not-exist-' + Date.now(), 'base-sepolia.json')
+    expect(() => resolveAddresses({} as NodeJS.ProcessEnv, missingPath))
+      .toThrow(/CREDIT_MARKET_ADDRESS, YES_TOKEN_ADDRESS is not set and .* could not be read/)
+  })
+
+  it('throws a clear error naming only the still-missing env var when the file is missing', () => {
+    const missingPath = path.join(os.tmpdir(), 'does-not-exist-' + Date.now(), 'base-sepolia.json')
+    expect(() => resolveAddresses(
+      { CREDIT_MARKET_ADDRESS: '0xEnvCM' } as NodeJS.ProcessEnv,
+      missingPath,
+    )).toThrow(/^YES_TOKEN_ADDRESS is not set and .* could not be read/)
+  })
+
+  it('throws a clear error when the file lacks the yesToken key', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
+      JSON.stringify({ creditMarket: '0xFileCM' }),
+    )
+    try {
+      expect(() => resolveAddresses({} as NodeJS.ProcessEnv, deploymentsPath))
+        .toThrow(/YES_TOKEN_ADDRESS is not set and .* has no "yesToken" key/)
+    } finally {
+      cleanup()
     }
   })
 })

@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import {
   FundingKeeper,
   startHealthServer,
+  resolveCreditMarketAddress,
   type IPublicClient,
   type IWalletClient,
   type KeeperConfig,
@@ -376,6 +380,60 @@ describe('startHealthServer', () => {
       expect(() => new Date(body.lastRunAt)).not.toThrow()
     } finally {
       await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+})
+
+// ─── resolveCreditMarketAddress ────────────────────────────────────────────────
+
+describe('resolveCreditMarketAddress', () => {
+  function withTmpDeploymentsFile(contents: string | null): { deploymentsPath: string; cleanup: () => void } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'funding-keeper-test-'))
+    const deploymentsPath = path.join(dir, 'base-sepolia.json')
+    if (contents !== null) fs.writeFileSync(deploymentsPath, contents)
+    return { deploymentsPath, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) }
+  }
+
+  it('prefers the env var over the deployments file', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
+      JSON.stringify({ creditMarket: '0xFileAddr' }),
+    )
+    try {
+      const addr = resolveCreditMarketAddress(
+        { CREDIT_MARKET_ADDRESS: '0xEnvAddr' } as NodeJS.ProcessEnv,
+        deploymentsPath,
+      )
+      expect(addr).toBe('0xEnvAddr')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falls back to the deployments file when the env var is unset', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
+      JSON.stringify({ creditMarket: '0xFileAddr' }),
+    )
+    try {
+      const addr = resolveCreditMarketAddress({} as NodeJS.ProcessEnv, deploymentsPath)
+      expect(addr).toBe('0xFileAddr')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('throws a clear, actionable error naming the env var when the file is missing', () => {
+    const missingPath = path.join(os.tmpdir(), 'does-not-exist-' + Date.now(), 'base-sepolia.json')
+    expect(() => resolveCreditMarketAddress({} as NodeJS.ProcessEnv, missingPath))
+      .toThrow(/CREDIT_MARKET_ADDRESS is not set and .* could not be read/)
+  })
+
+  it('throws a clear error when the file has no creditMarket key', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(JSON.stringify({ yesToken: '0xY' }))
+    try {
+      expect(() => resolveCreditMarketAddress({} as NodeJS.ProcessEnv, deploymentsPath))
+        .toThrow(/CREDIT_MARKET_ADDRESS is not set and .* has no "creditMarket" key/)
+    } finally {
+      cleanup()
     }
   })
 })
