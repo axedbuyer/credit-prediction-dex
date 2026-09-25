@@ -447,6 +447,124 @@ describe('POST /order — trading fee (feeBps=50)', () => {
   })
 })
 
+describe('GET /health', () => {
+  let app: ReturnType<typeof buildApp>
+  let store: MemoryOrderStore
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  it('returns 200 { status: "ok" } when the store is reachable', async () => {
+    store = new MemoryOrderStore()
+    app = buildApp(store, TEST_CONFIG)
+
+    const res = await app.inject({ method: 'GET', url: '/health' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ status: 'ok' })
+  })
+
+  it('returns 503 { status: "error" } when the store ping fails', async () => {
+    store = new MemoryOrderStore()
+    vi.spyOn(store, 'ping').mockResolvedValue(false)
+    app = buildApp(store, TEST_CONFIG)
+
+    const res = await app.inject({ method: 'GET', url: '/health' })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.json<{ status: string }>().status).toBe('error')
+  })
+
+  it('returns 503 { status: "error" } when the store ping throws', async () => {
+    store = new MemoryOrderStore()
+    vi.spyOn(store, 'ping').mockRejectedValue(new Error('ECONNREFUSED'))
+    app = buildApp(store, TEST_CONFIG)
+
+    const res = await app.inject({ method: 'GET', url: '/health' })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.json<{ status: string }>().status).toBe('error')
+  })
+})
+
+describe('CORS', () => {
+  let app: ReturnType<typeof buildApp>
+  let store: MemoryOrderStore
+
+  beforeEach(() => {
+    store = new MemoryOrderStore()
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  it('defaults to wildcard Access-Control-Allow-Origin when corsOrigins is unset', async () => {
+    app = buildApp(store, TEST_CONFIG)
+
+    const res = await app.inject({
+      method: 'GET', url: '/orderbook', headers: { origin: 'https://evil.example.com' },
+    })
+
+    expect(res.headers['access-control-allow-origin']).toBe('*')
+    expect(res.headers['vary']).toBeUndefined()
+  })
+
+  it('defaults to wildcard when corsOrigins is an empty array', async () => {
+    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: [] })
+
+    const res = await app.inject({ method: 'GET', url: '/orderbook' })
+
+    expect(res.headers['access-control-allow-origin']).toBe('*')
+  })
+
+  it('echoes back an allow-listed origin with Vary: Origin', async () => {
+    app = buildApp(store, {
+      ...TEST_CONFIG,
+      corsOrigins: ['https://credit-prediction-dex.vercel.app', 'http://localhost:3000'],
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/orderbook', headers: { origin: 'http://localhost:3000' },
+    })
+
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000')
+    expect(res.headers['vary']).toBe('Origin')
+  })
+
+  it('omits Access-Control-Allow-Origin for a non-listed origin', async () => {
+    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: ['https://credit-prediction-dex.vercel.app'] })
+
+    const res = await app.inject({
+      method: 'GET', url: '/orderbook', headers: { origin: 'https://evil.example.com' },
+    })
+
+    expect(res.headers['access-control-allow-origin']).toBeUndefined()
+  })
+
+  it('omits Access-Control-Allow-Origin when there is no Origin header and an allow-list is set', async () => {
+    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: ['https://credit-prediction-dex.vercel.app'] })
+
+    const res = await app.inject({ method: 'GET', url: '/orderbook' })
+
+    expect(res.headers['access-control-allow-origin']).toBeUndefined()
+  })
+
+  it('keeps Allow-Methods/Allow-Headers and the OPTIONS preflight working with an allow-list configured', async () => {
+    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: ['http://localhost:3000'] })
+
+    const res = await app.inject({
+      method: 'OPTIONS', url: '/order', headers: { origin: 'http://localhost:3000' },
+    })
+
+    expect(res.statusCode).toBe(204)
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000')
+    expect(res.headers['access-control-allow-methods']).toBe('GET,POST,DELETE,OPTIONS')
+    expect(res.headers['access-control-allow-headers']).toBe('Content-Type')
+  })
+})
+
 describe('GET /orderbook', () => {
   let app: ReturnType<typeof buildApp>
   let store: MemoryOrderStore

@@ -54,4 +54,8 @@ export interface AppConfig {
   // Drives the net-of-fee price basis for NO bids and the YES-sell pre-filter's
   // fee component. Absent/0 ⇒ legacy gross pricing, no fee in the pre-filter.
   feeBps?: number
+  // Allow-listed CORS origins (exact match, trimmed + trailing-slash-stripped),
+  // parsed from the comma-separated CORS_ORIGINS env var. Undefined/empty ⇒
+  // wildcard `Access-Control-Allow-Origin: *` (current/default behaviour).
+  corsOrigins?: string[]
 }

@@ -118,20 +118,51 @@ async function runChainPreFilter(
 export function buildApp(store: OrderStore, config: AppConfig, chainReader?: IChainReader): FastifyInstance {
   const app = Fastify({ logger: false })
 
-  // Permissive CORS — this is a local-first dev/demo API (no auth, no cookies)
-  // consumed directly by the frontend's browser fetch() calls. Without this,
-  // GET /orderbook succeeds for server-side/curl callers but is silently
-  // blocked by the browser's CORS check, leaving the UI's order book empty
-  // even though the data is there. No credentials are used, so a wildcard
-  // origin is safe here.
-  app.addHook('onSend', async (_request, reply, payload) => {
-    reply.header('Access-Control-Allow-Origin', '*')
+  // CORS — this API is consumed directly by the frontend's browser fetch()
+  // calls; without an ACAO header, GET /orderbook succeeds for server-side/curl
+  // callers but is silently blocked by the browser's CORS check, leaving the
+  // UI's order book empty even though the data is there. No credentials are
+  // used, so a bare wildcard is safe and remains the default.
+  //
+  // config.corsOrigins (from CORS_ORIGINS env, see main.ts) lets an operator
+  // lock this down to an exact allow-list instead: unset/empty ⇒ unchanged
+  // wildcard behaviour; otherwise only an exact Origin match gets echoed back
+  // (with Vary: Origin) and a non-matching/missing Origin gets no ACAO header
+  // at all.
+  app.addHook('onSend', async (request, reply, payload) => {
+    const allowList = config.corsOrigins
+    if (!allowList || allowList.length === 0) {
+      reply.header('Access-Control-Allow-Origin', '*')
+    } else {
+      const origin = request.headers.origin
+      if (origin && allowList.includes(origin.trim().replace(/\/+$/, ''))) {
+        reply.header('Access-Control-Allow-Origin', origin)
+        reply.header('Vary', 'Origin')
+      }
+      // no match (or no Origin header) ⇒ omit Access-Control-Allow-Origin entirely
+    }
     reply.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
     reply.header('Access-Control-Allow-Headers', 'Content-Type')
     return payload
   })
   app.options('*', async (_request, reply) => {
     reply.status(204).send()
+  })
+
+  // GET /health — liveness + cheap store (Redis) reachability check. Never
+  // touches the chain/RPC — chain reads are best-effort and the public RPC is
+  // flaky, so health must not depend on it (see runChainPreFilter's fail-open).
+  app.get('/health', async (_request, reply) => {
+    try {
+      const reachable = await store.ping()
+      if (!reachable) {
+        return reply.status(503).send({ status: 'error', error: 'Store unreachable' })
+      }
+      return reply.status(200).send({ status: 'ok' })
+    } catch (err) {
+      console.error('[order-book-server] /health store check failed:', err)
+      return reply.status(503).send({ status: 'error', error: 'Store unreachable' })
+    }
   })
 
   // POST /order — validate EIP-712 sig, add to order book

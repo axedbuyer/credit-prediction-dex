@@ -24,6 +24,19 @@ function loadDeployments(): { creditMarket?: string; yesToken?: string } {
   }
 }
 
+// CORS_ORIGINS: comma-separated allow-list of exact origins (e.g.
+// "https://credit-prediction-dex.vercel.app,http://localhost:3000"). Unset,
+// empty, or "*" preserves the wildcard default — see buildApp's CORS hook.
+function parseCorsOrigins(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed === '*') return undefined
+  const origins = trimmed.split(',')
+    .map(o => o.trim().replace(/\/+$/, ''))
+    .filter(o => o.length > 0)
+  return origins.length > 0 ? origins : undefined
+}
+
 async function main() {
   const deployments = loadDeployments()
 
@@ -42,6 +55,7 @@ async function main() {
     // sort slightly low, marginal crosses are skipped); understating produces
     // deterministic SlippageExceeded reverts that the settler prunes.
     feeBps: parseInt(process.env.FEE_BPS ?? '50'),
+    corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS),
   }
 
   const redis = createRedisClient(
