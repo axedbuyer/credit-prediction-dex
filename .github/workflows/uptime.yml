@@ -1,0 +1,201 @@
+# Uptime monitor for the hosted Base Sepolia testnet stack.
+#
+# Alerting mechanism: this is a GitHub Actions scheduled workflow with no
+# external service and no new accounts. If any step fails, the job fails,
+# and GitHub sends its standard "workflow run failed" email to the repo
+# owner (and anyone else watching the repo per their notification settings)
+# — that email IS the alert. There is no separate paging/notification setup.
+#
+# Schedule: hourly, on an off-the-hour minute (avoids the top-of-hour
+# congestion where many scheduled workflows across GitHub queue up and can
+# be delayed or dropped). This repo may be private, in which case every run
+# — scheduled or CI — is billed against the shared 2000 min/month free
+# Actions tier; hourly (not every 5-15 min) keeps this monitor's footprint
+# small relative to CI. Also note: GitHub automatically disables scheduled
+# workflows after 60 days with no repo activity (commits/pushes) — if this
+# stops firing, push something and re-enable it under Actions.
+#
+# Checks (each runs independently via `continue-on-error`, and a final
+# summary step fails the job if any check failed — so one broken check
+# doesn't hide the others):
+#   1. order-book-server /health  -> must be HTTP 200
+#   2. liquidation-keeper /health -> must be HTTP 200
+#   3. frontend /                 -> must be HTTP 200
+#   4. funding-keeper liveness, indirectly, via chain state: funding-keeper
+#      has no public URL (Railway-internal), so instead we read
+#      lastFundingTime() and epochLength() off CreditMarket on Base Sepolia
+#      via a raw JSON-RPC eth_call and assert the epoch hasn't gone stale.
+#      NOTE: trades and setMark() also call accrueFunding() internally, so
+#      a "fresh" lastFundingTime is not proof the keeper itself is running
+#      — only a lower bound on funding-accrual health in general. A stale
+#      timestamp IS a reliable signal something is wrong, though.
+
+name: Uptime Monitor
+
+on:
+  schedule:
+    # Hourly, 17 minutes past the hour (see header comment for why hourly
+    # and why off-the-hour).
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  ORDER_BOOK_SERVER_HEALTH_URL: https://order-book-server-production-9bb6.up.railway.app/health
+  LIQUIDATION_KEEPER_HEALTH_URL: https://liquidation-keeper-production.up.railway.app/health
+  FRONTEND_URL: https://credit-prediction-dex.vercel.app/
+  BASE_SEPOLIA_RPC_URL: https://sepolia.base.org
+  CREDIT_MARKET_ADDRESS: "0x26C3d2E6C29e8E414A4424aa9c9AFa5eFF15F51b"
+  # Function selectors below are `cast sig` of the public getters on
+  # CreditMarket.sol (auto-generated getters for public state vars,
+  # uint256, no args) — verified against a live eth_call during authoring:
+  #   lastFundingTime() -> 0x321d7fa9
+  #   epochLength()     -> 0x57d775f8
+  SELECTOR_LAST_FUNDING_TIME: "0x321d7fa9"
+  SELECTOR_EPOCH_LENGTH: "0x57d775f8"
+  # Staleness tolerance: fail when now - lastFundingTime > 1.5 x epochLength.
+  STALENESS_MULTIPLIER_X10: "15" # 1.5, expressed as an integer x10 for bash math
+
+jobs:
+  uptime:
+    name: Uptime checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: order-book-server /health
+        id: check-obs
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "GET $ORDER_BOOK_SERVER_HEALTH_URL"
+          code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+            -o /tmp/obs_body.txt -w "%{http_code}" "$ORDER_BOOK_SERVER_HEALTH_URL" || true)
+          echo "HTTP status: $code"
+          echo "Body:"
+          cat /tmp/obs_body.txt || true
+          echo
+          if [ "$code" != "200" ]; then
+            echo "::error::order-book-server /health returned HTTP $code (expected 200) at $ORDER_BOOK_SERVER_HEALTH_URL"
+            exit 1
+          fi
+          echo "order-book-server: OK"
+
+      - name: liquidation-keeper /health
+        id: check-lk
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "GET $LIQUIDATION_KEEPER_HEALTH_URL"
+          code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+            -o /tmp/lk_body.txt -w "%{http_code}" "$LIQUIDATION_KEEPER_HEALTH_URL" || true)
+          echo "HTTP status: $code"
+          echo "Body:"
+          cat /tmp/lk_body.txt || true
+          echo
+          if [ "$code" != "200" ]; then
+            echo "::error::liquidation-keeper /health returned HTTP $code (expected 200) at $LIQUIDATION_KEEPER_HEALTH_URL"
+            exit 1
+          fi
+          echo "liquidation-keeper: OK"
+
+      - name: frontend /
+        id: check-fe
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "GET $FRONTEND_URL"
+          code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+            -o /dev/null -w "%{http_code}" "$FRONTEND_URL" || true)
+          echo "HTTP status: $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::frontend returned HTTP $code (expected 200) at $FRONTEND_URL"
+            exit 1
+          fi
+          echo "frontend: OK"
+
+      - name: funding-keeper liveness (via chain)
+        id: check-funding
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          call_eth() {
+            local selector="$1"
+            curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+              -X POST "$BASE_SEPOLIA_RPC_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"$CREDIT_MARKET_ADDRESS\",\"data\":\"$selector\"},\"latest\"]}"
+          }
+
+          echo "Calling lastFundingTime() ($SELECTOR_LAST_FUNDING_TIME) on $CREDIT_MARKET_ADDRESS"
+          lft_response=$(call_eth "$SELECTOR_LAST_FUNDING_TIME")
+          echo "Response: $lft_response"
+          lft_hex=$(echo "$lft_response" | jq -r '.result // empty')
+          if [ -z "$lft_hex" ] || [ "$lft_hex" = "null" ]; then
+            echo "::error::eth_call for lastFundingTime() failed or returned no result: $lft_response"
+            exit 1
+          fi
+
+          echo "Calling epochLength() ($SELECTOR_EPOCH_LENGTH) on $CREDIT_MARKET_ADDRESS"
+          el_response=$(call_eth "$SELECTOR_EPOCH_LENGTH")
+          echo "Response: $el_response"
+          el_hex=$(echo "$el_response" | jq -r '.result // empty')
+          if [ -z "$el_hex" ] || [ "$el_hex" = "null" ]; then
+            echo "::error::eth_call for epochLength() failed or returned no result: $el_response"
+            exit 1
+          fi
+
+          last_funding_time=$((16#${lft_hex#0x}))
+          epoch_length=$((16#${el_hex#0x}))
+          now=$(date +%s)
+          age=$((now - last_funding_time))
+          # threshold = 1.5 * epochLength, done in integer math as (epochLength * 15) / 10
+          threshold=$(( epoch_length * STALENESS_MULTIPLIER_X10 / 10 ))
+
+          age_hours=$(awk "BEGIN { printf \"%.2f\", $age / 3600 }")
+          threshold_hours=$(awk "BEGIN { printf \"%.2f\", $threshold / 3600 }")
+
+          echo "lastFundingTime = $last_funding_time"
+          echo "epochLength     = $epoch_length seconds"
+          echo "now             = $now"
+          echo "age             = $age seconds (${age_hours}h)"
+          echo "threshold       = $threshold seconds (${threshold_hours}h)  [1.5 x epochLength]"
+          echo "NOTE: trades and setMark() also call accrueFunding(), so a fresh"
+          echo "lastFundingTime is a lower bound on keeper health, not proof the"
+          echo "funding-keeper process itself is running."
+
+          if [ "$age" -gt "$threshold" ]; then
+            echo "::error::funding accrual is stale: age ${age_hours}h exceeds threshold ${threshold_hours}h (now=$now, lastFundingTime=$last_funding_time, epochLength=$epoch_length)"
+            exit 1
+          fi
+          echo "funding-keeper liveness (via chain): OK"
+
+      - name: Summarize results
+        if: always()
+        run: |
+          set -euo pipefail
+          failed=0
+
+          check() {
+            local name="$1"
+            local outcome="$2"
+            if [ "$outcome" = "success" ]; then
+              echo "PASS: $name"
+            else
+              echo "FAIL: $name (outcome=$outcome)"
+              failed=1
+            fi
+          }
+
+          check "order-book-server /health"        "${{ steps.check-obs.outcome }}"
+          check "liquidation-keeper /health"        "${{ steps.check-lk.outcome }}"
+          check "frontend /"                        "${{ steps.check-fe.outcome }}"
+          check "funding-keeper liveness (via chain)" "${{ steps.check-funding.outcome }}"
+
+          if [ "$failed" -eq 1 ]; then
+            echo "::error::one or more uptime checks failed — see logs above for details"
+            exit 1
+          fi
+          echo "All uptime checks passed."
