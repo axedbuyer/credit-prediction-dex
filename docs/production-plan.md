@@ -1,17 +1,20 @@
 # Pari: MVP → Production — Minimum Incremental Build Plan
 
-Status: **approved for scope, not yet in execution** (2026-07-06).
+Status: approved for scope 2026-07-06. **Phase 1 is done** (as of 2026-09-25); Phase 2
+is partly done; Phases 3–4 not started. Items marked ✅ are shipped.
 Decisions locked: external audit (booked early, no budget cap set) · Railway hosting for
 Phase 1 · `setMark` max-Δ bound and `depositCap` contract changes are in scope.
 
 ## Where we are
 
-The product is feature-complete and locally demoable (87 contract tests, 40 backend
-tests, one-command demo stack), but it has **never touched a real network** —
-`contracts/deployments/base-sepolia.json` currently holds Anvil addresses
-(chainId 31337). There is no CI, no hosting config, no monitoring, and no mainnet
-configuration anywhere (foundry.toml, viem chains, wagmi, and the frontend address map
-are Sepolia-only). Every `DEFAULT_ADMIN_ROLE` sits on the raw deployer EOA.
+*Originally written 2026-07-06, when nothing had touched a real network. Current state
+(2026-09-25):* all seven contracts are live and verified on Base Sepolia (fee-aware
+CLOBSettlement since 2026-07-12), the four backend services run on Railway, the frontend
+is live on Vercel, the book is seeded, and GitHub Actions CI runs the forge, vitest and
+frontend type-check suites on every push/PR. See `docs/HANDOVER.md` for details. Still
+true: there is no mainnet configuration anywhere (foundry.toml, viem chains, wagmi, and
+the frontend address map are Sepolia-only), and every `DEFAULT_ADMIN_ROLE` sits on the
+raw deployer EOA.
 
 One genuine correctness gap: the funding/liquidation keepers only watch a
 hand-maintained `TRACKED_HOLDERS` env list — a YES (Upbet) holder not on the list never
@@ -40,18 +43,21 @@ gets flagged for liquidation, silently shifting tail risk onto the InsuranceFund
 
 ### Phase 1 — Real testnet (~1 week)
 
-- Deploy to Base Sepolia with the existing `Deploy.s.sol` + `VerifyContracts.s.sol`
+- ✅ Deploy to Base Sepolia with the existing `Deploy.s.sol` + `VerifyContracts.s.sol`
   (ready as-is); replace the stale Anvil `deployments/base-sepolia.json` with the real
   record.
-- **Backend on Railway**: managed Redis (persistence on), order-book-server,
+- ✅ **Backend on Railway**: managed Redis (persistence on), order-book-server,
   matching-engine, funding-keeper + liquidation-keeper as services deployed from the
-  repo; keeper `/health` endpoints wired to a free uptime monitor with alerting.
+  repo; keeper `/health` endpoints wired to a free uptime monitor with alerting
+  (`.github/workflows/uptime.yml` — hourly GitHub Actions check, failed-run email is the
+  alert; funding-keeper is internal, so it is checked via on-chain `lastFundingTime`
+  staleness).
   (Chosen over a VPS for ramp speed — ~$10–20/mo; Fly.io is the equivalent alternative;
   a VPS migration later is cheap if cost ever matters.)
-- Frontend to Vercel with a real WalletConnect project ID; make the `'placeholder'`
+- ✅ Frontend to Vercel with a real WalletConnect project ID; make the `'placeholder'`
   fallback in `lib/wagmi.ts` fail loudly instead of silently shipping broken config.
-- `.env.example` for every backend service and the frontend.
-- GitHub Actions CI: `forge test`, vitest (both backend packages), `tsc --noEmit`
+- ✅ `.env.example` for every backend service and the frontend.
+- ✅ GitHub Actions CI: `forge test`, vitest (both backend packages), `tsc --noEmit`
   (frontend) on every PR.
 - **Book the audit slot now** (lead time 2–6 weeks; ballpark $20–50k for seven small
   contracts at boutique firms; Cantina/Spearbit/Sherlock-style competitive review is the
@@ -61,10 +67,12 @@ gets flagged for liquidation, silently shifting tail risk onto the InsuranceFund
 
 - Holder indexing (requirement 1).
 - Graceful shutdown on all services (drain in-flight settlement before exit).
-- `/health` on order-book-server and matching-engine (keepers already have one).
+- `/health` on order-book-server ✅ (checks Redis) and matching-engine (still none — it
+  has no HTTP server; keepers already have one).
 - Retry-and-alert wrapper on funding-keeper (today one RPC hiccup silently skips an
   epoch cycle).
-- Rate limiting on `POST /order`; CORS origin from env instead of `*`.
+- Rate limiting on `POST /order`; CORS origin from env instead of `*` ✅
+  (`CORS_ORIGINS` on order-book-server; liquidation-keeper is still `*`).
 - Mainnet plumbing: viem `base` chain object in settler/keepers, `deployments/base.json`
   naming convention, foundry.toml `[rpc_endpoints]`/`[etherscan]` `base` entries,
   `deploy-mainnet` Makefile target with a chain-id guard and mainnet USDC constant,

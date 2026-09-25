@@ -30,9 +30,13 @@ CHAIN_ID=84532
 BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 FEE_BPS=50
 REDIS_URL=${{Redis.REDIS_URL}}
+CORS_ORIGINS=https://credit-prediction-dex.vercel.app,http://localhost:3000
 ```
 Leave `PORT` unset (Railway injects it). No Dockerfile override. Health check:
-`GET /orderbook` (no /health route).
+`GET /health` (200 when Redis answers PING, 503 otherwise; never touches the RPC).
+`CORS_ORIGINS` is an exact-match allow-list; unset/empty/`*` means wildcard `*`. Vercel
+preview URLs are NOT covered — add them (or unset the var) if you test previews against
+the hosted backend.
 
 ## Railway — matching-engine (root dir `backend/matching-engine`, internal-only)
 
