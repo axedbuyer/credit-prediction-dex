@@ -17,6 +17,8 @@ export interface OrderStore {
   getAskIds(): Promise<string[]>
   isNonceUsed(maker: string, nonce: string): Promise<boolean>
   markNonceUsed(maker: string, nonce: string): Promise<void>
+  /** Cheap reachability check for GET /health. Must never throw — swallow errors and return false. */
+  ping(): Promise<boolean>
 }
 
 // ─── Redis-backed implementation ──────────────────────────────────────────────
@@ -71,6 +73,14 @@ export class RedisOrderStore implements OrderStore {
 
   async markNonceUsed(maker: string, nonce: string): Promise<void> {
     await this.redis.sadd(`nonces:${maker.toLowerCase()}`, nonce)
+  }
+
+  async ping(): Promise<boolean> {
+    try {
+      return (await this.redis.ping()) === 'PONG'
+    } catch {
+      return false
+    }
   }
 }
 
@@ -130,6 +140,10 @@ export class MemoryOrderStore implements OrderStore {
     const key = maker.toLowerCase()
     if (!this.usedNonces.has(key)) this.usedNonces.set(key, new Set())
     this.usedNonces.get(key)!.add(nonce)
+  }
+
+  async ping(): Promise<boolean> {
+    return true   // no external dependency — always reachable
   }
 }
 
