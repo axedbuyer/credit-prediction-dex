@@ -308,11 +308,9 @@ triggers if `NEXT_DIST_DIR` is set, which Vercel doesn't set by default).
   Command" override, so the correct entry point is baked into the image rather than
   depending on someone remembering to set a per-service override in the Railway
   dashboard.
-- Railway's Root Directory vs. `RAILWAY_DOCKERFILE_PATH` interaction was confirmed against
-  Railway's public docs (docs.railway.com/guides/monorepo, docs.railway.com/builds/dockerfiles)
-  but not tested against a live Railway project (no account access per this task's
-  constraints) — verify the exact dashboard field names/behavior before relying on this
-  section, in case Railway's UI has changed.
+- Railway's Root Directory vs. `RAILWAY_DOCKERFILE_PATH` interaction: confirmed live
+  (2026-07-16) — with Root Directory `backend/keepers`, the Root-Directory-relative form
+  `RAILWAY_DOCKERFILE_PATH=Dockerfile.funding-keeper` (and `.liquidation-keeper`) works.
 - Assumed the keeper and settler EOAs should be distinct from the deployer and from each
   other (least-privilege), even though `docs/production-plan.md` files the "dedicated hot
   EOAs" work under Phase 3's key ceremony — doing it from day one on testnet costs

@@ -12,7 +12,7 @@ record) — read those when a step below points at them.*
 - **Railway** project `exciting-embrace`, env `production`, GitHub-connected to
   `axedbuyer/credit-prediction-dex`. **Any push to `main` rebuilds all four services.**
   - `order-book-server` — public, `https://order-book-server-production-9bb6.up.railway.app`,
-    root `backend/order-book-server`, default Dockerfile, health `GET /orderbook`.
+    root `backend/order-book-server`, default Dockerfile, health `GET /health`.
   - `matching-engine` — internal only, root `backend/matching-engine`, no HTTP server.
   - `funding-keeper` — internal only, root `backend/keepers`,
     `RAILWAY_DOCKERFILE_PATH=Dockerfile.funding-keeper`, health `:3002/health`.

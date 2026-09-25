@@ -1,8 +1,9 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Written 2026-07-07, updated 2026-07-19, at the point of handing the project to the next
-engineer. This doc captures state and tribal knowledge that is NOT derivable from the code
-or the other docs. Read it alongside — not instead of — the canonical references below.*
+*Written 2026-07-07, updated 2026-07-19 and 2026-09-25, at the point of handing the
+project to the next engineer. This doc captures state and tribal knowledge that is NOT
+derivable from the code or the other docs. Read it alongside — not instead of — the
+canonical references below.*
 
 ## Read these first, in this order
 
@@ -37,14 +38,14 @@ or the other docs. Read it alongside — not instead of — the canonical refere
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 55 Vitest tests
+- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 112 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
   (ID `01235b60-cb1d-491c-8e60-4ab307ed5a33`, environment "production"), GitHub-connected
   to `axedbuyer/credit-prediction-dex` — all four services rebuild automatically on push
   to `main`. All services Online: `order-book-server` (public,
-  https://order-book-server-production-9bb6.up.railway.app, health = `GET /orderbook`),
+  https://order-book-server-production-9bb6.up.railway.app, health = `GET /health`),
   `matching-engine` (internal, settler wired), `funding-keeper` (internal,
   `RAILWAY_DOCKERFILE_PATH=Dockerfile.funding-keeper`), `liquidation-keeper` (public,
   https://liquidation-keeper-production.up.railway.app,
@@ -73,6 +74,11 @@ or the other docs. Read it alongside — not instead of — the canonical refere
   75¢, asks 77¢/79¢; 4 tokens per level). The script's NO-bid fee bug (it was signing a
   net rather than gross `amountIn`) was fixed in commit `b1a2e08`; the one live
   mis-priced bid from before the fix was cancelled and re-rested correctly.
+- **Uptime monitoring since 2026-09-25:** `.github/workflows/uptime.yml` runs hourly
+  (and on manual dispatch) — order-book-server `/health`, liquidation-keeper `/health`,
+  the Vercel frontend, and funding-keeper liveness via on-chain `lastFundingTime`
+  staleness (> 1.5 epochs fails). A failed run's GitHub email is the alert. Update the
+  URLs/address constants at the top of the workflow after any redeploy.
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
 
 ## Ops wallets and secrets
@@ -139,17 +145,19 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
   intended price rests below where the trader actually meant it to rest. This bit the
   original `scripts/demo/mm-sepolia-seed.ts` (fixed in commit `b1a2e08`) — check any new
   order-signing code for the same mistake.
-- **`backend/keepers/tsconfig.json` only compiles `funding-keeper.ts`** — there is no
-  `dist/` entry point for liquidation-keeper. Both keepers therefore run their `.ts`
-  directly via `node -r ts-node/register`, which makes **ts-node a runtime dependency
-  despite being a devDependency** (this is what crash-looped Railway; Dockerfiles now
-  `npm ci --include=dev`).
+- **The keepers run their `.ts` directly via `node -r ts-node/register`**, not a `dist/`
+  build. `backend/keepers/tsconfig.json` compiles both entrypoints (CI runs
+  `npm run build` as a type-check), but neither Dockerfile copies or runs `dist/` — so
+  **ts-node is a runtime dependency despite being a devDependency** (this is what
+  crash-looped Railway; Dockerfiles now `npm ci --include=dev`).
 - **order-book-server and matching-engine do NOT load dotenv.** Locally you must
   export env vars before launch (or use a wrapper); in Railway they come from service
   variables. The keepers historically ran locally with `node --env-file`.
 - **`contracts/deployments/base-sepolia.json` is also an env-var fallback** read at
   startup by keepers and settler — but the file is not copied into the Docker images,
-  so hosted services MUST set address env vars explicitly or they crash on boot.
+  so hosted services MUST set address env vars explicitly or they crash on boot (with an
+  error naming the missing env var — since 2026-09-25 the keepers no longer die on a raw
+  `ENOENT`; the settler already reported it clearly).
 - **PriceChart derives mark history from consecutive `FundingAccrued` events**
   (mark = ΔcumYES × 365d/Δt) plus a live `currentMark` tail — `setMark` emits no event,
   and `TokensMinted` is 2-arg (an older 4-arg chart ABI silently matched nothing).

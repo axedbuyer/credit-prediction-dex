@@ -1,5 +1,10 @@
 # Railway Backend Deploy — Follow-Ups (2026-07-07)
 
+> **Status (2026-09-25): all items resolved.** Railway went green ~2026-07-16, Vercel
+> went live and the book was seeded 2026-07-19 (see `docs/HANDOVER.md`). Checkboxes
+> below are ticked for the record; this doc is kept only as an incident log. Current
+> env-var source of truth: `docs/hosted-env-vars.md`.
+
 Companion to `docs/deploy-testnet.md` (the runbook). This doc is the incident record and
 fix-plan for issues actually hit while standing up the four backend services on Railway
 today. It does not restate the runbook's step-by-step instructions — read that first if
@@ -8,7 +13,7 @@ you're setting up a service from scratch. Terminology matches internal/code nami
 
 ---
 
-## 1. FIXED, pending redeploy — keeper images crash-looped on missing `ts-node`
+## 1. FIXED + redeployed — keeper images crash-looped on missing `ts-node`
 
 Both `backend/keepers/Dockerfile.funding-keeper` and `Dockerfile.liquidation-keeper` set
 `ENV NODE_ENV=production` before `RUN npm ci`. Under npm 10 (the version in `node:20-slim`),
@@ -30,10 +35,10 @@ Dockerfile build (`FROM node:20-slim AS builder` → `npm run build` (tsc) → r
 written.
 
 **Action items:**
-- [ ] Push `main` (through `fa1e729`) to GitHub.
-- [ ] Redeploy `funding-keeper` and `liquidation-keeper` on Railway (Redeploy, not just a
+- [x] Push `main` (through `fa1e729`) to GitHub.
+- [x] Redeploy `funding-keeper` and `liquidation-keeper` on Railway (Redeploy, not just a
       restart — the image needs to be rebuilt with the fixed Dockerfile).
-- [ ] Confirm boot logs show `[keeper] started` (funding-keeper) and `[liq-keeper]
+- [x] Confirm boot logs show `[keeper] started` (funding-keeper) and `[liq-keeper]
       started` (liquidation-keeper) — see item 4 below for the exact log lines and health
       checks to verify.
 
@@ -70,9 +75,9 @@ flags that this interaction was never tested against a live Railway project befo
 — now it has been, so update that doc once the correct form is confirmed working.
 
 **Action items:**
-- [ ] Fix `order-book-server`'s Root Directory to `backend/order-book-server` (no leading
+- [x] Fix `order-book-server`'s Root Directory to `backend/order-book-server` (no leading
       typo) and clear its Dockerfile-path override (should use the default `Dockerfile`).
-- [ ] While auditing, re-verify Root Directory + Dockerfile override on all four services
+- [x] While auditing, re-verify Root Directory + Dockerfile override on all four services
       against the table above — the same copy-paste-from-another-service mistake could
       exist elsewhere and just not have surfaced yet.
 
@@ -115,7 +120,7 @@ mistaken for the item 1 bug recurring if it isn't checked separately.
 | `liquidation-keeper` | `BASE_SEPOLIA_RPC_URL`, `CREDIT_MARKET_ADDRESS`, `YES_TOKEN_ADDRESS` | `CHAIN_ID` (84532), `TRACKED_HOLDERS` (empty), `POLL_INTERVAL_MS` (30000), `PORT` (3003) |
 
 **Action item:**
-- [ ] If either keeper still fails to boot after the item-1 redeploy, check its Railway
+- [x] If either keeper still fails to boot after the item-1 redeploy, check its Railway
       env vars against the table above first — an `ENOENT` on `base-sepolia.json` in the
       logs means a missing address env var, not a recurrence of the ts-node bug.
 
@@ -123,23 +128,23 @@ mistaken for the item 1 bug recurring if it isn't checked separately.
 
 ## 4. Post-redeploy verification checklist
 
-- [ ] `funding-keeper`: `GET :3002/health` (or whatever `HEALTH_PORT` resolves to —
+- [x] `funding-keeper`: `GET :3002/health` (or whatever `HEALTH_PORT` resolves to —
       code reads `process.env.HEALTH_PORT ?? '3002'`, `funding-keeper.ts` line 401).
       Route confirmed at line 334 (`GET /health`), server started at line 346.
-- [ ] `liquidation-keeper`: `GET :3003/health` — but the code reads
+- [x] `liquidation-keeper`: `GET :3003/health` — but the code reads
       `process.env.PORT ?? '3003'` (`liquidation-keeper.ts` line 332). Railway
       auto-injects `PORT` into every service's environment; if that injected value differs
       from the `PORT=3003` set in `docs/deploy-testnet.md` §3.4, the process will bind to
       whatever `PORT` actually resolves to at runtime, not literally 3003 — check the
       actual listen log line (`[liq-keeper] HTTP on http://0.0.0.0:<port>`, line 272) or
       Railway's assigned public port before assuming :3003 is correct externally.
-- [ ] `order-book-server`: **no `/health` route exists** (confirmed — only `GET
+- [x] `order-book-server`: **no `/health` route exists** (confirmed — only `GET
       /orderbook` and order mutation routes in `src/server.ts`). Use `GET /orderbook`
       (200 on an empty book) for the health check, or disable the HTTP check.
-- [ ] `matching-engine`: **no HTTP server at all** — confirmed no `.listen()` call
+- [x] `matching-engine`: **no HTTP server at all** — confirmed no `.listen()` call
       anywhere in `backend/matching-engine/src/`. Disable Railway's HTTP health check for
       this service entirely; rely on process/restart-on-crash.
-- [ ] Startup log lines to look for: `[keeper] started` (funding-keeper, line 403),
+- [x] Startup log lines to look for: `[keeper] started` (funding-keeper, line 403),
       `[liq-keeper] started` (liquidation-keeper, line 334). Their absence after a
       redeploy means `main()` never reached the end — check for the item-3 `ENOENT` crash
       or another unset required env var first.
@@ -173,11 +178,10 @@ mistaken for the item 1 bug recurring if it isn't checked separately.
 
 ---
 
-## Open questions for whoever runs the next Railway session
+## Open questions for whoever runs the next Railway session (resolved)
 
-- Confirm which form of `RAILWAY_DOCKERFILE_PATH` actually worked for the two keeper
-  services (Root-Directory-relative vs. repo-root-relative — see item 2) and record it in
-  `docs/deploy-testnet.md` so this doesn't need re-discovering.
-- Confirm the actual external port Railway exposes for `liquidation-keeper` given the
-  `PORT` env var ambiguity in item 4, and update `docs/deploy-testnet.md` §3.4 if it's not
-  literally 3003.
+- ~~Which form of `RAILWAY_DOCKERFILE_PATH` works~~ — the Root-Directory-relative form
+  (`Dockerfile.funding-keeper` / `Dockerfile.liquidation-keeper`, with Root Directory
+  `backend/keepers`) is what is live and green.
+- ~~External port for `liquidation-keeper`~~ — the service sets `PORT=3003` explicitly as
+  a Railway variable, so the process binds 3003 and Railway's public domain routes to it.
