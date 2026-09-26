@@ -60,7 +60,7 @@ async function main() {
     // Rate limiting for POST /order + DELETE /order/:id (see src/rateLimit.ts).
     orderRateLimitMax: parseOrderRateLimitMax(process.env.ORDER_RATE_LIMIT_MAX),
     orderRateLimitWindowMs: parseOrderRateLimitWindowMs(process.env.ORDER_RATE_LIMIT_WINDOW_MS),
-    // TRUST_PROXY=1 on Railway (one reverse-proxy hop) — see parseTrustProxy's
+    // TRUST_PROXY=2 on Railway (two proxy hops, measured) — see parseTrustProxy's
     // doc comment for why a hop count beats bare "true".
     trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
   }

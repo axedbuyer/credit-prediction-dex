@@ -179,7 +179,8 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
   `isSeizable` doesn't include funding pending since `lastFundingTime`. `/health`'s
   `lastRunAt` still means "last SUCCESSFUL accrual".
 - **order-book-server rate-limits `POST /order` + `DELETE /order/:id` per client IP**
-  (60/min default) and needs `TRUST_PROXY=1` on Railway to see real client IPs — see
+  (60/min default) and needs `TRUST_PROXY=2` on Railway (two proxy hops — measured, not
+  assumed) to see real client IPs — see
   `docs/hosted-env-vars.md` for why the hop count matters and how to verify it.
   `buildApp()` is async (the plugin must be registered before routes are declared).
 - **PriceChart derives mark history from consecutive `FundingAccrued` events**

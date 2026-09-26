@@ -31,7 +31,7 @@ BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 FEE_BPS=50
 REDIS_URL=${{Redis.REDIS_URL}}
 CORS_ORIGINS=https://credit-prediction-dex.vercel.app,http://localhost:3000
-TRUST_PROXY=1
+TRUST_PROXY=2
 ```
 Leave `PORT` unset (Railway injects it). No Dockerfile override. Health check:
 `GET /health` (200 when Redis answers PING, 503 otherwise; never touches the RPC).
@@ -42,13 +42,21 @@ the hosted backend.
 **Rate limiting:** `POST /order` + `DELETE /order/:id` share one bucket per client IP,
 `ORDER_RATE_LIMIT_MAX` (default 60) per `ORDER_RATE_LIMIT_WINDOW_MS` (default 60000);
 `ORDER_RATE_LIMIT_MAX=0` disables it. Reads, `/health` and preflights are never limited.
-`TRUST_PROXY=1` makes the limiter key on the real client IP from `X-Forwarded-For`
-behind Railway's single proxy hop. A wrong value fails silently: unset (or too low) keys
-every client on the proxy's IP — one shared bucket for everyone; `true` trusts the whole
-header, so clients can spoof their own bucket. Check after any hosting change: set
-`TRUST_PROXY=2` temporarily and `POST /order` with different spoofed
-`X-Forwarded-For` values — if each gets a fresh `x-ratelimit-remaining`, Railway is one
-hop and `1` is correct.
+`TRUST_PROXY=2` makes the limiter key on the real client IP. A wrong value fails
+silently, so it was **measured** on 2026-09-26 rather than assumed. The limiter's
+`x-ratelimit-remaining` header reveals which bucket a request landed in; invalid
+`POST /order` bodies are rejected with 400 but still count:
+- `TRUST_PROXY=1` → remaining jumped around (58, 59, 58, 59…) for one client: it keyed
+  on the right-most `X-Forwarded-For` entry, a per-request Railway edge-node address.
+- `TRUST_PROXY=2` → strictly decreasing for one client, and a spoofed
+  `X-Forwarded-For` doesn't escape the bucket.
+- `TRUST_PROXY=3` → same as 2, which shows Railway's edge DISCARDS any client-sent
+  `X-Forwarded-For` — the header arrives as `<client>, <edge node>`.
+So 2 = the client IP. (Railway's HTTP log `srcIp` matched our public IP.) Not yet done:
+a check from a second network (e.g. a phone hotspot) that it gets its own fresh bucket.
+That would rule out a stable shared hop in front of the edge. Re-run this check after
+any hosting change: probe with ~10 plain requests plus a few spoofed ones, and read the
+`x-ratelimit-remaining` sequence.
 
 ## Railway — matching-engine (root dir `backend/matching-engine`, internal-only)
 
