@@ -8,6 +8,13 @@
 // 6-decimal). Charged only on the carry-earning side: Upbet (YES) sells — out
 // of the seller's proceeds — and Downbet (NO) buys — inside the buyer's signed
 // amountIn. Upbet buys and Downbet sells carry no trade fee.
+//
+// FEE_BPS below is a build-time value only — CLOBSettlement.feeBps is
+// admin-editable on-chain (setFeeConfig), so this env value is now just the
+// FALLBACK used while the live on-chain rate hasn't loaded yet or a read
+// errors (see lib/useFeeBps.ts's useFeeBps hook, used by TradePanel), and for
+// callers that don't read chain state at all (e.g. scripts/demo/mm-sepolia-
+// seed.ts, which imports minGrossForNet with its default feeBps param below).
 
 export const FEE_BPS = BigInt(process.env.NEXT_PUBLIC_FEE_BPS ?? '50')
 
