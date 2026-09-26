@@ -53,10 +53,10 @@ export function parseOrderRateLimitWindowMs(raw: string | undefined): number {
  *     the server (proxy-addr counts inward from the socket's remote
  *     address); request.ip becomes the Nth entry from the right, which a
  *     client cannot spoof past a correctly-configured hop count. This is
- *     the recommended form. Railway is expected to put exactly one proxy hop
- *     in front of the service (TRUST_PROXY=1). A wrong hop count fails
- *     silently — too low keys every client on the proxy's IP (one shared
- *     bucket) — so verify after any hosting change (docs/hosted-env-vars.md).
+ *     the recommended form. Railway puts TWO proxy hops in front of the
+ *     service (measured 2026-09-26 → TRUST_PROXY=2). A wrong hop count fails
+ *     silently — too low keys clients on a proxy's IP (shared/rotating
+ *     buckets) — so re-verify after any hosting change (docs/hosted-env-vars.md).
  *   - anything else (unparseable) → `false`, with a warning logged.
  */
 export function parseTrustProxy(raw: string | undefined): boolean | number {
