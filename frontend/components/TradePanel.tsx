@@ -9,7 +9,8 @@ import { wagmiConfig } from '@/lib/wagmi'
 import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
 import { ORDER_BOOK_URL } from '@/lib/constants'
 import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
-import { FEE_BPS, tradeFee, minGrossForNet } from '@/lib/feeMath'
+import { tradeFee, minGrossForNet } from '@/lib/feeMath'
+import { useFeeBps } from '@/lib/useFeeBps'
 
 // ── EIP-712 types ────────────────────────────────────────────────────────────
 
@@ -87,6 +88,12 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
   const chainId = useChainId()
   const publicClient = usePublicClient()
   const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
+
+  // Live on-chain trading-fee rate (CLOBSettlement.feeBps is admin-editable) —
+  // falls back to the env-based FEE_BPS while loading/on error. `source`
+  // gates Downbet-buy SIGNING specifically: a stale env fallback would
+  // mis-size the gross amountIn and revert on-chain (see handleSubmit).
+  const { feeBps: liveFeeBps, source: feeBpsSource } = useFeeBps()
 
   const [side, setSide] = useState<Side>(initialSide ?? 'YES')
   const [direction, setDirection] = useState<Direction>(initialDirection ?? 'BUY')
@@ -231,16 +238,23 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
   const feeWeiPreview: bigint =
     usdcAmountWeiPreview !== null && tokenAmountWeiPreview !== null && tokenAmountWeiPreview > 0n
       ? isYesSell
-        ? tradeFee(tokenAmountWeiPreview, usdcAmountWeiPreview)
+        ? tradeFee(tokenAmountWeiPreview, usdcAmountWeiPreview, liveFeeBps)
         : isNoBuy
-        ? minGrossForNet(usdcAmountWeiPreview, tokenAmountWeiPreview) - usdcAmountWeiPreview
+        ? minGrossForNet(usdcAmountWeiPreview, tokenAmountWeiPreview, liveFeeBps) - usdcAmountWeiPreview
         : 0n
       : 0n
 
   const feeDisplay = feeWeiPreview > 0n
     ? `$${parseFloat(formatUnits(feeWeiPreview, 6)).toFixed(2)}`
     : null
-  const feePctLabel = `${(Number(FEE_BPS) / 100).toFixed(2).replace(/\.?0+$/, '')}%`
+  const feePctLabel = `${(Number(liveFeeBps) / 100).toFixed(2).replace(/\.?0+$/, '')}%`
+
+  // Downbet-buy SIGNING must not proceed on the (possibly stale) env
+  // fallback — an admin fee change not yet reflected here would mis-size the
+  // gross amountIn and revert SlippageExceeded on-chain against the
+  // fee-free seller's net minAmountOut. Previews above may still use the
+  // fallback (useFeeBps already does this internally); only signing blocks.
+  const feeRateUnknownForNoBuy = isNoBuy && feeBpsSource !== 'chain'
 
   // The on-chain Option B check is tradePrice ≥ carry owed + fee.
   const carryShortfall =
@@ -254,7 +268,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
   // net(G) = G − fee(G) ≥ carryOwed, divided by tokens sold.
   const minSellPricePct =
     wantsCarryPreview && carryOwed > 0n && tokenAmountWeiPreview && tokenAmountWeiPreview > 0n
-      ? (Number(minGrossForNet(carryOwed, tokenAmountWeiPreview)) / Number(tokenAmountWeiPreview)) * 100
+      ? (Number(minGrossForNet(carryOwed, tokenAmountWeiPreview, liveFeeBps)) / Number(tokenAmountWeiPreview)) * 100
       : null
 
   const carryOwedDisplay = wantsCarryPreview && carryOwed > 0n
@@ -277,7 +291,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
 
   // ── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
-    if (!address || !isValidAmount || isFrozen || carryShortfall) return
+    if (!address || !isValidAmount || isFrozen || carryShortfall || feeRateUnknownForNoBuy) return
     setStatus('idle')
     setErrorMsg('')
     setSuccessOrderId('')
@@ -320,9 +334,12 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       // and the fee-free seller's limit is checked against the NET amount.
       // Every other combination signs its amounts unchanged (no fee, or the
       // fee is deducted from the Upbet seller's proceeds after the fact).
+      // Uses the LIVE on-chain rate — feeRateUnknownForNoBuy already blocked
+      // this path above if that rate isn't confirmed yet, so liveFeeBps here
+      // is never the (possibly stale) env fallback for this specific combo.
       const grossUsdcIn =
         direction === 'BUY' && side === 'NO'
-          ? minGrossForNet(usdcAmountWei, tokenAmountWei)
+          ? minGrossForNet(usdcAmountWei, tokenAmountWei, liveFeeBps)
           : usdcAmountWei
       const amountIn = direction === 'BUY' ? grossUsdcIn : tokenAmountWei
       const minAmountOut = direction === 'BUY' ? tokenAmountWei : usdcAmountWei
@@ -419,7 +436,8 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       setErrorMsg(msg.includes('User rejected') || msg.includes('4001') ? 'Signature rejected' : msg)
     }
   }, [
-    address, isValidAmount, isFrozen, carryShortfall, usdcAmt, limitPrice, side, direction,
+    address, isValidAmount, isFrozen, carryShortfall, feeRateUnknownForNoBuy, liveFeeBps,
+    usdcAmt, limitPrice, side, direction,
     yesBalance, noBalance, contracts, marketId, publicClient,
     writeContractAsync, signTypedDataAsync,
   ])
@@ -431,6 +449,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     !isConnected             ? 'Connect wallet to trade'
     : isFrozen               ? 'Position frozen'
     : busy                   ? statusLabel(status)
+    : feeRateUnknownForNoBuy ? 'Confirming live fee rate for Downbet orders…'
     : carryShortfall         ? 'Increase price or amount to cover carry'
     : `Place ${direction} ${sideLabel(side)} order`
 
@@ -564,6 +583,11 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
         {noBuyTotalDisplay && (
           <p>Total {noBuyTotalDisplay} — includes {feeDisplay} trade fee ({feePctLabel})</p>
         )}
+        {feeRateUnknownForNoBuy && (
+          <p className="text-text-muted">
+            Confirming the live fee rate before you can sign a Downbet order — one moment.
+          </p>
+        )}
         {((direction === 'BUY' && side === 'YES') || (direction === 'SELL' && side === 'NO')) && (
           <p className="text-text-muted">No trade fee on this order</p>
         )}
@@ -575,7 +599,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       {/* Submit button */}
       <button
         onClick={handleSubmit}
-        disabled={!isConnected || !isValidAmount || busy || isFrozen || carryShortfall}
+        disabled={!isConnected || !isValidAmount || busy || isFrozen || carryShortfall || feeRateUnknownForNoBuy}
         className={`pari-b-btn w-full py-3 ${side === 'YES' ? 'pari-b-btn--danger' : 'pari-b-btn--primary'}`}
       >
         {buttonLabel}
