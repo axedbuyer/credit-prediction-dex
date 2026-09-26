@@ -31,12 +31,24 @@ BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 FEE_BPS=50
 REDIS_URL=${{Redis.REDIS_URL}}
 CORS_ORIGINS=https://credit-prediction-dex.vercel.app,http://localhost:3000
+TRUST_PROXY=1
 ```
 Leave `PORT` unset (Railway injects it). No Dockerfile override. Health check:
 `GET /health` (200 when Redis answers PING, 503 otherwise; never touches the RPC).
 `CORS_ORIGINS` is an exact-match allow-list; unset/empty/`*` means wildcard `*`. Vercel
 preview URLs are NOT covered — add them (or unset the var) if you test previews against
 the hosted backend.
+
+**Rate limiting:** `POST /order` + `DELETE /order/:id` share one bucket per client IP,
+`ORDER_RATE_LIMIT_MAX` (default 60) per `ORDER_RATE_LIMIT_WINDOW_MS` (default 60000);
+`ORDER_RATE_LIMIT_MAX=0` disables it. Reads, `/health` and preflights are never limited.
+`TRUST_PROXY=1` makes the limiter key on the real client IP from `X-Forwarded-For`
+behind Railway's single proxy hop. A wrong value fails silently: unset (or too low) keys
+every client on the proxy's IP — one shared bucket for everyone; `true` trusts the whole
+header, so clients can spoof their own bucket. Check after any hosting change: set
+`TRUST_PROXY=2` temporarily and `POST /order` with different spoofed
+`X-Forwarded-For` values — if each gets a fresh `x-ratelimit-remaining`, Railway is one
+hop and `1` is correct.
 
 ## Railway — matching-engine (root dir `backend/matching-engine`, internal-only)
 
@@ -92,6 +104,7 @@ HOLDER_INDEX_FROM_BLOCK=43766743
 REDIS_URL=${{Redis.REDIS_URL}}
 POLL_INTERVAL_MS=30000
 PORT=3003
+CORS_ORIGINS=https://credit-prediction-dex.vercel.app,http://localhost:3000
 ```
 Health check `GET :3003/health`. Read-only, no private key. NOTE: the process binds
 `process.env.PORT` and Railway injects its own PORT — check the actual listen log line.

@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 98 contract tests, 161 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 98 contract tests, 207 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
 Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
 (script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
@@ -167,7 +167,8 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
 ### Backend Services
 
 ```
-/order-book-server  — REST: POST /order, DELETE /order/:id, GET /orderbook. POST /order
+/order-book-server  — REST: POST /order, DELETE /order/:id, GET /orderbook, GET /health
+                      (mutations rate-limited per client IP). POST /order
                       pre-filters against chain state (src/chain.ts, IChainReader/viem):
                       rejects flagged/claimable makers (PositionFrozen) and un-fundable
                       YES sells (FundingShortfall + minSellProceeds); fails open on RPC
