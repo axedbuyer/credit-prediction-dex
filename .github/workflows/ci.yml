@@ -15,6 +15,12 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned to the version the suite is developed and verified against
+          # locally, so a new Foundry release can't turn CI red with no code
+          # change. Bump deliberately (and re-run `forge test` locally) when
+          # upgrading.
+          version: v1.7.1
       - name: forge test
         working-directory: contracts
         run: forge test -vv
