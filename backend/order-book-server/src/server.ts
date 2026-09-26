@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify'
+import rateLimit from '@fastify/rate-limit'
 import { v4 as uuidv4 } from 'uuid'
 import type { Address, Hex } from 'viem'
 import type { AppConfig, Order, OrderWire, StoredOrder } from './types'
@@ -6,6 +7,7 @@ import type { OrderStore } from './orderbook'
 import type { IChainReader } from './chain'
 import { verifyOrderSignature, verifyCancelSignature } from './validation'
 import { tradeFee, netNoBidProceeds, minGrossForNet } from './fee'
+import { DEFAULT_ORDER_RATE_LIMIT_MAX, DEFAULT_ORDER_RATE_LIMIT_WINDOW_MS } from './rateLimit'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -115,8 +117,69 @@ async function runChainPreFilter(
 
 // ─── App factory ──────────────────────────────────────────────────────────────
 
-export function buildApp(store: OrderStore, config: AppConfig, chainReader?: IChainReader): FastifyInstance {
-  const app = Fastify({ logger: false })
+export async function buildApp(store: OrderStore, config: AppConfig, chainReader?: IChainReader): Promise<FastifyInstance> {
+  // trustProxy governs request.ip (X-Forwarded-For handling) — see
+  // src/rateLimit.ts#parseTrustProxy. false (default) is correct for local
+  // dev / anvil demo stack with no reverse proxy in front.
+  const app = Fastify({ logger: false, trustProxy: config.trustProxy ?? false })
+
+  // ─── Rate limiting: POST /order + DELETE /order/:id ONLY ───────────────────
+  //
+  // These are the only routes that mutate shared state (the order book /
+  // nonce set) on behalf of an arbitrary caller, so they're the only ones
+  // worth throttling per client IP. GET /orderbook is polled continuously by
+  // both the frontend and the matching-engine (backend/matching-engine/src/
+  // client.ts's HttpOrderBookClient — every pollIntervalMs, default 500ms)
+  // and GET /health is a liveness probe; neither must ever be rate-limited.
+  // The matching engine never calls POST /order or DELETE /order/:id itself
+  // — it reads GET /orderbook and removes filled/pruned orders directly in
+  // Redis (backend/matching-engine/src/settler.ts's sorted-set removal), so
+  // it never contends with real users for this limiter's bucket.
+  //
+  // Registered with `global: true` so POST /order and DELETE /order/:id
+  // (which set no per-route config) fall back to this single top-level
+  // limiter/store — i.e. ONE shared bucket per client IP across both routes,
+  // per the spec. GET /orderbook, GET /health, and the OPTIONS preflight
+  // opt out explicitly via `config: { rateLimit: false }` (see `noRateLimit`
+  // below).
+  //
+  // Storage: @fastify/rate-limit's default in-memory LRU store — fine for a
+  // single instance. Running multiple replicas (e.g. Railway horizontal
+  // scale) would need the plugin's `redis` store option so buckets are
+  // shared across instances instead of one-per-process.
+  const orderRateLimitMax = config.orderRateLimitMax ?? DEFAULT_ORDER_RATE_LIMIT_MAX
+  const orderRateLimitWindowMs = config.orderRateLimitWindowMs ?? DEFAULT_ORDER_RATE_LIMIT_WINDOW_MS
+  const rateLimitEnabled = orderRateLimitMax > 0
+
+  if (rateLimitEnabled) {
+    // Awaited (not fire-and-forget): the plugin's `onRoute` hook — which is
+    // what makes `global: true` apply the limiter to the routes declared
+    // below, and what makes each route's `config.rateLimit` mean anything —
+    // is only attached once this plugin's own async setup has run. Routes
+    // declared before that would see neither behavior (avvio only guarantees
+    // relative ordering between queued `.register()` calls of unawaited
+    // plugins/routes, not that an unawaited plugin has finished loading by
+    // the time a subsequent synchronous `.get()/.post()` call runs).
+    await app.register(rateLimit, {
+      global: true,
+      max: orderRateLimitMax,
+      timeWindow: orderRateLimitWindowMs,
+      // Match the shape of the app's other 4xx bodies ({ error: string }) so
+      // the frontend's existing `body?.error` handling (TradePanel.tsx)
+      // displays this sensibly too. `statusCode` is required for Fastify's
+      // default error handler to actually reply 429 instead of 500 — it
+      // rides along in the body as a harmless extra field.
+      errorResponseBuilder: (_request, context) => ({
+        statusCode: 429,
+        error: `Too many requests — retry in ${Math.ceil(context.ttl / 1000)}s`,
+      }),
+    })
+  }
+
+  // Route option to opt a route out of the global rate limiter above. Safe
+  // to pass even when rate limiting is disabled (no plugin registered ⇒ no
+  // onRoute hook reads it ⇒ no-op).
+  const noRateLimit = { config: { rateLimit: false as const } }
 
   // CORS — this API is consumed directly by the frontend's browser fetch()
   // calls; without an ACAO header, GET /orderbook succeeds for server-side/curl
@@ -145,14 +208,14 @@ export function buildApp(store: OrderStore, config: AppConfig, chainReader?: ICh
     reply.header('Access-Control-Allow-Headers', 'Content-Type')
     return payload
   })
-  app.options('*', async (_request, reply) => {
+  app.options('*', noRateLimit, async (_request, reply) => {
     reply.status(204).send()
   })
 
   // GET /health — liveness + cheap store (Redis) reachability check. Never
   // touches the chain/RPC — chain reads are best-effort and the public RPC is
   // flaky, so health must not depend on it (see runChainPreFilter's fail-open).
-  app.get('/health', async (_request, reply) => {
+  app.get('/health', noRateLimit, async (_request, reply) => {
     try {
       const reachable = await store.ping()
       if (!reachable) {
@@ -263,8 +326,9 @@ export function buildApp(store: OrderStore, config: AppConfig, chainReader?: ICh
     return reply.status(200).send({ cancelled: true })
   })
 
-  // GET /orderbook — sorted bids (high→low) and asks (low→high)
-  app.get('/orderbook', async () => {
+  // GET /orderbook — sorted bids (high→low) and asks (low→high). Polled
+  // continuously (frontend + matching-engine) — never rate-limited.
+  app.get('/orderbook', noRateLimit, async () => {
     const [bidIds, askIds] = await Promise.all([store.getBidIds(), store.getAskIds()])
 
     const [bidResults, askResults] = await Promise.all([

@@ -6,6 +6,7 @@ import { createChainReader } from './chain'
 import type { AppConfig } from './types'
 import type { IChainReader } from './chain'
 import type { Address } from 'viem'
+import { parseOrderRateLimitMax, parseOrderRateLimitWindowMs, parseTrustProxy } from './rateLimit'
 
 // CREDIT_MARKET_ADDRESS / YES_TOKEN_ADDRESS env vars take precedence over the
 // deployments file, mirroring backend/keepers/*.ts.
@@ -56,6 +57,12 @@ async function main() {
     // deterministic SlippageExceeded reverts that the settler prunes.
     feeBps: parseInt(process.env.FEE_BPS ?? '50'),
     corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS),
+    // Rate limiting for POST /order + DELETE /order/:id (see src/rateLimit.ts).
+    orderRateLimitMax: parseOrderRateLimitMax(process.env.ORDER_RATE_LIMIT_MAX),
+    orderRateLimitWindowMs: parseOrderRateLimitWindowMs(process.env.ORDER_RATE_LIMIT_WINDOW_MS),
+    // TRUST_PROXY=1 on Railway (one reverse-proxy hop) — see parseTrustProxy's
+    // doc comment for why a hop count beats bare "true".
+    trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
   }
 
   const redis = createRedisClient(
@@ -85,7 +92,7 @@ async function main() {
     )
   }
 
-  const app = buildApp(store, config, chainReader)
+  const app = await buildApp(store, config, chainReader)
 
   const address = await app.listen({ port: config.port ?? 3001, host: '0.0.0.0' })
   console.log(`Order book server listening at ${address}`)
