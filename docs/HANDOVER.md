@@ -75,8 +75,9 @@ canonical references below.*
   net rather than gross `amountIn`) was fixed in commit `b1a2e08`; the one live
   mis-priced bid from before the fix was cancelled and re-rested correctly.
 - **Uptime monitoring since 2026-09-25:** `.github/workflows/uptime.yml` runs hourly
-  (and on manual dispatch) — order-book-server `/health`, liquidation-keeper `/health`,
-  the Vercel frontend, and funding-keeper liveness via on-chain `lastFundingTime`
+  (and on manual dispatch) — order-book-server `/health`, liquidation-keeper `/health`
+  (including `holderIndex.lastError` == null, re-checked once after 45s), the Vercel
+  frontend, and funding-keeper liveness via on-chain `lastFundingTime`
   staleness (> 1.5 epochs fails). A failed run's GitHub email is the alert. Update the
   URLs/address constants at the top of the workflow after any redeploy.
 - **Audit: deliberately deferred** by the project owner. Not forgotten.

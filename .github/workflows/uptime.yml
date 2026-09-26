@@ -19,7 +19,13 @@
 # summary step fails the job if any check failed — so one broken check
 # doesn't hide the others):
 #   1. order-book-server /health  -> must be HTTP 200
-#   2. liquidation-keeper /health -> must be HTTP 200
+#   2. liquidation-keeper /health -> must be HTTP 200 AND report a healthy
+#      holder index (holder discovery from YES Transfer events): the
+#      `holderIndex` field must exist and `holderIndex.lastError` must be
+#      null. A set lastError is re-checked once ~45s later before failing —
+#      the keeper re-syncs every 30s, so a one-off RPC blip clears itself;
+#      a persistent error means holders may be going undiscovered.
+#      backfillComplete=false only warns (a fresh backfill takes minutes).
 #   3. frontend /                 -> must be HTTP 200
 #   4. funding-keeper liveness, indirectly, via chain state: funding-keeper
 #      has no public URL (Railway-internal), so instead we read
@@ -88,17 +94,38 @@ jobs:
         run: |
           set -euo pipefail
           echo "GET $LIQUIDATION_KEEPER_HEALTH_URL"
-          code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
-            -o /tmp/lk_body.txt -w "%{http_code}" "$LIQUIDATION_KEEPER_HEALTH_URL" || true)
-          echo "HTTP status: $code"
-          echo "Body:"
-          cat /tmp/lk_body.txt || true
-          echo
-          if [ "$code" != "200" ]; then
-            echo "::error::liquidation-keeper /health returned HTTP $code (expected 200) at $LIQUIDATION_KEEPER_HEALTH_URL"
+          fetch_health() {
+            code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+              -o /tmp/lk_body.txt -w "%{http_code}" "$LIQUIDATION_KEEPER_HEALTH_URL" || true)
+            echo "HTTP status: $code"
+            echo "Body:"
+            cat /tmp/lk_body.txt || true
+            echo
+            if [ "$code" != "200" ]; then
+              echo "::error::liquidation-keeper /health returned HTTP $code (expected 200) at $LIQUIDATION_KEEPER_HEALTH_URL"
+              exit 1
+            fi
+          }
+
+          fetch_health
+          if ! jq -e '.holderIndex' /tmp/lk_body.txt >/dev/null; then
+            echo "::error::liquidation-keeper /health has no holderIndex field — holder discovery is not running"
             exit 1
           fi
-          echo "liquidation-keeper: OK"
+          if [ "$(jq -r '.holderIndex.lastError' /tmp/lk_body.txt)" != "null" ]; then
+            echo "holderIndex.lastError is set — re-checking in 45s in case it was a transient RPC blip"
+            sleep 45
+            fetch_health
+            last_error=$(jq -r '.holderIndex.lastError' /tmp/lk_body.txt)
+            if [ "$last_error" != "null" ]; then
+              echo "::error::liquidation-keeper holder index is failing to sync (persisted across re-check): $last_error"
+              exit 1
+            fi
+          fi
+          if [ "$(jq -r '.holderIndex.backfillComplete' /tmp/lk_body.txt)" != "true" ]; then
+            echo "::warning::liquidation-keeper holder-index backfill not complete yet (synced to block $(jq -r '.holderIndex.syncedToBlock' /tmp/lk_body.txt))"
+          fi
+          echo "liquidation-keeper: OK (holders=$(jq -r '.holderIndex.holders' /tmp/lk_body.txt), syncedToBlock=$(jq -r '.holderIndex.syncedToBlock' /tmp/lk_body.txt))"
 
       - name: frontend /
         id: check-fe

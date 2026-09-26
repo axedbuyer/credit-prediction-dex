@@ -52,7 +52,7 @@ from `Transfer` events (requirement 1 below).
   repo; keeper `/health` endpoints wired to a free uptime monitor with alerting
   (`.github/workflows/uptime.yml` — hourly GitHub Actions check, failed-run email is the
   alert; funding-keeper is internal, so it is checked via on-chain `lastFundingTime`
-  staleness).
+  staleness; holder discovery via liquidation-keeper's `holderIndex.lastError`).
   (Chosen over a VPS for ramp speed — ~$10–20/mo; Fly.io is the equivalent alternative;
   a VPS migration later is cheap if cost ever matters.)
 - ✅ Frontend to Vercel with a real WalletConnect project ID; make the `'placeholder'`
