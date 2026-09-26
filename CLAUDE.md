@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 98 contract tests, 207 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 98 contract tests, 222 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
 Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
 (script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
@@ -159,8 +159,8 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
   MAX_FEE_BPS = 500 cap); constructor leaves fee at 0 until configured. Fees NEVER touch
   CreditMarket collateral.
 - **Off-chain:** order-book-server stores NO bids at their NET price (sorting/crossing
-  basis; FEE_BPS env must mirror the chain — overstating skips marginal crosses,
-  understating causes SlippageExceeded reverts) and includes the fee in the YES-sell
+  basis; the rate is read live from CLOBSettlement.feeBps() and refreshed every 60s —
+  FEE_BPS env is only the RPC-outage fallback, surfaced on GET /health) and includes the fee in the YES-sell
   FundingShortfall pre-filter + minSellProceeds hint. The matching-engine settler prunes
   SlippageExceeded pairs (deterministic for static amounts) like FundingShortfall.
 
@@ -201,8 +201,10 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
     the wallet is claimable/frozen; on YES sells shows "minimum sell price to cover
     carry + fee" and surfaces the server's FundingShortfall response inline; on NO buys
     signs a gross fee-inclusive amountIn and shows "Total … includes … trade fee";
-    fee-free combos say "No trade fee on this order"; 6-decimal math (lib/feeMath.ts,
-    NEXT_PUBLIC_FEE_BPS env, default 50).
+    fee-free combos say "No trade fee on this order"; 6-decimal math (lib/feeMath.ts).
+    Fee rate is read live from CLOBSettlement.feeBps() (lib/useFeeBps.ts, 60s refetch;
+    NEXT_PUBLIC_FEE_BPS is only a preview fallback) — NO-buy signing is blocked until
+    the live rate has loaded.
   PositionCard — Cost Basis, Equity, P&L, Breakeven Mark; YES adds Epochs To Expire with
     a warning as it nears zero. A distinct frozen panel shows a client-side cure-cost
     estimate (fundingDebt + frozenFunding×yesBal/1e18 minus pending NO credit — NOT

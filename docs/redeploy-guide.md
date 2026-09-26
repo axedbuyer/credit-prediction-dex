@@ -60,8 +60,10 @@ record) — read those when a step below points at them.*
      the container (see `docs/deploy-followups.md` §1).
    - `order-book-server` and `matching-engine` do **not** load dotenv — only Railway
      service vars reach them, a local `.env` change alone does nothing on Railway.
-   - `FEE_BPS` on `order-book-server` must equal the on-chain `feeBps`. Overstating it
-     skips marginal crosses; understating it causes `SlippageExceeded` reverts.
+   - The fee rate is read live from the on-chain `feeBps` (order-book-server and
+     frontend). `FEE_BPS` / `NEXT_PUBLIC_FEE_BPS` are only fallbacks — keep them roughly
+     current, and check order-book-server `GET /health` shows `fee.source: "chain"`
+     after a deploy (`env-fallback` means the RPC read failed).
    - The `contracts/deployments/base-sepolia.json` fallback file is **not** copied into
      any Docker image — address env vars (`CREDIT_MARKET_ADDRESS`, `YES_TOKEN_ADDRESS`,
      etc.) are mandatory on Railway, not optional-with-a-local-fallback there.

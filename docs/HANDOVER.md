@@ -38,7 +38,7 @@ canonical references below.*
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 207 Vitest tests
+- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 222 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
@@ -136,10 +136,14 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
   `CLOBSettlement.tradeFee` (Solidity, source of truth), `backend/order-book-server/src/fee.ts`,
   and `frontend/lib/feeMath.ts` all implement the same fee formula (the two TS mirrors
   additionally carry the `minGrossForNet` inversion, which has no on-chain counterpart).
-  `FEE_BPS` (backend) and `NEXT_PUBLIC_FEE_BPS` (frontend) must mirror the chain's live
-  `feeBps` — overstating skips marginal crosses, understating causes `SlippageExceeded`
-  reverts. There is no single source these three read from at runtime; a fee-bps change
-  on-chain means updating all three by hand.
+  The RATE is no longer hand-mirrored (2026-09-26): order-book-server
+  (`src/feeSource.ts`) and the frontend (`lib/useFeeBps.ts`) both read
+  `CLOBSettlement.feeBps()` live and refresh every 60s, so an admin `setFeeConfig` is
+  picked up without redeploys. `FEE_BPS` / `NEXT_PUBLIC_FEE_BPS` are now only fallbacks
+  (RPC outage / still loading): the server logs loudly and `/health` shows
+  `fee.source: "env-fallback"`, and the frontend refuses to sign Downbet (NO) buys until
+  the live rate has loaded. The FORMULA still has three copies — change all of them
+  together.
 - **NO buys sign a GROSS fee-inclusive `amountIn`, not net.** The contract can only pull
   exactly the signed `amountIn`, so the buyer's order must already include the fee
   (computed via the `minGrossForNet` piecewise inversion); a NO bid signed at its net
