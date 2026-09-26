@@ -6,6 +6,17 @@ Companion to `docs/deploy-testnet.md` §3–4 (service topology) and
 `docs/deploy-followups.md` (incident fixes). Secrets are marked — pull them from the
 local gitignored `.env` files, never from this doc.
 
+## Every Railway service
+
+```
+RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
+```
+All four services shut down gracefully on SIGTERM (stop taking new work, let in-flight
+work finish, bounded by `SHUTDOWN_TIMEOUT_MS`, default 25000). Railway sends SIGTERM to
+the old deployment once the new one is live and SIGKILLs it after the draining window —
+keep the window (30s) longer than `SHUTDOWN_TIMEOUT_MS`, or draining is cut short. Set on
+all four services 2026-09-26.
+
 ## Shared addresses (chainId 84532)
 
 | Key | Value |
