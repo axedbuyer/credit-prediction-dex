@@ -63,9 +63,9 @@ function defaultReadContract(args: { functionName: string }): Promise<unknown> {
 }
 
 function makeMocks(overrides: {
-  estimateContractGas?: () => Promise<bigint>
+  estimateContractGas?: (args: { functionName: string }) => Promise<bigint>
   writeContract?: (args: { functionName: string }) => Promise<string>
-  waitForTransactionReceipt?: () => Promise<{ status: 'success' | 'reverted' }>
+  waitForTransactionReceipt?: (args: { hash: string }) => Promise<{ status: 'success' | 'reverted' }>
   readContract?: (args: { functionName: string }) => Promise<unknown>
 } = {}) {
   const publicClient: IPublicClient = {
@@ -422,6 +422,180 @@ describe('FundingKeeper — seizure checks', () => {
 
     // Accrual succeeded, so lastRunAt is set regardless of flag outcome
     expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+  })
+})
+
+// ─── Seizure checks survive an accrual-phase failure ──────────────────────────
+//
+// The seizure-check phase (checkHolders) must run every tick regardless of
+// whether the accrueFunding phase succeeded — an RPC blip or on-chain revert
+// at accrual time must not also cost up to 8h of missed liquidation coverage.
+
+describe('FundingKeeper — seizure checks survive an accrual failure', () => {
+  const seizableReadContract = ({ functionName }: { functionName: string }): Promise<unknown> => {
+    if (functionName === 'claimable')     return Promise.resolve(false)
+    if (functionName === 'isSeizable')    return Promise.resolve(true)
+    if (functionName === 'frozenFunding') return Promise.resolve(1_000_000n)
+    return defaultReadContract({ functionName })
+  }
+
+  it('still isSeizable-checks and flags when accrual gas estimation fails', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      estimateContractGas: ({ functionName }) =>
+        functionName === 'accrueFunding'
+          ? Promise.reject(new Error('execution reverted'))
+          : Promise.resolve(150_000n),
+      readContract: seizableReadContract,
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
+    keeper.start(scheduler)
+
+    await expect(fire()).resolves.not.toThrow()
+
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
+        (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
+    )
+    expect(isSeizableCall).toBeDefined()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeDefined()
+
+    // Accrual never succeeded — lastRunAt must stay unset.
+    expect(keeper.getLastRunAt()).toBeNull()
+  })
+
+  it('still isSeizable-checks and flags when the accrueFunding tx send fails', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      writeContract: ({ functionName }) =>
+        functionName === 'accrueFunding'
+          ? Promise.reject(new Error('nonce too low'))
+          : Promise.resolve(FLAG_TX_HASH),
+      readContract: seizableReadContract,
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
+    keeper.start(scheduler)
+
+    await expect(fire()).resolves.not.toThrow()
+
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
+        (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
+    )
+    expect(isSeizableCall).toBeDefined()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeDefined()
+
+    expect(keeper.getLastRunAt()).toBeNull()
+  })
+
+  it('still isSeizable-checks and flags when the accrueFunding receipt is reverted', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      waitForTransactionReceipt: ({ hash }) =>
+        hash === TX_HASH
+          ? Promise.resolve({ status: 'reverted' as const })
+          : Promise.resolve({ status: 'success' as const }),
+      readContract: seizableReadContract,
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
+    keeper.start(scheduler)
+
+    await expect(fire()).resolves.not.toThrow()
+
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
+        (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
+    )
+    expect(isSeizableCall).toBeDefined()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeDefined()
+
+    expect(keeper.getLastRunAt()).toBeNull()
+  })
+
+  it('still isSeizable-checks and flags when waiting for the accrueFunding receipt throws', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      waitForTransactionReceipt: ({ hash }) =>
+        hash === TX_HASH
+          ? Promise.reject(new Error('RPC timeout'))
+          : Promise.resolve({ status: 'success' as const }),
+      readContract: seizableReadContract,
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
+    keeper.start(scheduler)
+
+    await expect(fire()).resolves.not.toThrow()
+
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
+        (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
+    )
+    expect(isSeizableCall).toBeDefined()
+
+    const writeCalls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls
+    const flagCall = writeCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'flagClaimable',
+    )
+    expect(flagCall).toBeDefined()
+
+    expect(keeper.getLastRunAt()).toBeNull()
+  })
+
+  it('happy path: still accrues then seizure-checks, in that order', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable')  return Promise.resolve(false)
+        if (functionName === 'isSeizable') return Promise.resolve(false)
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const holderSource = makeFakeHolderSource([HOLDER_ADDR])
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
+    keeper.start(scheduler)  // fires the startup holderSource.refresh() once
+
+    await fire()
+
+    // Accrual succeeded.
+    expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+
+    const accrueWriteOrder = (walletClient.writeContract as ReturnType<typeof vi.fn>)
+      .mock.invocationCallOrder[0]
+
+    // holderSource.refresh() is called twice total: once at start() (startup
+    // kick-off) and once inside runOnce's seizure-check phase — take the latter.
+    const refreshCalls = holderSource.refresh.mock.invocationCallOrder
+    const runOnceRefreshOrder = refreshCalls[refreshCalls.length - 1]
+
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock
+    const isSeizableIdx = readCalls.calls.findIndex(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName === 'isSeizable',
+    )
+    const isSeizableOrder = readCalls.invocationCallOrder[isSeizableIdx]
+
+    // accrueFunding's tx submission happened strictly before the seizure-check
+    // phase's holder-index refresh and isSeizable read.
+    expect(accrueWriteOrder).toBeLessThan(runOnceRefreshOrder)
+    expect(accrueWriteOrder).toBeLessThan(isSeizableOrder)
   })
 })
 

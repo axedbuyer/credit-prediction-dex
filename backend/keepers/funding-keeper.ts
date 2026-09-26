@@ -149,23 +149,56 @@ export class FundingKeeper {
   }
 
   /**
-   * Run one accrual cycle:
-   *  1. Estimate gas (+20% buffer)
-   *  2. Call accrueFunding()
-   *  3. Wait for receipt
-   *  4. Read cumulativeFundingPerYES and cumFundingPerNO and log
-   *  5. Update lastRunAt
-   *  6. Refresh the holder index and check each known YES holder for seizure;
-   *     flag newly-seizable ones
+   * Run one cycle, split into two independent phases:
    *
-   * Any failure is logged and swallowed — the keeper stays alive and will retry
-   * at the next scheduled tick.
+   *  Phase A — accrue(): estimate gas (+20% buffer), call accrueFunding(),
+   *    wait for receipt, read the updated indices and log, then set
+   *    lastRunAt — ONLY on full success (this is exactly what /health's
+   *    lastRunAt reflects; unchanged from before).
+   *  Phase B — checkHolders(): refresh the holder index and check every
+   *    known YES holder for seizure, flagging newly-seizable ones.
+   *
+   * Phase B ALWAYS runs, whether or not Phase A succeeded: an RPC blip or a
+   * revert at accrual time must not also cost up to 8h of missed
+   * liquidation coverage — the two concerns are independent. Caveat:
+   * isSeizable() reads the STORED cumulativeFundingPerYES (funding accrued
+   * since lastFundingTime is not included), so checking against a failed
+   * accrual may under-detect by the unaccrued interval — still strictly
+   * better than not checking at all, and flagClaimable() re-accrues before
+   * snapshotting, so a flag succeeds even off a stale index.
+   *
+   * Any failure in either phase (including an unexpected throw out of
+   * accrue() itself) is logged and swallowed — the keeper stays alive and
+   * will retry at the next scheduled tick.
    */
   async runOnce(): Promise<void> {
     const account = this.walletClient.account?.address
     if (!account) throw new Error('wallet client has no account')
 
     const ts = new Date().toISOString()
+
+    let accrued = false
+    try {
+      accrued = await this.accrue(account, ts)
+    } catch (err) {
+      console.error(`[keeper] ${ts} — unexpected error during accrual phase:`, err)
+    }
+
+    if (!accrued) {
+      console.log(`[keeper] ${ts} — accrual failed — seizure-checking anyway against the stored index`)
+    }
+
+    await this.checkHolders(ts)
+  }
+
+  /**
+   * Phase A: accrueFunding(). Returns true only on full success (tx sent,
+   * receipt succeeded) — that's the sole condition under which lastRunAt is
+   * updated. Every failure point below logs and returns false rather than
+   * throwing, so callers don't need a try/catch for the "expected" failure
+   * modes (runOnce still wraps the call defensively for anything else).
+   */
+  private async accrue(account: Address, ts: string): Promise<boolean> {
     console.log(`[keeper] ${ts} — accruing funding…`)
 
     // 1. Gas estimate
@@ -180,7 +213,7 @@ export class FundingKeeper {
       })
     } catch (err) {
       console.error(`[keeper] ${ts} — gas estimation failed:`, err)
-      return
+      return false
     }
 
     const gas = (gasEstimate * 120n) / 100n  // +20% buffer
@@ -196,7 +229,7 @@ export class FundingKeeper {
       })
     } catch (err) {
       console.error(`[keeper] ${ts} — accrueFunding tx failed:`, err)
-      return
+      return false
     }
 
     console.log(`[keeper] ${ts} — submitted ${txHash}`)
@@ -207,12 +240,12 @@ export class FundingKeeper {
       receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash })
     } catch (err) {
       console.error(`[keeper] ${ts} — receipt wait failed for ${txHash}:`, err)
-      return
+      return false
     }
 
     if (receipt.status !== 'success') {
       console.error(`[keeper] ${ts} — accrueFunding REVERTED: ${txHash}`)
-      return
+      return false
     }
 
     // 4. Read updated indices
@@ -243,10 +276,17 @@ export class FundingKeeper {
 
     // 5. Record last successful run
     this.lastRunAt = new Date()
+    return true
+  }
 
-    // 6. Refresh the holder index, then seizure-check every known YES holder.
-    // refresh() never blocks on a long backfill (see holder-index.ts) — it awaits
-    // only a cheap incremental sync once caught up.
+  /**
+   * Phase B: refresh the holder index, then seizure-check every known YES
+   * holder — flag newly-seizable ones. Runs unconditionally from runOnce,
+   * independent of whether Phase A (accrual) succeeded.
+   * refresh() never blocks on a long backfill (see holder-index.ts) — it
+   * awaits only a cheap incremental sync once caught up.
+   */
+  private async checkHolders(ts: string): Promise<void> {
     await this.holderSource.refresh()
     const holders = this.holderSource.holders()
     const idxStatus = this.holderSource.status()
