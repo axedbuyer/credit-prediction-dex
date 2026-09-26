@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 112 contract tests (incl. a stateful invariant suite), 269 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 113 contract tests (incl. a stateful invariant suite), 269 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
 Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
 (script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
@@ -382,11 +382,17 @@ on-chain check is the backstop; this filter is pure UX.
     the YES side: the holder's NO-side credit survives a claim untouched.
 ```
 
-**Open finding (2026-09-26) — invariant 4 is currently violated during a flagged window:**
-freezing a flagged holder's YES funding while the paired NO keeps accruing live credit
-leaks collateral (and gives the holder a free option). Needs a spec decision + redeploy —
-see `docs/security/invariant-findings-2026-09-26.md` (F1, plus the smaller F2). The
-invariant suite (`contracts/test/invariant/`) models the leak explicitly until fixed.
+**Open findings (2026-09-26) — contract fix + redeploy pending,**
+`docs/security/invariant-findings-2026-09-26.md`:
+- **F4 (HIGH):** `isSeizable` ignores the `fundingDebt` ledger, and any CLOB buy resets
+  the snapshot it does read — so a YES holder can owe more than the position is worth and
+  never be flagged or liquidated (carry-free protection). Violates the trigger spec.
+- **F1 (MEDIUM):** freezing a flagged holder's YES funding while the paired NO keeps
+  accruing live credit leaks collateral (invariant 4) and gives the holder a free option.
+- **F2 (LOW):** a liquidator's own accrued NO credit is forfeited on claim.
+Recommended fix: one live `owed(user)` used by trigger, claim price and cure; drop the
+accounting freeze. The invariant suite (`contracts/test/invariant/`) models F1/F2
+explicitly and has a repro test per finding until fixed.
 
 ### What stays true across model iterations
 
