@@ -8,6 +8,7 @@ import {
   startServer,
   computePosition,
   resolveAddresses,
+  parseCorsOrigins,
   type IPublicClient,
   type IHolderSource,
   type KeeperConfig,
@@ -438,6 +439,156 @@ describe('LiquidationKeeper — error resilience', () => {
     expect(positions).toHaveLength(1)
     expect(positions[0].user).toBe(HOLDER_A)
     expect(keeper.getLastPolledAt()).toBeInstanceOf(Date)
+  })
+})
+
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+
+describe('CORS', () => {
+  it('defaults to wildcard Access-Control-Allow-Origin when corsOrigins is unset', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0)
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`, {
+        headers: { origin: 'https://evil.example.com' },
+      })
+      expect(res.headers.get('access-control-allow-origin')).toBe('*')
+      expect(res.headers.get('vary')).toBeNull()
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('defaults to wildcard when corsOrigins is an empty array', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0, [])
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`)
+      expect(res.headers.get('access-control-allow-origin')).toBe('*')
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('echoes back an allow-listed origin with Vary: Origin', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0, ['https://credit-prediction-dex.vercel.app', 'http://localhost:3000'])
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`, {
+        headers: { origin: 'http://localhost:3000' },
+      })
+      expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:3000')
+      expect(res.headers.get('vary')).toBe('Origin')
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('tolerates a trailing slash on the allow-listed origin (stripped by parseCorsOrigins)', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0, parseCorsOrigins('http://localhost:3000/'))
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`, {
+        headers: { origin: 'http://localhost:3000' },
+      })
+      expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:3000')
+      expect(res.headers.get('vary')).toBe('Origin')
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('omits Access-Control-Allow-Origin for a non-listed origin', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0, ['https://credit-prediction-dex.vercel.app'])
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`, {
+        headers: { origin: 'https://evil.example.com' },
+      })
+      expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('omits Access-Control-Allow-Origin when there is no Origin header and an allow-list is set', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0, ['https://credit-prediction-dex.vercel.app'])
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`)
+      expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('keeps Allow-Methods/Allow-Headers and the OPTIONS preflight working with an allow-list configured', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0, ['http://localhost:3000'])
+    const port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/claimable`, {
+        method: 'OPTIONS',
+        headers: { origin: 'http://localhost:3000' },
+      })
+      expect(res.status).toBe(204)
+      expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:3000')
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET,OPTIONS')
+      expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type')
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+})
+
+// ─── parseCorsOrigins ───────────────────────────────────────────────────────────
+
+describe('parseCorsOrigins', () => {
+  it('returns undefined when unset', () => {
+    expect(parseCorsOrigins(undefined)).toBeUndefined()
+  })
+
+  it('returns undefined for an empty string', () => {
+    expect(parseCorsOrigins('')).toBeUndefined()
+    expect(parseCorsOrigins('   ')).toBeUndefined()
+  })
+
+  it('returns undefined for "*"', () => {
+    expect(parseCorsOrigins('*')).toBeUndefined()
+  })
+
+  it('parses a comma-separated list, trimming spaces and trailing slashes', () => {
+    expect(parseCorsOrigins(' https://a.example.com/ , http://localhost:3000/// ')).toEqual([
+      'https://a.example.com',
+      'http://localhost:3000',
+    ])
   })
 })
 
