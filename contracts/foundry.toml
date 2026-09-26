@@ -9,6 +9,16 @@ remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
 ffi = true
 fs_permissions = [{ access = "read-write", path = "./" }]
 
+[profile.default.invariant]
+runs = 64
+depth = 64
+fail_on_revert = false
+
+[profile.deep.invariant]
+runs = 512
+depth = 256
+fail_on_revert = false
+
 [rpc_endpoints]
 base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
 
