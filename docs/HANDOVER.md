@@ -38,7 +38,7 @@ canonical references below.*
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 112 Vitest tests
+- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 161 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
@@ -158,6 +158,20 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
   so hosted services MUST set address env vars explicitly or they crash on boot (with an
   error naming the missing env var — since 2026-09-25 the keepers no longer die on a raw
   `ENOENT`; the settler already reported it clearly).
+- **Holder discovery (`backend/keepers/holder-index.ts`) indexes YES `Transfer`
+  recipients — the set only grows.** Every YES balance change emits `Transfer` (OZ
+  `_update`), so ever-recipients ⊇ current holders; ex-holders stay in the set and cost
+  one read each (keepers read `claimable`/`isSeizable` per holder anyway). A missing
+  holder is the dangerous failure, so there is deliberately no pruning. Scan state
+  (cursor + set) lives in Redis under `holder-index:<chainId>:<yes token>:*`, shared by
+  both keepers; the cursor only moves forward and is written after the holders. Every
+  sync re-scans 64 blocks below the cursor for reorg safety. `HOLDER_INDEX_FROM_BLOCK`
+  is required (Sepolia YES deploy block 43766743) — scanning from genesis on the public
+  RPC (1,000-block `eth_getLogs` cap) would be ~47k calls. Keepers call `refresh()`,
+  which never blocks a cycle on the initial backfill: until it completes they check the
+  holders found so far (plus any `TRACKED_HOLDERS` seeds), and a failed backfill retries
+  itself every 30s. Both `/health` endpoints report `holderIndex` status
+  (`backfillComplete`, `syncedToBlock`, `lastError`).
 - **PriceChart derives mark history from consecutive `FundingAccrued` events**
   (mark = ΔcumYES × 365d/Δt) plus a live `currentMark` tail — `setMark` emits no event,
   and `TokensMinted` is 2-arg (an older 4-arg chart ABI silently matched nothing).
@@ -184,18 +198,15 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
 
 ## Immediate next steps (in rough priority order)
 
-Railway green-up, the Vercel deploy, and liquidity seeding are all done (see "State at
-handover" above) — removed from this list.
+Railway green-up, the Vercel deploy, liquidity seeding, and holder discovery from chain
+events (2026-09-26) are all done (see "State at handover" above) — removed from this
+list.
 
-1. Keep `TRACKED_HOLDERS` current on both keepers as real holders appear (still
-   hand-maintained — the keepers only watch addresses they're told about). Phase 2
-   holder discovery from chain events is the real fix and is launch-blocking for
-   mainnet (`docs/production-plan.md`, "Launch-blocking requirement #1").
-2. The production plan proper: Safe role ceremony (admin/keeper roles currently sit on
+1. The production plan proper: Safe role ceremony (admin/keeper roles currently sit on
    raw EOAs — see "Ops wallets and secrets" above), invariant/fuzz suite + audit (audit
    still deliberately deferred by the owner, not forgotten), credit-event dress
    rehearsal on Sepolia.
-3. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
+2. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
 
 For redeploying contracts or services after a code change, use `docs/redeploy-guide.md`
 — it captures the dry-run and EIP-712 domain-invalidation gotchas above in runbook form.

@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 98 contract tests, 112 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 98 contract tests, 161 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
 Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
 (script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
@@ -182,6 +182,9 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
                       position breaching the seizure trigger.
 /liquidation-keeper — exposes GET /claimable (flagged positions + formulaic price P);
                       does not claim itself — claiming is permissionless.
+                      Both keepers discover YES holders from the token's Transfer
+                      events (keepers/holder-index.ts; startup backfill + incremental
+                      sync, progress in Redis) — no hand-maintained holder list.
 /oracle-monitor     — placeholder for ISDA DC scraper (manual multisig in MVP).
 ```
 

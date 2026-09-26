@@ -16,13 +16,14 @@ true: there is no mainnet configuration anywhere (foundry.toml, viem chains, wag
 the frontend address map are Sepolia-only), and every `DEFAULT_ADMIN_ROLE` sits on the
 raw deployer EOA.
 
-One genuine correctness gap: the funding/liquidation keepers only watch a
-hand-maintained `TRACKED_HOLDERS` env list — a YES (Upbet) holder not on the list never
-gets flagged for liquidation, silently shifting tail risk onto the InsuranceFund.
+The one genuine correctness gap called out here originally — keepers only watching a
+hand-maintained `TRACKED_HOLDERS` list — is closed: both keepers now discover YES holders
+from `Transfer` events (requirement 1 below).
 
 ## Launch-blocking requirements
 
-1. **Holder discovery from chain events** — keepers must index YES holders from
+1. ✅ **Holder discovery from chain events** (2026-09-26, `backend/keepers/holder-index.ts`)
+   — keepers must index YES holders from
    `Transfer`/`TokensMinted` events (startup backfill + live polling), replacing
    `TRACKED_HOLDERS`. Correctness, not polish.
 2. **Key & role ceremony** — deploy a Safe (2-of-3). New `TransferRoles.s.sol` moves
@@ -65,7 +66,7 @@ gets flagged for liquidation, silently shifting tail risk onto the InsuranceFund
 
 ### Phase 2 — Production hardening (~1–2 weeks, parallel with Phase 3)
 
-- Holder indexing (requirement 1).
+- ✅ Holder indexing (requirement 1).
 - Graceful shutdown on all services (drain in-flight settlement before exit).
 - `/health` on order-book-server ✅ (checks Redis) and matching-engine (still none — it
   has no HTTP server; keepers already have one).

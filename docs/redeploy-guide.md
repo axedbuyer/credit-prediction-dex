@@ -149,7 +149,9 @@ Follow `docs/deploy-testnet.md` end to end. Nothing in this doc substitutes for 
   `order-book-server/src/fee.ts`, `frontend/lib/feeMath.ts`. Any change to fee logic must
   land in all three in lockstep, or the fee-free-side/gross-vs-net checks between
   contract, order book, and UI disagree and trades start reverting or mis-pricing.
-- **`TRACKED_HOLDERS`** on both `funding-keeper` and `liquidation-keeper` is a
-  hand-maintained env list, not derived from chain state. Extend it on both services
-  whenever a new YES/Upbet holder shows up, or that holder is invisible to both keepers
-  and its tail risk silently lands on the InsuranceFund.
+- **Holder discovery after a YES token redeploy:** both keepers discover holders from
+  YES `Transfer` events starting at `HOLDER_INDEX_FROM_BLOCK`. A new YES token needs
+  `YES_TOKEN_ADDRESS` AND `HOLDER_INDEX_FROM_BLOCK` (its deploy block, from the broadcast
+  receipt) updated on BOTH keepers. The Redis keys are namespaced by token address, so
+  the old index is simply ignored — no flush needed. (`TRACKED_HOLDERS` is now only an
+  optional extra seed list.)

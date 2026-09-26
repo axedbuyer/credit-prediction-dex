@@ -194,22 +194,22 @@ required auth password that bare `REDIS_HOST`/`REDIS_PORT` cannot.
 - New service, same repo. Root Directory: `backend/keepers`.
 - `RAILWAY_DOCKERFILE_PATH=Dockerfile.funding-keeper` (non-default filename).
 - Env vars (see `backend/keepers/.env.example`): `BASE_SEPOLIA_RPC_URL`, `CHAIN_ID=84532`,
-  `CREDIT_MARKET_ADDRESS`, `TRACKED_HOLDERS` (comma-separated — see "Known limitation"
-  below), `KEEPER_PRIVATE_KEY`, `HEALTH_PORT=3002`.
+  `CREDIT_MARKET_ADDRESS`, `YES_TOKEN_ADDRESS`, `HOLDER_INDEX_FROM_BLOCK` (YES deploy
+  block — required), `REDIS_URL` (recommended), `KEEPER_PRIVATE_KEY`, `HEALTH_PORT=3002`;
+  optional `TRACKED_HOLDERS` extra seeds.
 - Networking: internal only (nothing else needs to reach it).
 - Health check: `GET :3002/health` (confirmed route in `funding-keeper.ts`).
-- **Known limitation, out of scope for this doc** (tracked in `docs/production-plan.md`
-  Launch-blocking requirement #1): this keeper only watches the hand-maintained
-  `TRACKED_HOLDERS` list — any YES/Upbet holder not on that list is invisible to it and
-  never gets flagged, silently shifting tail risk onto the InsuranceFund. Keep the list
-  current manually until holder indexing ships.
+- Holder discovery: both keepers index YES holders from the token's `Transfer` events
+  (`backend/keepers/holder-index.ts`, 2026-09-26) — this replaced the hand-maintained
+  `TRACKED_HOLDERS` list (production-plan launch-blocking requirement #1). See
+  `docs/hosted-env-vars.md` for the discovery env vars.
 
 ### 3.4 liquidation-keeper
 - New service, same repo. Root Directory: `backend/keepers`.
 - `RAILWAY_DOCKERFILE_PATH=Dockerfile.liquidation-keeper`.
 - Env vars: `BASE_SEPOLIA_RPC_URL`, `CHAIN_ID=84532`, `CREDIT_MARKET_ADDRESS`,
-  `YES_TOKEN_ADDRESS`, `TRACKED_HOLDERS` (same list as funding-keeper), `POLL_INTERVAL_MS=30000`,
-  `PORT=3003`. No private key — read-only.
+  `YES_TOKEN_ADDRESS`, `HOLDER_INDEX_FROM_BLOCK`, `REDIS_URL` (same values as
+  funding-keeper), `POLL_INTERVAL_MS=30000`, `PORT=3003`. No private key — read-only.
 - Networking: **public** (frontend's `/liquidate` page calls this directly via
   `NEXT_PUBLIC_LIQUIDATION_KEEPER_URL` — see §4).
 - Health check: `GET :3003/health` (confirmed route in `liquidation-keeper.ts`).
