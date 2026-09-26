@@ -141,12 +141,12 @@ function mockChainReader(opts: MockChainReaderOpts = {}): IChainReader {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('POST /order', () => {
-  let app: ReturnType<typeof buildApp>
+  let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
 
-  beforeEach(() => {
+  beforeEach(async () => {
     store = new MemoryOrderStore()
-    app = buildApp(store, TEST_CONFIG)
+    app = await buildApp(store, TEST_CONFIG)
   })
 
   afterEach(async () => {
@@ -222,7 +222,7 @@ describe('POST /order', () => {
 })
 
 describe('POST /order — v1b1 chain pre-filter', () => {
-  let app: ReturnType<typeof buildApp>
+  let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
 
   beforeEach(() => {
@@ -235,7 +235,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('rejects a bid (buy) order from a flagged/frozen maker', async () => {
     const reader = mockChainReader({ claimable: true })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(MAKER, {}, BigInt(100))  // default: USDC in → bid
     const res = await app.inject({ method: 'POST', url: '/order', body: wire })
@@ -246,7 +246,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('rejects an ask (sell) order from a flagged/frozen maker', async () => {
     const reader = mockChainReader({ claimable: true })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -262,7 +262,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
   it('rejects a YES sell whose minAmountOut is below the seller net funding debit', async () => {
     // fundingDebt=50, previewDelta=-30 (i.e. yesOwed=30 net of noCredit) → D = 50 - (-30) = 80
     const reader = mockChainReader({ fundingDebt: BigInt(50), previewDelta: BigInt(-30) })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -279,7 +279,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('accepts a YES sell whose minAmountOut covers the net funding debit', async () => {
     const reader = mockChainReader({ fundingDebt: BigInt(50), previewDelta: BigInt(-30) })  // D = 80
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -293,7 +293,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('accepts a NO sell even with an outstanding funding debit (debit never blocks NO sales)', async () => {
     const reader = mockChainReader({ fundingDebt: BigInt(999), previewDelta: BigInt(-999) })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -307,7 +307,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('never runs the funding pre-filter on a bid (buy) order', async () => {
     const reader = mockChainReader({ fundingDebt: BigInt(999), previewDelta: BigInt(-999) })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(MAKER, {}, BigInt(105))  // default: USDC in → bid
     const res = await app.inject({ method: 'POST', url: '/order', body: wire })
@@ -319,7 +319,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('fails open (accepts the order) when the chain reader throws', async () => {
     const reader = mockChainReader({ throwOn: 'isClaimable' })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(MAKER, {}, BigInt(106))
     const res = await app.inject({ method: 'POST', url: '/order', body: wire })
@@ -329,7 +329,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 
   it('fails open (accepts the order) when previewFunding throws on a YES sell', async () => {
     const reader = mockChainReader({ throwOn: 'previewFunding' })
-    app = buildApp(store, TEST_CONFIG, reader)
+    app = await buildApp(store, TEST_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -342,7 +342,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
   })
 
   it('skips all pre-filter checks when no chain reader is provided (existing tests keep passing)', async () => {
-    app = buildApp(store, TEST_CONFIG)  // no chainReader arg
+    app = await buildApp(store, TEST_CONFIG)  // no chainReader arg
 
     const wire = await buildOrderWire(
       MAKER,
@@ -358,7 +358,7 @@ describe('POST /order — v1b1 chain pre-filter', () => {
 describe('POST /order — trading fee (feeBps=50)', () => {
   const FEE_CONFIG: AppConfig = { ...TEST_CONFIG, feeBps: 50 }
 
-  let app: ReturnType<typeof buildApp>
+  let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
 
   beforeEach(() => {
@@ -370,7 +370,7 @@ describe('POST /order — trading fee (feeBps=50)', () => {
   })
 
   it('stores a NO bid at its NET price (buyer amountIn is fee-inclusive)', async () => {
-    app = buildApp(store, FEE_CONFIG)
+    app = await buildApp(store, FEE_CONFIG)
 
     // Gross 950e6 for 1000e6 NO → fee = min(950e6, 50e6) × 50/10000 = 250_000
     const wire = await buildOrderWire(
@@ -390,7 +390,7 @@ describe('POST /order — trading fee (feeBps=50)', () => {
   })
 
   it('stores a YES bid at its GROSS price (YES buys are fee-free)', async () => {
-    app = buildApp(store, FEE_CONFIG)
+    app = await buildApp(store, FEE_CONFIG)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -411,7 +411,7 @@ describe('POST /order — trading fee (feeBps=50)', () => {
   it('rejects a YES sell that covers the debit but not debit + fee', async () => {
     // D = 30e6; minAmountOut 30_000_001 clears D but not D + fee (150_000)
     const reader = mockChainReader({ fundingDebt: BigInt(30_000_000), previewDelta: BigInt(0) })
-    app = buildApp(store, FEE_CONFIG, reader)
+    app = await buildApp(store, FEE_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -432,7 +432,7 @@ describe('POST /order — trading fee (feeBps=50)', () => {
 
   it('accepts a YES sell priced at the minSellProceeds hint', async () => {
     const reader = mockChainReader({ fundingDebt: BigInt(30_000_000), previewDelta: BigInt(0) })
-    app = buildApp(store, FEE_CONFIG, reader)
+    app = await buildApp(store, FEE_CONFIG, reader)
 
     const wire = await buildOrderWire(
       MAKER,
@@ -448,7 +448,7 @@ describe('POST /order — trading fee (feeBps=50)', () => {
 })
 
 describe('GET /health', () => {
-  let app: ReturnType<typeof buildApp>
+  let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
 
   afterEach(async () => {
@@ -457,7 +457,7 @@ describe('GET /health', () => {
 
   it('returns 200 { status: "ok" } when the store is reachable', async () => {
     store = new MemoryOrderStore()
-    app = buildApp(store, TEST_CONFIG)
+    app = await buildApp(store, TEST_CONFIG)
 
     const res = await app.inject({ method: 'GET', url: '/health' })
 
@@ -468,7 +468,7 @@ describe('GET /health', () => {
   it('returns 503 { status: "error" } when the store ping fails', async () => {
     store = new MemoryOrderStore()
     vi.spyOn(store, 'ping').mockResolvedValue(false)
-    app = buildApp(store, TEST_CONFIG)
+    app = await buildApp(store, TEST_CONFIG)
 
     const res = await app.inject({ method: 'GET', url: '/health' })
 
@@ -479,7 +479,7 @@ describe('GET /health', () => {
   it('returns 503 { status: "error" } when the store ping throws', async () => {
     store = new MemoryOrderStore()
     vi.spyOn(store, 'ping').mockRejectedValue(new Error('ECONNREFUSED'))
-    app = buildApp(store, TEST_CONFIG)
+    app = await buildApp(store, TEST_CONFIG)
 
     const res = await app.inject({ method: 'GET', url: '/health' })
 
@@ -489,7 +489,7 @@ describe('GET /health', () => {
 })
 
 describe('CORS', () => {
-  let app: ReturnType<typeof buildApp>
+  let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
 
   beforeEach(() => {
@@ -501,7 +501,7 @@ describe('CORS', () => {
   })
 
   it('defaults to wildcard Access-Control-Allow-Origin when corsOrigins is unset', async () => {
-    app = buildApp(store, TEST_CONFIG)
+    app = await buildApp(store, TEST_CONFIG)
 
     const res = await app.inject({
       method: 'GET', url: '/orderbook', headers: { origin: 'https://evil.example.com' },
@@ -512,7 +512,7 @@ describe('CORS', () => {
   })
 
   it('defaults to wildcard when corsOrigins is an empty array', async () => {
-    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: [] })
+    app = await buildApp(store, { ...TEST_CONFIG, corsOrigins: [] })
 
     const res = await app.inject({ method: 'GET', url: '/orderbook' })
 
@@ -520,7 +520,7 @@ describe('CORS', () => {
   })
 
   it('echoes back an allow-listed origin with Vary: Origin', async () => {
-    app = buildApp(store, {
+    app = await buildApp(store, {
       ...TEST_CONFIG,
       corsOrigins: ['https://credit-prediction-dex.vercel.app', 'http://localhost:3000'],
     })
@@ -534,7 +534,7 @@ describe('CORS', () => {
   })
 
   it('omits Access-Control-Allow-Origin for a non-listed origin', async () => {
-    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: ['https://credit-prediction-dex.vercel.app'] })
+    app = await buildApp(store, { ...TEST_CONFIG, corsOrigins: ['https://credit-prediction-dex.vercel.app'] })
 
     const res = await app.inject({
       method: 'GET', url: '/orderbook', headers: { origin: 'https://evil.example.com' },
@@ -544,7 +544,7 @@ describe('CORS', () => {
   })
 
   it('omits Access-Control-Allow-Origin when there is no Origin header and an allow-list is set', async () => {
-    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: ['https://credit-prediction-dex.vercel.app'] })
+    app = await buildApp(store, { ...TEST_CONFIG, corsOrigins: ['https://credit-prediction-dex.vercel.app'] })
 
     const res = await app.inject({ method: 'GET', url: '/orderbook' })
 
@@ -552,7 +552,7 @@ describe('CORS', () => {
   })
 
   it('keeps Allow-Methods/Allow-Headers and the OPTIONS preflight working with an allow-list configured', async () => {
-    app = buildApp(store, { ...TEST_CONFIG, corsOrigins: ['http://localhost:3000'] })
+    app = await buildApp(store, { ...TEST_CONFIG, corsOrigins: ['http://localhost:3000'] })
 
     const res = await app.inject({
       method: 'OPTIONS', url: '/order', headers: { origin: 'http://localhost:3000' },
@@ -565,13 +565,177 @@ describe('CORS', () => {
   })
 })
 
-describe('GET /orderbook', () => {
-  let app: ReturnType<typeof buildApp>
+describe('Rate limiting — POST /order + DELETE /order/:id (shared bucket)', () => {
+  const RL_CONFIG: AppConfig = { ...TEST_CONFIG, orderRateLimitMax: 2, orderRateLimitWindowMs: 60_000 }
+
+  let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
 
-  beforeEach(() => {
+  beforeEach(async () => {
     store = new MemoryOrderStore()
-    app = buildApp(store, TEST_CONFIG)
+    app = await buildApp(store, RL_CONFIG)
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  // The rate-limit hook runs onRequest, before body/signature validation —
+  // so an intentionally-empty/invalid body still consumes the bucket. Only
+  // the limiter's own behavior is under test here, not order validation.
+  async function postJunk(remoteAddress: string, extraHeaders: Record<string, string> = {}) {
+    return app.inject({
+      method: 'POST', url: '/order', body: {}, remoteAddress,
+      headers: extraHeaders,
+    })
+  }
+
+  it('returns 429 with a JSON error body, retry-after, and rate-limit headers once the bucket is exhausted', async () => {
+    await postJunk('20.0.0.1')
+    await postJunk('20.0.0.1')
+
+    const res = await postJunk('20.0.0.1')
+
+    expect(res.statusCode).toBe(429)
+    const body = res.json<{ error: string }>()
+    expect(typeof body.error).toBe('string')
+    expect(body.error.length).toBeGreaterThan(0)
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(res.headers['x-ratelimit-limit']).toBe('2')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+  })
+
+  it('carries the CORS header on a 429 response (the onSend hook still runs)', async () => {
+    await postJunk('20.0.0.2')
+    await postJunk('20.0.0.2')
+
+    const res = await postJunk('20.0.0.2', { origin: 'https://evil.example.com' })
+
+    expect(res.statusCode).toBe(429)
+    // TEST_CONFIG has no corsOrigins allow-list, so the wildcard default applies.
+    expect(res.headers['access-control-allow-origin']).toBe('*')
+  })
+
+  it('gives separate client IPs separate buckets', async () => {
+    await postJunk('21.0.0.1')
+    await postJunk('21.0.0.1')
+    const blocked = await postJunk('21.0.0.1')
+    expect(blocked.statusCode).toBe(429)
+
+    // A different IP has its own, unexhausted bucket.
+    const other = await postJunk('21.0.0.2')
+    expect(other.statusCode).not.toBe(429)
+  })
+
+  it('shares one bucket across POST /order and DELETE /order/:id', async () => {
+    await postJunk('22.0.0.1')
+    const del = await app.inject({
+      method: 'DELETE', url: '/order/does-not-exist', remoteAddress: '22.0.0.1',
+      headers: { 'x-maker': '0x1', 'x-signature': '0x1' },
+    })
+    expect(del.statusCode).not.toBe(429) // 2nd request, still within max=2
+
+    const res = await postJunk('22.0.0.1') // 3rd request across both routes combined
+    expect(res.statusCode).toBe(429)
+  })
+
+  it('never rate-limits GET /orderbook or GET /health, even after the mutation bucket is exhausted', async () => {
+    await postJunk('23.0.0.1')
+    await postJunk('23.0.0.1')
+    const exhausted = await postJunk('23.0.0.1')
+    expect(exhausted.statusCode).toBe(429)
+
+    for (let i = 0; i < 5; i++) {
+      const ob = await app.inject({ method: 'GET', url: '/orderbook', remoteAddress: '23.0.0.1' })
+      expect(ob.statusCode).toBe(200)
+      const health = await app.inject({ method: 'GET', url: '/health', remoteAddress: '23.0.0.1' })
+      expect(health.statusCode).toBe(200)
+    }
+  })
+
+  it('never rate-limits the OPTIONS preflight', async () => {
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({ method: 'OPTIONS', url: '/order', remoteAddress: '24.0.0.1' })
+      expect(res.statusCode).toBe(204)
+    }
+  })
+
+  it('ORDER_RATE_LIMIT_MAX=0 disables the limiter entirely', async () => {
+    const disabledStore = new MemoryOrderStore()
+    const disabledApp = await buildApp(disabledStore, { ...TEST_CONFIG, orderRateLimitMax: 0 })
+    try {
+      for (let i = 0; i < 10; i++) {
+        const res = await disabledApp.inject({ method: 'POST', url: '/order', body: {}, remoteAddress: '25.0.0.1' })
+        expect(res.statusCode).not.toBe(429)
+      }
+    } finally {
+      await disabledApp.close()
+    }
+  })
+})
+
+describe('Rate limiting — TRUST_PROXY / X-Forwarded-For', () => {
+  it('TRUST_PROXY unset (default false) ignores X-Forwarded-For — buckets key on the raw remote address', async () => {
+    const store = new MemoryOrderStore()
+    const app = await buildApp(store, { ...TEST_CONFIG, orderRateLimitMax: 1, orderRateLimitWindowMs: 60_000 })
+    try {
+      const first = await app.inject({
+        method: 'POST', url: '/order', body: {}, remoteAddress: '30.0.0.1',
+        headers: { 'x-forwarded-for': 'spoofed-a' },
+      })
+      expect(first.statusCode).not.toBe(429)
+
+      // Different X-Forwarded-For, SAME remoteAddress: with trustProxy unset
+      // the header is ignored entirely, so this still lands in the same
+      // (already-exhausted) bucket.
+      const second = await app.inject({
+        method: 'POST', url: '/order', body: {}, remoteAddress: '30.0.0.1',
+        headers: { 'x-forwarded-for': 'spoofed-b' },
+      })
+      expect(second.statusCode).toBe(429)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('TRUST_PROXY=1 keys on X-Forwarded-For, and a spoofed left-most entry cannot bypass the 1-hop limit', async () => {
+    const store = new MemoryOrderStore()
+    const app = await buildApp(store, {
+      ...TEST_CONFIG, orderRateLimitMax: 1, orderRateLimitWindowMs: 60_000, trustProxy: 1,
+    })
+    try {
+      // remoteAddress stands in for Railway's single trusted proxy hop;
+      // "real" is the actual client, "spoofed" is an attacker-controlled
+      // value the client itself prepended to the header it sends.
+      const first = await app.inject({
+        method: 'POST', url: '/order', body: {}, remoteAddress: '31.0.0.1',
+        headers: { 'x-forwarded-for': 'spoofed, real' },
+      })
+      expect(first.statusCode).not.toBe(429)
+
+      // Same real client, DIFFERENT spoofed left-most entry. If Fastify used
+      // trustProxy: true semantics (left-most wins), this would look like a
+      // brand-new, unlimited client. With a 1-hop trust count it still
+      // resolves to "real" (the right-most/nearest-to-proxy entry) and is
+      // correctly blocked.
+      const second = await app.inject({
+        method: 'POST', url: '/order', body: {}, remoteAddress: '31.0.0.1',
+        headers: { 'x-forwarded-for': 'a-different-spoof, real' },
+      })
+      expect(second.statusCode).toBe(429)
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+describe('GET /orderbook', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let store: MemoryOrderStore
+
+  beforeEach(async () => {
+    store = new MemoryOrderStore()
+    app = await buildApp(store, TEST_CONFIG)
   })
 
   afterEach(async () => {

@@ -8,6 +8,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fastify/rate-limit": "^9.1.0",
     "fastify": "^4.28.1",
     "ioredis": "^5.3.2",
     "uuid": "^9.0.1",

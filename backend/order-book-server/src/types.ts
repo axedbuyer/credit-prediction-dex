@@ -58,4 +58,18 @@ export interface AppConfig {
   // parsed from the comma-separated CORS_ORIGINS env var. Undefined/empty ⇒
   // wildcard `Access-Control-Allow-Origin: *` (current/default behaviour).
   corsOrigins?: string[]
+  // Rate limiting for POST /order + DELETE /order/:id ONLY (see server.ts's
+  // buildApp / src/rateLimit.ts). A single shared bucket per client IP across
+  // both routes. orderRateLimitMax undefined ⇒ default 60; 0 ⇒ limiter
+  // disabled entirely (buildApp skips plugin registration — used by the
+  // local demo stack / tests). orderRateLimitWindowMs undefined ⇒ default
+  // 60_000 (60s). Parsed from ORDER_RATE_LIMIT_MAX / ORDER_RATE_LIMIT_WINDOW_MS.
+  orderRateLimitMax?: number
+  orderRateLimitWindowMs?: number
+  // Fastify's `trustProxy` option (passed straight through to the Fastify()
+  // constructor), parsed from TRUST_PROXY by src/rateLimit.ts#parseTrustProxy.
+  // Governs how `request.ip` (what the rate limiter keys on) is derived from
+  // X-Forwarded-For — see that function's doc comment for the false / true /
+  // hop-count(N) semantics. Default false (no reverse proxy, e.g. local dev).
+  trustProxy?: boolean | number
 }
