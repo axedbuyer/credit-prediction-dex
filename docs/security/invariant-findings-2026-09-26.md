@@ -47,7 +47,7 @@ after each). All five are caught at the default profile, repeatedly:
 solvency invariant vacuous and flag/boundary states were too rare — hence the
 boundary-seeking action and the precise compensation terms.)
 
-## F1 — Frozen YES funding vs live NO credit: permanent collateral leak (HIGH for mainnet)
+## F1 — Frozen YES funding vs live NO credit: permanent collateral leak (MEDIUM)
 
 **Mechanism.** When a YES holder is flagged, `settleFunding` charges their YES side only
 `frozenFunding` (the flag-time value) and `cure()`/claims restart accrual from "now". But
@@ -69,27 +69,17 @@ Bob, 354 days pass, Alice is flagged, 30 more days pass, Bob settles (live NO cr
 Alice cures paying her full frozen bill → the market holds less USDC than the YES supply
 by exactly the 30-day window's NO credit.
 
+**Severity in practice.** A flagged position is worth claiming immediately (the claimer
+pays ≈97% of `m` for YES worth `m`), so in a healthy market the window is minutes to
+hours and the leak is tiny (a 1-hour window at a 23% mark ≈ 0.0026% of notional). It is
+unbounded when claims stall: no active liquidator (the MVP's liquidation-keeper only
+lists positions; nobody claims), a pending credit-event motion (claims blocked), or the
+mark falling after the flag (claim profit `m − min(f_frozen, m)` shrinks to zero).
+
 **Testnet exposure:** none today (the only YES holder is the deployer; nothing has been
 flagged).
 
-**Fix options — a spec decision** (CLAUDE.md deliberately freezes f at flag time "so the
-price formula stays deterministic"):
-
-- **A. Freeze only the claim price, not the accounting (recommended).** `cure()` and the
-  post-event `settleYES` auto-cure charge live accrual since the pre-flag snapshot (the
-  snapshot is already left untouched while flagged). The liquidation claim price becomes
-  `P = min(f_live, m)` instead of `min(f_frozen, m)`, with the InsuranceFund covering
-  `f_live − m` exactly as in today's tail case. Keeps NO whole AND collateral solvent,
-  removes the free option, and the liquidator's margin (`m − f_live`) shrinks while a
-  position sits unclaimed — an incentive to claim fast. Cost: the claim price is no
-  longer fixed at flag time (still fully deterministic from on-chain state at claim time;
-  the `/claimable` feed would compute it live).
-- **B. Keep the frozen price; InsuranceFund absorbs the window.** At cure/claim, the
-  InsuranceFund pays `(cum_now − cum_at_flag) × Q` into collateral. Minimal spec change,
-  but the fund pays for every flagged window, and the free option remains unless cure
-  also charges live accrual.
-- **C. Liquidator inherits the window** (snapshot set to flag time instead of now).
-  Rejected: after a long window the claim becomes unprofitable and positions get stuck.
+**Fix options** — re-evaluated after F4 below; see "Recommended fix" at the end.
 
 ## F2 — Liquidator's own NO credit is forfeited on claim (LOW)
 
@@ -109,9 +99,64 @@ simultaneously-flagged positions where one claims the other; the handler skips t
 Moot if F2's fix routes the liquidator through `settleFunding`, whose flagged branch is
 explicit — re-check when fixing F2.
 
+## F4 — Any trade resets the seizure clock while debt grows unseen (HIGH)
+
+**Mechanism.** `isSeizable` measures `f_now = cumulativeFundingPerYES −
+fundingSnapshot[user]` and never reads `fundingDebt`. Every CLOB trade runs
+`settleFunding` on BOTH parties (`CLOBSettlement.sol:250-251`); for a buyer that moves the
+accrued YES debit into `fundingDebt` and resets the snapshot. So a YES holder resets their
+liquidation clock with any purchase (of either token, any size) every < ~353 days — the
+trigger time is ≈ 365/1.03 days at any constant mark — while the real debt grows in a
+ledger the trigger ignores.
+
+**Impact.** The position ends up owing more than it is worth, yet can never be flagged or
+claimed. The debt is uncollectable outside a credit event: a YES sale must clear ≥ the
+debit (worth less than the debt), and redeem underflows. Meanwhile the paired NO keeps
+being paid its credit out of collateral. Net effect: carry-free protection — the holder
+pays carry only if a credit event happens (deducted from the $1 payout); otherwise they
+walk away and other holders' collateral has funded the NO side. Reachable by any YES
+holder, no stall needed, unbounded. The invariant suite missed it because its
+trigger-consistency check mirrors the contract's formula and the solvency check treats
+ledger debt as collectable — both should be re-derived from the spec when fixing.
+
+**Repro:** `test_Repro_F4_TradeResetsSeizureClockWhileDebtGrows` — Alice holds 1000 YES
+at a 5% mark ($50 of value) and buys 1 NO from Bob before each of three 300-day
+stretches. After 900 days: `fundingDebt(alice)` = **$123.16** (≈2.5× her position),
+`isSeizable` = false, `flagClaimable` reverts, and the market has paid Bob **$123.16** of
+NO credit backed only by that IOU.
+
+## Recommended fix (F1 + F4 together)
+
+Both are the same root problem: the protocol has more than one notion of "funding owed",
+and the trigger/claim/cure paths each use a partial or stale one. Define ONE:
+
+```
+owed(user) = fundingDebt[user] + yesBal × (cumulativeFundingPerYES − fundingSnapshot[user]) / 1e18
+```
+
+and use it everywhere:
+- **Trigger (F4):** seize when `m × yesBal ≤ 1.03 × (owed(user) + yesBal × Δf_epoch)` —
+  the spec's `m ≤ 1.03 × f_next` with f = total owed per unit, now including the ledger.
+- **While flagged (F1, option A):** no accounting freeze — `frozenFunding` goes away; the
+  flag only LOCKS the position (no mint/redeem/trade), as invariant 10 requires.
+- **Claim price:** `P = min(owed(user), m × Q)`, evaluated at claim time (deterministic
+  from on-chain state in that block); InsuranceFund tops up `owed − m×Q` exactly as in
+  today's tail case, so NO is made whole AND collateral stays solvent.
+- **Cure:** pays the live `owed(user)` — the free option disappears.
+
+Why A over B now: F4's fix already requires the trigger to read the full live `owed`;
+using the same number for claim and cure removes `frozenFunding` and the F1/F3 special
+cases instead of adding an InsuranceFund transfer on top of them (B). Honest caveat: no
+scheme makes a *stalled* claim free — under A the cost of a long stall lands on the
+InsuranceFund at claim time (bounded by the fund) instead of silently on collateral; the
+real mitigation for stalls is operational: **run a claiming liquidator bot** (today none
+exists). Spec changes needed in root CLAUDE.md: Funding Model → freeze semantics,
+liquidation math (`P = min(owed, m)` at claim time), invariant 10 wording, plus the
+trigger definition of `f_now`.
+
 ## Next
 
-Pick an F1 option, then fold F1 + F2 into the planned CreditMarket-family redeploy
+Decide on the recommended fix, then fold F1 + F4 + F2 into the planned CreditMarket-family redeploy
 (with `depositCap`, the `setMark` bound, and the Slither follow-ups). When fixed: delete
 the F1/F2 compensation terms in the handler — the solvency invariant must then pass
 with them at zero — and keep the repro tests as regression tests (flipped to assert

@@ -38,7 +38,7 @@ canonical references below.*
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 112 Foundry tests (`cd contracts && forge test`, incl. the invariant suite), 269 Vitest tests
+- **Tests: green.** 113 Foundry tests (`cd contracts && forge test`, incl. the invariant suite), 269 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
@@ -83,9 +83,10 @@ canonical references below.*
 - **Security gate progress (2026-09-26):** Slither triaged (no real High/Medium —
   `docs/security/slither-2026-09-26.md`); stateful invariant suite built and
   mutation-tested (`contracts/test/invariant/`, runs inside plain `forge test`). The suite
-  found **F1, a real collateral leak** (frozen YES funding vs live NO credit while a
-  position is flagged) plus a minor liquidator NO-credit forfeiture (F2) — both need a
-  contract fix + redeploy, F1 a spec decision first:
+  found **F4 (HIGH): any CLOB buy resets the seizure clock** because the trigger ignores
+  the `fundingDebt` ledger, **F1: a collateral leak** (frozen YES funding vs live NO
+  credit while flagged), and a minor liquidator NO-credit forfeiture (F2) — all need a
+  contract fix + redeploy, and a spec decision first:
   `docs/security/invariant-findings-2026-09-26.md`.
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
 
