@@ -6,6 +6,8 @@ import { createPublicClient, createWalletClient, defineChain, http as viemHttp }
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
 import type { Address, Hash } from 'viem'
+import { createHolderIndex } from './holder-index'
+import type { ILogClient, HolderIndexStatus } from './holder-index'
 
 // ─── CreditMarket ABI (minimal) ───────────────────────────────────────────────
 
@@ -93,11 +95,18 @@ export interface IWalletClient {
   account: { address: Address } | undefined
 }
 
+// Narrow interface for the holder source — HolderIndex (holder-index.ts) satisfies
+// this structurally. Lets tests inject a fake instead of driving a real backfill.
+export interface IHolderSource {
+  refresh(): Promise<void>
+  holders(): Address[]
+  status(): HolderIndexStatus
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export interface KeeperConfig {
   creditMarketAddress: Address
-  trackedHolders: Address[]
 }
 
 // ─── Scheduler interface (injected for testability) ───────────────────────────
@@ -114,14 +123,21 @@ export class FundingKeeper {
   constructor(
     private readonly publicClient: IPublicClient,
     private readonly walletClient: IWalletClient,
+    private readonly holderSource: IHolderSource,
     private readonly config: KeeperConfig,
   ) {}
 
   /**
-   * Register the 8-hour cron schedule.
+   * Register the 8-hour cron schedule. Also kicks off the holder-index backfill
+   * immediately (fire-and-forget) so discovery starts at boot rather than waiting
+   * for the first cron tick up to 8h later.
    * Pass a mock scheduler in tests to capture the callback and drive it manually.
    */
   start(scheduler: CronScheduler = cron): void {
+    this.holderSource.refresh().catch(err => {
+      console.error('[keeper] holder index refresh failed at startup:', err)
+    })
+
     console.log('[keeper] scheduling accrueFunding @ "0 */8 * * *"')
     scheduler.schedule('0 */8 * * *', async () => {
       try {
@@ -139,7 +155,8 @@ export class FundingKeeper {
    *  3. Wait for receipt
    *  4. Read cumulativeFundingPerYES and cumFundingPerNO and log
    *  5. Update lastRunAt
-   *  6. Check each tracked YES holder for seizure; flag newly-seizable ones
+   *  6. Refresh the holder index and check each known YES holder for seizure;
+   *     flag newly-seizable ones
    *
    * Any failure is logged and swallowed — the keeper stays alive and will retry
    * at the next scheduled tick.
@@ -227,8 +244,19 @@ export class FundingKeeper {
     // 5. Record last successful run
     this.lastRunAt = new Date()
 
-    // 6. Seizure check for tracked YES holders
-    for (const holder of this.config.trackedHolders) {
+    // 6. Refresh the holder index, then seizure-check every known YES holder.
+    // refresh() never blocks on a long backfill (see holder-index.ts) — it awaits
+    // only a cheap incremental sync once caught up.
+    await this.holderSource.refresh()
+    const holders = this.holderSource.holders()
+    const idxStatus = this.holderSource.status()
+    console.log(
+      `[keeper] ${ts} — checking ${holders.length} holder(s) for seizure` +
+      (idxStatus.backfillComplete
+        ? ''
+        : `  [holder index backfill INCOMPLETE — synced to block ${idxStatus.syncedToBlock ?? 'none'}]`),
+    )
+    for (const holder of holders) {
       await this.checkAndFlagHolder(holder, ts)
     }
   }
@@ -325,6 +353,10 @@ export class FundingKeeper {
   getLastRunAt(): Date | null {
     return this.lastRunAt
   }
+
+  getHolderIndexStatus(): HolderIndexStatus {
+    return this.holderSource.status()
+  }
 }
 
 // ─── Health-check HTTP server ─────────────────────────────────────────────────
@@ -337,6 +369,7 @@ export function startHealthServer(keeper: FundingKeeper, port: number): http.Ser
         status: 'ok',
         lastRunAt: keeper.getLastRunAt()?.toISOString() ?? null,
         schedule: '0 */8 * * *',
+        holderIndex: keeper.getHolderIndexStatus(),
       }))
     } else {
       res.writeHead(404)
@@ -352,31 +385,48 @@ export function startHealthServer(keeper: FundingKeeper, port: number): http.Ser
 // ─── Contract address resolution (env var wins; deployments file is a local-dev
 // fallback that does not exist inside containers, e.g. Railway) ───────────────
 
-export function resolveCreditMarketAddress(
+export function resolveAddresses(
   env: NodeJS.ProcessEnv = process.env,
   // Path: keepers/ → ../../ → project root → contracts/deployments/
   deploymentsPath: string = path.join(
     __dirname, '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
   ),
-): string {
-  if (env.CREDIT_MARKET_ADDRESS) return env.CREDIT_MARKET_ADDRESS
+): { creditMarketAddress: string; yesTokenAddress: string } {
+  let creditMarketAddress: string | undefined = env.CREDIT_MARKET_ADDRESS
+  let yesTokenAddress: string | undefined     = env.YES_TOKEN_ADDRESS
 
-  let deployments: { creditMarket?: string }
-  try {
-    deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8'))
-  } catch (err) {
-    throw new Error(
-      `CREDIT_MARKET_ADDRESS is not set and ${deploymentsPath} could not be read: ${err}. ` +
-      'Set CREDIT_MARKET_ADDRESS (hosted images do not include the deployments file).',
-    )
+  if (!creditMarketAddress || !yesTokenAddress) {
+    let deployments: { creditMarket?: string; yesToken?: string }
+    try {
+      deployments = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8'))
+    } catch (err) {
+      const missing = [
+        !creditMarketAddress ? 'CREDIT_MARKET_ADDRESS' : null,
+        !yesTokenAddress ? 'YES_TOKEN_ADDRESS' : null,
+      ].filter(Boolean).join(', ')
+      throw new Error(
+        `${missing} is not set and ${deploymentsPath} could not be read: ${err}. ` +
+        `Set ${missing} (hosted images do not include the deployments file).`,
+      )
+    }
+    creditMarketAddress ??= deployments.creditMarket
+    yesTokenAddress     ??= deployments.yesToken
   }
-  if (!deployments.creditMarket) {
+
+  if (!creditMarketAddress) {
     throw new Error(
       `CREDIT_MARKET_ADDRESS is not set and ${deploymentsPath} has no "creditMarket" key. ` +
       'Set CREDIT_MARKET_ADDRESS (hosted images do not include the deployments file).',
     )
   }
-  return deployments.creditMarket
+  if (!yesTokenAddress) {
+    throw new Error(
+      `YES_TOKEN_ADDRESS is not set and ${deploymentsPath} has no "yesToken" key. ` +
+      'Set YES_TOKEN_ADDRESS (hosted images do not include the deployments file).',
+    )
+  }
+
+  return { creditMarketAddress, yesTokenAddress }
 }
 
 // ─── Production entry point ───────────────────────────────────────────────────
@@ -388,13 +438,7 @@ function main(): void {
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
-  const creditMarketAddress = resolveCreditMarketAddress()
-
-  // TRACKED_HOLDERS env var: comma-separated list of YES holder addresses to monitor
-  const trackedHolders: Address[] = (process.env.TRACKED_HOLDERS ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0) as Address[]
+  const { creditMarketAddress, yesTokenAddress } = resolveAddresses()
 
   const account   = privateKeyToAccount(privateKey as `0x${string}`)
   const transport = viemHttp(rpcUrl)
@@ -408,10 +452,17 @@ function main(): void {
   const publicClient  = createPublicClient({ chain, transport })
   const walletClient  = createWalletClient({ account, chain, transport })
 
+  const holderSource = createHolderIndex(
+    publicClient as unknown as ILogClient,
+    yesTokenAddress as Address,
+    chainId,
+  )
+
   const keeper = new FundingKeeper(
     publicClient  as unknown as IPublicClient,
     walletClient  as unknown as IWalletClient,
-    { creditMarketAddress: creditMarketAddress as Address, trackedHolders },
+    holderSource,
+    { creditMarketAddress: creditMarketAddress as Address },
   )
 
   keeper.start()

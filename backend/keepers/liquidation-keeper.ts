@@ -4,6 +4,8 @@ import fs from 'fs'
 import { createPublicClient, defineChain, http as viemHttp } from 'viem'
 import { baseSepolia } from 'viem/chains'
 import type { Address } from 'viem'
+import { createHolderIndex } from './holder-index'
+import type { ILogClient, HolderIndexStatus } from './holder-index'
 
 // ─── WAD constant (1e18, for fixed-point arithmetic) ──────────────────────────
 
@@ -81,10 +83,17 @@ export interface IPublicClient {
   }): Promise<unknown>
 }
 
+// Narrow view of HolderIndex needed here — lets tests inject a fake without
+// depending on the real Redis/RPC-backed implementation.
+export interface IHolderSource {
+  refresh(): Promise<void>
+  holders(): Address[]
+  status(): HolderIndexStatus
+}
+
 export interface KeeperConfig {
   creditMarketAddress: Address
   yesTokenAddress: Address
-  trackedHolders: Address[]
   pollIntervalMs?: number  // default 30_000
 }
 
@@ -126,6 +135,7 @@ export class LiquidationKeeper {
 
   constructor(
     private readonly publicClient: IPublicClient,
+    private readonly holderSource: IHolderSource,
     private readonly config: KeeperConfig,
   ) {}
 
@@ -148,6 +158,17 @@ export class LiquidationKeeper {
 
   async poll(): Promise<void> {
     const ts = new Date().toISOString()
+
+    // Never blocks on a long backfill (see HolderIndex.refresh doc comment);
+    // defensive try/catch so a rejecting source can't take the poll down —
+    // the real HolderIndex never rejects (failures are swallowed internally
+    // and surfaced via status().lastError instead).
+    try {
+      await this.holderSource.refresh()
+    } catch (err) {
+      console.error(`[liq-keeper] ${ts} — holder source refresh failed (continuing with known holders):`, err)
+    }
+    const holders = this.holderSource.holders()
 
     // Read market-level state first (single RPC calls shared across all holders).
     let currentMark: bigint
@@ -172,7 +193,7 @@ export class LiquidationKeeper {
 
     const positions: ClaimablePosition[] = []
 
-    for (const holder of this.config.trackedHolders) {
+    for (const holder of holders) {
       try {
         const isClaimable = await this.publicClient.readContract({
           address:      this.config.creditMarketAddress,
@@ -227,7 +248,7 @@ export class LiquidationKeeper {
 
     this.positions = positions
     this.lastPolledAt = new Date()
-    console.log(`[liq-keeper] ${ts} — poll done: ${positions.length} claimable`)
+    console.log(`[liq-keeper] ${ts} — poll done: ${positions.length} claimable (checked ${holders.length} holder(s))`)
   }
 
   getPositions(): ClaimablePosition[] {
@@ -236,6 +257,10 @@ export class LiquidationKeeper {
 
   getLastPolledAt(): Date | null {
     return this.lastPolledAt
+  }
+
+  getHolderIndexStatus(): HolderIndexStatus {
+    return this.holderSource.status()
   }
 }
 
@@ -262,6 +287,7 @@ export function startServer(keeper: LiquidationKeeper, port: number): http.Serve
       res.end(JSON.stringify({
         status:       'ok',
         lastPolledAt: keeper.getLastPolledAt()?.toISOString() ?? null,
+        holderIndex:  keeper.getHolderIndexStatus(),
       }))
     } else {
       res.writeHead(404)
@@ -328,11 +354,6 @@ function main(): void {
 
   const { creditMarketAddress, yesTokenAddress } = resolveAddresses()
 
-  const trackedHolders: Address[] = (process.env.TRACKED_HOLDERS ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0) as Address[]
-
   const pollIntervalMs = parseInt(process.env.POLL_INTERVAL_MS ?? '30000')
 
   const chainId   = parseInt(process.env.CHAIN_ID ?? '84532')
@@ -348,12 +369,18 @@ function main(): void {
 
   const publicClient = createPublicClient({ chain, transport })
 
+  const holderSource = createHolderIndex(
+    publicClient as unknown as ILogClient,
+    yesTokenAddress as Address,
+    chainId,
+  )
+
   const keeper = new LiquidationKeeper(
     publicClient as unknown as IPublicClient,
+    holderSource,
     {
       creditMarketAddress: creditMarketAddress as Address,
       yesTokenAddress:     yesTokenAddress as Address,
-      trackedHolders,
       pollIntervalMs,
     },
   )
