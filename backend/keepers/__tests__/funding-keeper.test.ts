@@ -5,12 +5,14 @@ import path from 'path'
 import {
   FundingKeeper,
   startHealthServer,
-  resolveCreditMarketAddress,
+  resolveAddresses,
   type IPublicClient,
   type IWalletClient,
+  type IHolderSource,
   type KeeperConfig,
   type CronScheduler,
 } from '../funding-keeper'
+import type { HolderIndexStatus } from '../holder-index'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -20,10 +22,32 @@ const HOLDER_ADDR   = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as const
 const TX_HASH       = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
 const FLAG_TX_HASH  = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const
 
-const CONFIG: KeeperConfig = { creditMarketAddress: CREDIT_MARKET, trackedHolders: [] }
-const CONFIG_WITH_HOLDER: KeeperConfig = {
-  creditMarketAddress: CREDIT_MARKET,
-  trackedHolders: [HOLDER_ADDR],
+const CONFIG: KeeperConfig = { creditMarketAddress: CREDIT_MARKET }
+
+function makeStatus(overrides: Partial<HolderIndexStatus> = {}): HolderIndexStatus {
+  return {
+    holders: 0,
+    syncedToBlock: null,
+    backfillComplete: true,
+    lastSyncAt: null,
+    lastError: null,
+    ...overrides,
+  }
+}
+
+// Fake IHolderSource for tests — avoids driving a real on-chain backfill.
+// `holders` may be a function so tests can vary the result across calls
+// (e.g. empty until refresh() resolves).
+function makeFakeHolderSource(
+  holdersOrFn: readonly string[] | (() => readonly string[]) = [],
+  statusOverrides: Partial<HolderIndexStatus> = {},
+): IHolderSource & { refresh: ReturnType<typeof vi.fn> } {
+  const getHolders = typeof holdersOrFn === 'function' ? holdersOrFn : () => holdersOrFn
+  return {
+    refresh: vi.fn().mockResolvedValue(undefined),
+    holders: () => getHolders() as unknown as `0x${string}`[],
+    status: () => makeStatus({ holders: getHolders().length, ...statusOverrides }),
+  }
 }
 
 // Default readContract dispatch: handles all function names used by the keeper.
@@ -88,12 +112,34 @@ describe('FundingKeeper — scheduling', () => {
   it('registers exactly the 8-hour cron expression', () => {
     const { publicClient, walletClient } = makeMocks()
     const { scheduler } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const holderSource = makeFakeHolderSource()
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
 
     keeper.start(scheduler)
 
     expect(scheduler.schedule).toHaveBeenCalledOnce()
     expect(scheduler.schedule).toHaveBeenCalledWith('0 */8 * * *', expect.any(Function))
+  })
+
+  it('kicks off holderSource.refresh() immediately at startup, before any cron tick', () => {
+    const { publicClient, walletClient } = makeMocks()
+    const { scheduler } = makeMockScheduler()
+    const holderSource = makeFakeHolderSource()
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
+
+    keeper.start(scheduler)
+
+    expect(holderSource.refresh).toHaveBeenCalledOnce()
+  })
+
+  it('does not throw if the startup holderSource.refresh() rejects', () => {
+    const { publicClient, walletClient } = makeMocks()
+    const { scheduler } = makeMockScheduler()
+    const holderSource = makeFakeHolderSource()
+    holderSource.refresh.mockRejectedValueOnce(new Error('rpc down'))
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
+
+    expect(() => keeper.start(scheduler)).not.toThrow()
   })
 })
 
@@ -108,7 +154,7 @@ describe('FundingKeeper — successful accrual', () => {
   beforeEach(() => {
     ;({ publicClient, walletClient } = makeMocks())
     const ms = makeMockScheduler()
-    keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
     keeper.start(ms.scheduler)
     fire = ms.fire
   })
@@ -160,7 +206,7 @@ describe('FundingKeeper — error handling', () => {
       writeContract: () => Promise.reject(new Error('nonce too low')),
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
     keeper.start(scheduler)
 
     await expect(fire()).resolves.not.toThrow()
@@ -172,7 +218,7 @@ describe('FundingKeeper — error handling', () => {
       estimateContractGas: () => Promise.reject(new Error('execution reverted')),
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
     keeper.start(scheduler)
 
     await expect(fire()).resolves.not.toThrow()
@@ -184,7 +230,7 @@ describe('FundingKeeper — error handling', () => {
       waitForTransactionReceipt: () => Promise.resolve({ status: 'reverted' }),
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -196,7 +242,7 @@ describe('FundingKeeper — error handling', () => {
       readContract: () => Promise.reject(new Error('RPC error')),
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
     keeper.start(scheduler)
 
     await expect(fire()).resolves.not.toThrow()
@@ -208,10 +254,11 @@ describe('FundingKeeper — error handling', () => {
 // ─── Seizure checks ───────────────────────────────────────────────────────────
 
 describe('FundingKeeper — seizure checks', () => {
-  it('checks isSeizable for each tracked holder after accrual', async () => {
+  it('checks isSeizable for each holder returned by the holder source, after accrual', async () => {
     const { publicClient, walletClient } = makeMocks()
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    const holderSource = makeFakeHolderSource([HOLDER_ADDR])
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -221,6 +268,42 @@ describe('FundingKeeper — seizure checks', () => {
       (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
         (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
     )
+    expect(isSeizableCall).toBeDefined()
+  })
+
+  it('awaits holderSource.refresh() before reading holders() — a source whose list is only populated after refresh resolves is still fully checked', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        if (functionName === 'claimable')  return Promise.resolve(false)
+        if (functionName === 'isSeizable') return Promise.resolve(false)
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+
+    let ready = false
+    const holderSource: IHolderSource & { refresh: ReturnType<typeof vi.fn> } = {
+      refresh: vi.fn().mockImplementation(async () => {
+        // Simulate a backfill that only populates holders() once it resolves.
+        await Promise.resolve()
+        ready = true
+      }),
+      holders: () => (ready ? [HOLDER_ADDR] : []),
+      status: () => makeStatus({ holders: ready ? 1 : 0 }),
+    }
+
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
+    keeper.start(scheduler)
+
+    await fire()
+
+    expect(holderSource.refresh).toHaveBeenCalled()
+    const readCalls = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls
+    const isSeizableCall = readCalls.find(
+      (c: unknown[]) => (c[0] as { functionName: string; args?: unknown[] }).functionName === 'isSeizable' &&
+        (c[0] as { args?: unknown[] }).args?.[0] === HOLDER_ADDR,
+    )
+    // If runOnce read holders() before awaiting refresh(), this would be undefined.
     expect(isSeizableCall).toBeDefined()
   })
 
@@ -234,7 +317,7 @@ describe('FundingKeeper — seizure checks', () => {
       },
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -256,7 +339,7 @@ describe('FundingKeeper — seizure checks', () => {
       },
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -284,7 +367,7 @@ describe('FundingKeeper — seizure checks', () => {
       },
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -305,7 +388,7 @@ describe('FundingKeeper — seizure checks', () => {
       },
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -332,7 +415,7 @@ describe('FundingKeeper — seizure checks', () => {
         .getMockImplementation() ?? (() => Promise.resolve({ status: 'success' as const })),
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG_WITH_HOLDER)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
     keeper.start(scheduler)
 
     await fire()
@@ -347,7 +430,7 @@ describe('FundingKeeper — seizure checks', () => {
 describe('startHealthServer', () => {
   it('returns 200 with lastRunAt=null before any run', async () => {
     const { publicClient, walletClient } = makeMocks()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
 
     const server = startHealthServer(keeper, 0)  // port 0 = OS picks a free port
     const port = (server.address() as { port: number }).port
@@ -366,7 +449,7 @@ describe('startHealthServer', () => {
   it('returns the lastRunAt timestamp after a successful run', async () => {
     const { publicClient, walletClient } = makeMocks()
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
     keeper.start(scheduler)
     await fire()
 
@@ -382,11 +465,39 @@ describe('startHealthServer', () => {
       await new Promise<void>(r => server.close(() => r()))
     }
   })
+
+  it('includes the holder index status', async () => {
+    const { publicClient, walletClient } = makeMocks()
+    const holderSource = makeFakeHolderSource([HOLDER_ADDR], {
+      syncedToBlock: '12345',
+      backfillComplete: false,
+      lastError: 'boom',
+    })
+    const keeper = new FundingKeeper(publicClient, walletClient, holderSource, CONFIG)
+
+    const server = startHealthServer(keeper, 0)
+    const port = (server.address() as { port: number }).port
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { holderIndex: HolderIndexStatus }
+      expect(body.holderIndex).toEqual({
+        holders: 1,
+        syncedToBlock: '12345',
+        backfillComplete: false,
+        lastSyncAt: null,
+        lastError: 'boom',
+      })
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
 })
 
-// ─── resolveCreditMarketAddress ────────────────────────────────────────────────
+// ─── resolveAddresses ────────────────────────────────────────────────
 
-describe('resolveCreditMarketAddress', () => {
+describe('resolveAddresses', () => {
   function withTmpDeploymentsFile(contents: string | null): { deploymentsPath: string; cleanup: () => void } {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'funding-keeper-test-'))
     const deploymentsPath = path.join(dir, 'base-sepolia.json')
@@ -394,44 +505,83 @@ describe('resolveCreditMarketAddress', () => {
     return { deploymentsPath, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) }
   }
 
-  it('prefers the env var over the deployments file', () => {
+  it('prefers env vars over the deployments file', () => {
     const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
-      JSON.stringify({ creditMarket: '0xFileAddr' }),
+      JSON.stringify({ creditMarket: '0xFileCM', yesToken: '0xFileYES' }),
     )
     try {
-      const addr = resolveCreditMarketAddress(
-        { CREDIT_MARKET_ADDRESS: '0xEnvAddr' } as NodeJS.ProcessEnv,
+      const { creditMarketAddress, yesTokenAddress } = resolveAddresses(
+        { CREDIT_MARKET_ADDRESS: '0xEnvCM', YES_TOKEN_ADDRESS: '0xEnvYES' } as NodeJS.ProcessEnv,
         deploymentsPath,
       )
-      expect(addr).toBe('0xEnvAddr')
+      expect(creditMarketAddress).toBe('0xEnvCM')
+      expect(yesTokenAddress).toBe('0xEnvYES')
     } finally {
       cleanup()
     }
   })
 
-  it('falls back to the deployments file when the env var is unset', () => {
+  it('falls back to the deployments file for whichever address is unset', () => {
     const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
-      JSON.stringify({ creditMarket: '0xFileAddr' }),
+      JSON.stringify({ creditMarket: '0xFileCM', yesToken: '0xFileYES' }),
     )
     try {
-      const addr = resolveCreditMarketAddress({} as NodeJS.ProcessEnv, deploymentsPath)
-      expect(addr).toBe('0xFileAddr')
+      const { creditMarketAddress, yesTokenAddress } = resolveAddresses(
+        { CREDIT_MARKET_ADDRESS: '0xEnvCM' } as NodeJS.ProcessEnv,
+        deploymentsPath,
+      )
+      expect(creditMarketAddress).toBe('0xEnvCM')
+      expect(yesTokenAddress).toBe('0xFileYES')
     } finally {
       cleanup()
     }
   })
 
-  it('throws a clear, actionable error naming the env var when the file is missing', () => {
+  it('resolves YES_TOKEN_ADDRESS from the env var when set (creditMarket falls back to the file)', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(
+      JSON.stringify({ creditMarket: '0xFileCM' }),
+    )
+    try {
+      const { creditMarketAddress, yesTokenAddress } = resolveAddresses(
+        { YES_TOKEN_ADDRESS: '0xEnvYES' } as NodeJS.ProcessEnv,
+        deploymentsPath,
+      )
+      expect(creditMarketAddress).toBe('0xFileCM')
+      expect(yesTokenAddress).toBe('0xEnvYES')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('throws a clear error naming both env vars when the file is missing', () => {
     const missingPath = path.join(os.tmpdir(), 'does-not-exist-' + Date.now(), 'base-sepolia.json')
-    expect(() => resolveCreditMarketAddress({} as NodeJS.ProcessEnv, missingPath))
-      .toThrow(/CREDIT_MARKET_ADDRESS is not set and .* could not be read/)
+    expect(() => resolveAddresses({} as NodeJS.ProcessEnv, missingPath))
+      .toThrow(/CREDIT_MARKET_ADDRESS, YES_TOKEN_ADDRESS is not set and .* could not be read/)
+  })
+
+  it('throws a clear error naming only the still-missing env var when the file is missing', () => {
+    const missingPath = path.join(os.tmpdir(), 'does-not-exist-' + Date.now(), 'base-sepolia.json')
+    expect(() => resolveAddresses(
+      { CREDIT_MARKET_ADDRESS: '0xEnvCM' } as NodeJS.ProcessEnv,
+      missingPath,
+    )).toThrow(/^YES_TOKEN_ADDRESS is not set and .* could not be read/)
   })
 
   it('throws a clear error when the file has no creditMarket key', () => {
-    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(JSON.stringify({ yesToken: '0xY' }))
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(JSON.stringify({ yesToken: '0xFileYES' }))
     try {
-      expect(() => resolveCreditMarketAddress({} as NodeJS.ProcessEnv, deploymentsPath))
+      expect(() => resolveAddresses({} as NodeJS.ProcessEnv, deploymentsPath))
         .toThrow(/CREDIT_MARKET_ADDRESS is not set and .* has no "creditMarket" key/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('throws a clear error naming YES_TOKEN_ADDRESS when the file has no yesToken key', () => {
+    const { deploymentsPath, cleanup } = withTmpDeploymentsFile(JSON.stringify({ creditMarket: '0xFileCM' }))
+    try {
+      expect(() => resolveAddresses({} as NodeJS.ProcessEnv, deploymentsPath))
+        .toThrow(/YES_TOKEN_ADDRESS is not set and .* has no "yesToken" key/)
     } finally {
       cleanup()
     }

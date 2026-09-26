@@ -2,14 +2,17 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import type { Address } from 'viem'
 import {
   LiquidationKeeper,
   startServer,
   computePosition,
   resolveAddresses,
   type IPublicClient,
+  type IHolderSource,
   type KeeperConfig,
 } from '../liquidation-keeper'
+import type { HolderIndexStatus } from '../holder-index'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -26,8 +29,48 @@ const DEFAULT_Q    = 1_000_000n
 const BASE_CONFIG: KeeperConfig = {
   creditMarketAddress: CREDIT_MARKET,
   yesTokenAddress:     YES_TOKEN,
-  trackedHolders:      [HOLDER_A],
   pollIntervalMs:      999_999_999,  // prevent auto-firing in tests
+}
+
+function emptyStatus(overrides: Partial<HolderIndexStatus> = {}): HolderIndexStatus {
+  return {
+    holders:          0,
+    syncedToBlock:    null,
+    backfillComplete: false,
+    lastSyncAt:       null,
+    lastError:        null,
+    ...overrides,
+  }
+}
+
+// Fake IHolderSource: refresh() is a no-op that resolves immediately unless
+// overridden; holders() returns whatever list was configured (mutable via
+// setHolders so tests can simulate "newly discovered" holders after refresh).
+function makeHolderSource(opts: {
+  initialHolders?: Address[]
+  refreshImpl?: () => Promise<void>
+  status?: HolderIndexStatus
+} = {}): IHolderSource & { setHolders(next: Address[]): void; refreshCalls: number } {
+  let current = opts.initialHolders ?? []
+  let refreshCalls = 0
+  return {
+    async refresh(): Promise<void> {
+      refreshCalls++
+      if (opts.refreshImpl) await opts.refreshImpl()
+    },
+    holders(): Address[] {
+      return current
+    },
+    status(): HolderIndexStatus {
+      return opts.status ?? emptyStatus({ holders: current.length })
+    },
+    setHolders(next: Address[]): void {
+      current = next
+    },
+    get refreshCalls(): number {
+      return refreshCalls
+    },
+  }
 }
 
 // Build a readContract mock that dispatches on functionName.
@@ -170,7 +213,7 @@ describe('LiquidationKeeper — poll normal case', () => {
       fundingDebt:          0n,
       yesBalance:           DEFAULT_Q,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await keeper.poll()
 
@@ -184,7 +227,7 @@ describe('LiquidationKeeper — poll normal case', () => {
 
   it('updates lastPolledAt after a successful poll', async () => {
     const client = makePublicClient(makeReadContract({ claimable: false }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     expect(keeper.getLastPolledAt()).toBeNull()
     await keeper.poll()
@@ -193,7 +236,7 @@ describe('LiquidationKeeper — poll normal case', () => {
 
   it('skips holders where claimable=false', async () => {
     const client = makePublicClient(makeReadContract({ claimable: false }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await keeper.poll()
 
@@ -209,7 +252,7 @@ describe('LiquidationKeeper — poll tail case', () => {
       fundingDebt:          0n,
       yesBalance:           DEFAULT_Q,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await keeper.poll()
 
@@ -229,7 +272,7 @@ describe('LiquidationKeeper — motionPending', () => {
       yesBalance:           DEFAULT_Q,
       motionPending:        true,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await keeper.poll()
 
@@ -248,7 +291,7 @@ describe('LiquidationKeeper — motionPending', () => {
       yesBalance:    DEFAULT_Q,
       motionPending: false,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await keeper.poll()
 
@@ -258,7 +301,6 @@ describe('LiquidationKeeper — motionPending', () => {
 
 describe('LiquidationKeeper — multiple holders', () => {
   it('only lists claimable holders among tracked set', async () => {
-    const config: KeeperConfig = { ...BASE_CONFIG, trackedHolders: [HOLDER_A, HOLDER_B] }
     const readFn: IPublicClient['readContract'] = ({ functionName, args }) => {
       if (functionName === 'currentMark')   return Promise.resolve(DEFAULT_MARK)
       if (functionName === 'motionPending') return Promise.resolve(false)
@@ -272,8 +314,9 @@ describe('LiquidationKeeper — multiple holders', () => {
       return Promise.resolve(0n)
     }
     const client = makePublicClient(readFn)
+    const holderSource = makeHolderSource({ initialHolders: [HOLDER_A, HOLDER_B] })
 
-    const keeper = new LiquidationKeeper(client, config)
+    const keeper = new LiquidationKeeper(client, holderSource, BASE_CONFIG)
     await keeper.poll()
 
     const positions = keeper.getPositions()
@@ -282,12 +325,67 @@ describe('LiquidationKeeper — multiple holders', () => {
   })
 })
 
+describe('LiquidationKeeper — holder source', () => {
+  it('awaits holderSource.refresh() before reading holders()', async () => {
+    let refreshed = false
+    const holderSource: IHolderSource = {
+      async refresh(): Promise<void> {
+        // Simulate the index's async (backfill/incremental) sync completing.
+        await Promise.resolve()
+        refreshed = true
+      },
+      holders(): Address[] {
+        // Only returns the holder once refresh() has resolved — if poll()
+        // read holders() before awaiting refresh(), this would come back empty.
+        return refreshed ? [HOLDER_A] : []
+      },
+      status(): HolderIndexStatus {
+        return emptyStatus({ holders: refreshed ? 1 : 0 })
+      },
+    }
+    const client = makePublicClient(makeReadContract({ claimable: true, yesBalance: DEFAULT_Q }))
+    const keeper = new LiquidationKeeper(client, holderSource, BASE_CONFIG)
+
+    await keeper.poll()
+
+    const positions = keeper.getPositions()
+    expect(positions).toHaveLength(1)
+    expect(positions[0].user).toBe(HOLDER_A)
+  })
+
+  it('checks claimable for every holder the source returns, and picks up a newly-discovered holder on the next poll', async () => {
+    const holderSource = makeHolderSource({ initialHolders: [HOLDER_A] })
+    const readFn: IPublicClient['readContract'] = ({ functionName }) => {
+      if (functionName === 'currentMark')   return Promise.resolve(DEFAULT_MARK)
+      if (functionName === 'motionPending') return Promise.resolve(false)
+      if (functionName === 'claimable')     return Promise.resolve(true)  // both holders claimable
+      if (functionName === 'frozenFunding') return Promise.resolve(40_000_000_000_000_000n)
+      if (functionName === 'fundingDebt')   return Promise.resolve(0n)
+      if (functionName === 'balanceOf')     return Promise.resolve(DEFAULT_Q)
+      return Promise.resolve(0n)
+    }
+    const client = makePublicClient(readFn)
+    const keeper = new LiquidationKeeper(client, holderSource, BASE_CONFIG)
+
+    await keeper.poll()
+    expect(keeper.getPositions().map(p => p.user)).toEqual([HOLDER_A])
+
+    // Simulate the index discovering a new holder (e.g. a fresh mint) between polls.
+    holderSource.setHolders([HOLDER_A, HOLDER_B])
+    await keeper.poll()
+
+    const users = keeper.getPositions().map(p => p.user)
+    expect(users).toHaveLength(2)
+    expect(users).toEqual(expect.arrayContaining([HOLDER_A, HOLDER_B]))
+  })
+})
+
 describe('LiquidationKeeper — error resilience', () => {
   it('swallows a market-state read failure without crashing', async () => {
     const client: IPublicClient = {
       readContract: vi.fn().mockRejectedValue(new Error('RPC error')),
     }
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await expect(keeper.poll()).resolves.not.toThrow()
     // lastPolledAt not set because poll bailed early
@@ -295,7 +393,6 @@ describe('LiquidationKeeper — error resilience', () => {
   })
 
   it('skips a single failing holder and still processes the rest', async () => {
-    const config: KeeperConfig = { ...BASE_CONFIG, trackedHolders: [HOLDER_A, HOLDER_B] }
     let callCount = 0
     const readFn: IPublicClient['readContract'] = ({ functionName, args }) => {
       if (functionName === 'currentMark')   return Promise.resolve(DEFAULT_MARK)
@@ -314,13 +411,33 @@ describe('LiquidationKeeper — error resilience', () => {
     const client: IPublicClient = {
       readContract: vi.fn().mockImplementation(readFn),
     }
+    const holderSource = makeHolderSource({ initialHolders: [HOLDER_A, HOLDER_B] })
 
-    const keeper = new LiquidationKeeper(client, config)
+    const keeper = new LiquidationKeeper(client, holderSource, BASE_CONFIG)
     await keeper.poll()
 
     const positions = keeper.getPositions()
     expect(positions).toHaveLength(1)
     expect(positions[0].user).toBe(HOLDER_B)
+  })
+
+  it('continues polling with the known holder set when holderSource.refresh() rejects', async () => {
+    // The real HolderIndex never rejects (it swallows and logs internally),
+    // but poll() must stay defensive in case a future/alternate source does.
+    const holderSource: IHolderSource = {
+      refresh: vi.fn().mockRejectedValue(new Error('RPC down during refresh')),
+      holders: () => [HOLDER_A],
+      status: () => emptyStatus({ holders: 1, lastError: 'RPC down during refresh' }),
+    }
+    const client = makePublicClient(makeReadContract({ claimable: true, yesBalance: DEFAULT_Q }))
+    const keeper = new LiquidationKeeper(client, holderSource, BASE_CONFIG)
+
+    await expect(keeper.poll()).resolves.not.toThrow()
+
+    const positions = keeper.getPositions()
+    expect(positions).toHaveLength(1)
+    expect(positions[0].user).toBe(HOLDER_A)
+    expect(keeper.getLastPolledAt()).toBeInstanceOf(Date)
   })
 })
 
@@ -329,7 +446,7 @@ describe('LiquidationKeeper — error resilience', () => {
 describe('GET /claimable', () => {
   it('returns an empty array when no positions are claimable', async () => {
     const client = makePublicClient(makeReadContract({ claimable: false }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
     await keeper.poll()
 
     const server = startServer(keeper, 0)
@@ -351,7 +468,7 @@ describe('GET /claimable', () => {
       fundingDebt:          0n,
       yesBalance:           DEFAULT_Q,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
     await keeper.poll()
 
     const server = startServer(keeper, 0)
@@ -377,7 +494,7 @@ describe('GET /claimable', () => {
       yesBalance:           DEFAULT_Q,
       motionPending:        true,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
     await keeper.poll()
 
     const server = startServer(keeper, 0)
@@ -400,7 +517,7 @@ describe('GET /claimable', () => {
       fundingDebt:          0n,
       yesBalance:           DEFAULT_Q,
     }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
     await keeper.poll()
 
     const server = startServer(keeper, 0)
@@ -414,6 +531,30 @@ describe('GET /claimable', () => {
       await new Promise<void>(r => server.close(() => r()))
     }
   })
+
+  it('response shape is unchanged by the holder-index wiring (frontend contract)', async () => {
+    const client = makePublicClient(makeReadContract({
+      claimable:            true,
+      frozenFundingPerUnit: 40_000_000_000_000_000n,
+      fundingDebt:          0n,
+      yesBalance:           DEFAULT_Q,
+    }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0)
+    const port = (server.address() as { port: number }).port
+    try {
+      const res  = await fetch(`http://127.0.0.1:${port}/claimable`)
+      const body = await res.json() as Array<Record<string, unknown>>
+      expect(body).toHaveLength(1)
+      expect(Object.keys(body[0]).sort()).toEqual(
+        ['claimPrice', 'frozen', 'frozenFunding', 'notional', 'tailCase', 'tokenValue', 'user'].sort(),
+      )
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
 })
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
@@ -421,7 +562,7 @@ describe('GET /claimable', () => {
 describe('GET /health', () => {
   it('returns lastPolledAt=null before first poll', async () => {
     const client = makePublicClient(makeReadContract())
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     const server = startServer(keeper, 0)
     const port = (server.address() as { port: number }).port
@@ -438,7 +579,7 @@ describe('GET /health', () => {
 
   it('returns an ISO timestamp after a successful poll', async () => {
     const client = makePublicClient(makeReadContract({ claimable: false }))
-    const keeper = new LiquidationKeeper(client, BASE_CONFIG)
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
     await keeper.poll()
 
     const server = startServer(keeper, 0)
@@ -448,6 +589,37 @@ describe('GET /health', () => {
       const body = await res.json() as { lastPolledAt: string }
       expect(body.lastPolledAt).toBeTruthy()
       expect(() => new Date(body.lastPolledAt)).not.toThrow()
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+    }
+  })
+
+  it('includes the holder-index status alongside the existing fields', async () => {
+    const status: HolderIndexStatus = {
+      holders:          3,
+      syncedToBlock:    '12345',
+      backfillComplete: true,
+      lastSyncAt:       '2026-01-01T00:00:00.000Z',
+      lastError:        null,
+    }
+    const holderSource = makeHolderSource({ initialHolders: [HOLDER_A], status })
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, holderSource, BASE_CONFIG)
+    await keeper.poll()
+
+    const server = startServer(keeper, 0)
+    const port = (server.address() as { port: number }).port
+    try {
+      const res  = await fetch(`http://127.0.0.1:${port}/health`)
+      const body = await res.json() as {
+        status: string
+        lastPolledAt: string | null
+        holderIndex: HolderIndexStatus
+      }
+      expect(res.status).toBe(200)
+      expect(body.status).toBe('ok')
+      expect(body.lastPolledAt).toBeTruthy()
+      expect(body.holderIndex).toEqual(status)
     } finally {
       await new Promise<void>(r => server.close(() => r()))
     }

@@ -28,7 +28,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --include=dev
 
 COPY tsconfig.json ./
-COPY liquidation-keeper.ts ./
+COPY liquidation-keeper.ts holder-index.ts ./
 
 RUN groupadd --system --gid 1001 nodejs \
  && useradd --system --uid 1001 --gid nodejs appuser \
