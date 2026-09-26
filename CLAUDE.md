@@ -24,7 +24,7 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 98 contract tests, 269 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 112 contract tests (incl. a stateful invariant suite), 269 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
 Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
 (script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
@@ -381,6 +381,12 @@ on-chain check is the backstop; this filter is pure UX.
     are claim(), cure(), or post-credit-event settleYES. Liquidation itself touches ONLY
     the YES side: the holder's NO-side credit survives a claim untouched.
 ```
+
+**Open finding (2026-09-26) — invariant 4 is currently violated during a flagged window:**
+freezing a flagged holder's YES funding while the paired NO keeps accruing live credit
+leaks collateral (and gives the holder a free option). Needs a spec decision + redeploy —
+see `docs/security/invariant-findings-2026-09-26.md` (F1, plus the smaller F2). The
+invariant suite (`contracts/test/invariant/`) models the leak explicitly until fixed.
 
 ### What stays true across model iterations
 
