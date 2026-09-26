@@ -65,7 +65,6 @@ KEEPER_PRIVATE_KEY=<SECRET — backend/keepers/.env>
 YES_TOKEN_ADDRESS=0x0228cf2f1BD7F11D07fA3c190F495171D35C85be
 HOLDER_INDEX_FROM_BLOCK=43766743
 REDIS_URL=${{Redis.REDIS_URL}}
-TRACKED_HOLDERS=0x92fFF5dd1D0Fdb2cC03a4389fd1dF6361C4f477b,0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1
 HEALTH_PORT=3002
 ```
 Health check `GET :3002/health` (includes `holderIndex` discovery status). (No CLOB
@@ -77,8 +76,8 @@ token deploy block (43766743 on Base Sepolia); the keepers refuse to boot withou
 `REDIS_URL` (Railway reference to the managed Redis) persists the scan cursor + holder
 set under `holder-index:84532:<yes token>:*`, shared by both keepers, so only the first
 boot pays the full backfill (~3.5k `eth_getLogs` calls on the public RPC, which caps a
-call at 1,000 blocks). `TRACKED_HOLDERS` is now an optional extra seed, not the source
-of truth. Optional tuning: `HOLDER_INDEX_CHUNK_SIZE` (1000), `HOLDER_INDEX_CONCURRENCY`
+call at 1,000 blocks). `TRACKED_HOLDERS` (optional extra seed addresses) is no longer
+set — removed from both services 2026-09-26. Optional tuning: `HOLDER_INDEX_CHUNK_SIZE` (1000), `HOLDER_INDEX_CONCURRENCY`
 (4).
 
 ## Railway — liquidation-keeper (root dir `backend/keepers`, public)
@@ -91,7 +90,6 @@ CREDIT_MARKET_ADDRESS=0x26C3d2E6C29e8E414A4424aa9c9AFa5eFF15F51b
 YES_TOKEN_ADDRESS=0x0228cf2f1BD7F11D07fA3c190F495171D35C85be
 HOLDER_INDEX_FROM_BLOCK=43766743
 REDIS_URL=${{Redis.REDIS_URL}}
-TRACKED_HOLDERS=0x92fFF5dd1D0Fdb2cC03a4389fd1dF6361C4f477b,0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1
 POLL_INTERVAL_MS=30000
 PORT=3003
 ```
