@@ -662,6 +662,78 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         );
     }
 
+    // ── F4 (docs/security/invariant-findings-2026-09-26.md) ─────────────────────
+    //
+    // isSeizable() measures f_now as cumulativeFundingPerYES - fundingSnapshot[user]
+    // only; it never reads the fundingDebt ledger. But every CLOB trade runs
+    // settleFunding on BOTH parties (CLOBSettlement.sol:250-251), and for a buyer
+    // that moves the accrued YES debit into fundingDebt and resets the snapshot.
+    // So a YES holder can reset their liquidation clock with a tiny purchase every
+    // < ~353 days (at a constant mark) while their debt keeps growing in a ledger
+    // the trigger ignores: the position ends up owing far more than it's worth,
+    // yet can never be flagged or claimed.
+    function _reproAliceBuysOneNoFromBob(ReproActors memory a, uint256 nonce) internal {
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory bSell = CLOBSettlement.Order({
+            maker: a.bob,
+            tokenIn: address(noToken),
+            tokenOut: address(usdc),
+            amountIn: 1e18,
+            minAmountOut: 0,
+            expiry: expiry,
+            nonce: nonce
+        });
+        CLOBSettlement.Order memory aBuy = CLOBSettlement.Order({
+            maker: a.alice,
+            tokenIn: address(usdc),
+            tokenOut: address(noToken),
+            amountIn: 1e18,
+            minAmountOut: 1e18,
+            expiry: expiry,
+            nonce: nonce
+        });
+        clob.verifyAndSettle(bSell, _sign(a.bobKey, bSell), aBuy, _sign(a.aliceKey, aBuy));
+    }
+
+    function test_Repro_F4_TradeResetsSeizureClockWhileDebtGrows() public {
+        ReproActors memory a = _reproSetup();
+        _reproMintAndSplit(a); // alice: 1000 YES, bob: 1000 NO
+
+        uint256 m = market.currentMark();
+        uint256 marketBefore = usdc.balanceOf(address(market));
+
+        // Three 300-day stretches (each < the ~353-day trigger), with one tiny
+        // NO purchase before each stretch ends. 900 days of carry in total.
+        for (uint256 i = 0; i < 3; i++) {
+            vm.warp(block.timestamp + 300 days);
+            market.accrueFunding();
+            assertFalse(market.isSeizable(a.alice), "not yet seizable within a 300-day stretch");
+            _reproAliceBuysOneNoFromBob(a, 10 + i);
+        }
+
+        uint256 yesBal = yesToken.balanceOf(a.alice);
+        uint256 positionValue = yesBal * m / 1e18;
+        uint256 debt = market.fundingDebt(a.alice);
+
+        // Alice now owes ~2.4x what her position is worth (900d at the mark vs
+        // 1x the mark), and her equity m - f is deeply negative...
+        assertGt(debt, 2 * positionValue, "debt far exceeds position value");
+
+        // ...yet the trigger still reads f_now ~= 0 (snapshot just reset), so she
+        // can't be flagged, so LiquidationEngine can never claim her.
+        assertFalse(market.isSeizable(a.alice), "BUG: deeply insolvent position is not seizable");
+        vm.expectRevert(CreditMarket.PositionNotSeizable.selector);
+        market.flagClaimable(a.alice);
+
+        // Meanwhile bob (the paired NO side) has been paid his accrued credit out of
+        // collateral at every sync: collateral is down by roughly that amount,
+        // backed only by alice's ledger IOU, which exceeds anything she could ever
+        // realise by selling her YES (a sale must clear >= her debit, and her
+        // whole position is worth `positionValue` < debt).
+        uint256 marketOutflow = marketBefore - usdc.balanceOf(address(market));
+        assertGt(marketOutflow, positionValue, "collateral already paid out more than the debtor's position is worth");
+    }
+
     function _sign(uint256 key, CLOBSettlement.Order memory order) internal view returns (bytes memory) {
         bytes32 digest = clob.hashOrder(order);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
