@@ -1,4 +1,5 @@
 import type { Address, Hex } from 'viem'
+import type { FeeSourceReader } from './feeSource'
 
 // Runtime type with native bigints — used for EIP-712 signing/verification
 export interface Order {
@@ -53,7 +54,17 @@ export interface AppConfig {
   // Trading fee in bps of min(p, 1−p) × Q — must mirror CLOBSettlement.feeBps.
   // Drives the net-of-fee price basis for NO bids and the YES-sell pre-filter's
   // fee component. Absent/0 ⇒ legacy gross pricing, no fee in the pre-filter.
+  //
+  // STATIC fallback — used only when `feeSource` (below) is absent. Tests that
+  // want a fixed, non-refreshing rate can keep passing this field directly.
   feeBps?: number
+  // Live, on-chain-backed fee rate (see src/feeSource.ts). When present, this
+  // takes precedence over the static `feeBps` above for every per-request
+  // read (server.ts's `currentFeeBps` helper) and is what GET /health reports.
+  // main.ts always sets this (via createFeeSource); tests may omit it to
+  // exercise the static-feeBps backward-compat path, or provide a hand-rolled
+  // fake implementing { getFeeBps, getSnapshot } with no RPC/timers involved.
+  feeSource?: FeeSourceReader
   // Allow-listed CORS origins (exact match, trimmed + trailing-slash-stripped),
   // parsed from the comma-separated CORS_ORIGINS env var. Undefined/empty ⇒
   // wildcard `Access-Control-Allow-Origin: *` (current/default behaviour).

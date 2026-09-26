@@ -53,6 +53,21 @@ export interface IPublicClient {
   }): Promise<unknown>
 }
 
+// ─── Shared chain resolution (used by createChainReader and feeSource.ts's
+// createFeeSource — CHAIN_ID env override lets a local Anvil node (31337)
+// work without code changes in either reader) ─────────────────────────────
+
+export function resolveViemChain(chainId: number, rpcUrl: string) {
+  return chainId === baseSepolia.id
+    ? baseSepolia
+    : defineChain({
+        id:             chainId,
+        name:           'Local',
+        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+        rpcUrls:        { default: { http: [rpcUrl] } },
+      })
+}
+
 // ─── IChainReader — injectable interface consumed by server.ts ───────────────
 //
 // Deliberately narrow: only what the order-server pre-filter needs. All methods
@@ -128,17 +143,7 @@ export interface ChainReaderInit {
 
 export function createChainReader(init: ChainReaderInit): IChainReader {
   const transport = http(init.rpcUrl)
-
-  // CHAIN_ID env override lets a local Anvil node (31337) work without code changes.
-  const chain = init.chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id:             init.chainId,
-        name:           'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls:        { default: { http: [init.rpcUrl] } },
-      })
-
+  const chain = resolveViemChain(init.chainId, init.rpcUrl)
   const publicClient = createPublicClient({ chain, transport })
 
   return new ViemChainReader(publicClient as unknown as IPublicClient, {
