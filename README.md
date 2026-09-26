@@ -193,11 +193,9 @@ script run.
 ## Roadmap / status
 
 - **Now:** Base Sepolia testnet, feature-complete MVP, no external audit yet, hosting
-  (Railway/Vercel) not yet stood up, `TRACKED_HOLDERS` keeper list is hand-maintained
-  (holder auto-discovery is a known launch-blocking gap — see
-  [`docs/production-plan.md`](./docs/production-plan.md)).
-- **Next (Phase 1–3, see `docs/production-plan.md`):** holder discovery from chain
-  events, a Safe-based role ceremony off the raw deployer EOA, a Foundry stateful
+  (Railway/Vercel) live, keepers discover Upbet holders from chain events (see
+  [`docs/production-plan.md`](./docs/production-plan.md) for what remains).
+- **Next (Phase 1–3, see `docs/production-plan.md`):** a Safe-based role ceremony off the raw deployer EOA, a Foundry stateful
   invariant suite + Slither + external audit, mainnet plumbing, and a full credit-event
   dress rehearsal on Sepolia.
 - **Complementary matching (future, design decision 2026-07-07):** mint stays
