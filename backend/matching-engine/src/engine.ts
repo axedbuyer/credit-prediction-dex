@@ -24,6 +24,16 @@ class MatchingEngine extends EventEmitter {
   private readonly pendingSettlement = new Set<string>()
 
   /**
+   * Number of runOnce() cycles currently in flight (fired by the interval
+   * timer, not a direct test call to runOnce()). Tracked so stop() can await
+   * any cycle that was already running at the moment it was called instead of
+   * cutting it off mid-match — graceful shutdown must let matchBook() finish
+   * emitting 'matched' for the current book before the process exits.
+   */
+  private activeCycles = 0
+  private idleWaiters: Array<() => void> = []
+
+  /**
    * Release order IDs from the pending-settlement set so they become
    * matchable again on the next poll cycle. Called by the settler when a
    * settlement attempt ends WITHOUT the order being removed from the book
@@ -48,15 +58,35 @@ class MatchingEngine extends EventEmitter {
   start(): void {
     if (this.timer !== null) return
     this.timer = setInterval(() => {
-      this.runOnce().catch(() => { /* swallow transient fetch errors */ })
+      this.activeCycles++
+      this.runOnce()
+        .catch(() => { /* swallow transient fetch errors */ })
+        .finally(() => {
+          this.activeCycles--
+          if (this.activeCycles === 0) {
+            const waiters = this.idleWaiters
+            this.idleWaiters = []
+            for (const resolve of waiters) resolve()
+          }
+        })
     }, this.config.pollIntervalMs ?? 500)
   }
 
-  stop(): void {
+  /**
+   * Stop polling and wait for any cycle that was already in flight to finish.
+   * Clears the interval FIRST (so no new cycle starts), then resolves once
+   * every currently-running runOnce() has settled — including the synchronous
+   * matchBook()/emit('matched', ...) it performs, which is what hands
+   * settlements off to the settler's queue (see Settler.whenIdle() for
+   * draining that separate queue). Used by graceful shutdown.
+   */
+  async stop(): Promise<void> {
     if (this.timer !== null) {
       clearInterval(this.timer)
       this.timer = null
     }
+    if (this.activeCycles === 0) return
+    await new Promise<void>(resolve => this.idleWaiters.push(resolve))
   }
 
   /**

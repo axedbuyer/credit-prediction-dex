@@ -56,6 +56,25 @@ export const CLOB_SETTLEMENT_ABI = [
     type: 'error' as const,
     inputs: [],
   },
+  // A prior verifyAndSettle call for one (or both) of these makers' nonces
+  // already landed on-chain — most commonly a duplicate resubmission of a
+  // pair whose original tx was broadcast, then confirmed, just before/while
+  // this process was killed and restarted (the in-memory pendingSettlement
+  // set doesn't survive a restart, so the same resting orders get re-matched
+  // and re-submitted). Deterministic forever for this exact pair — prune
+  // rather than wedge the level.
+  {
+    name: 'NonceUsed',
+    type: 'error' as const,
+    inputs: [],
+  },
+  {
+    name: 'usedNonces',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{ name: 'maker', type: 'address' }, { name: 'nonce', type: 'uint256' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
 ] as const
 
 // ─── CreditMarket ABI (minimal — claimable() read only) ──────────────────────
@@ -122,13 +141,27 @@ export class NonceQueue {
   private running = false
   private readonly pending: Array<() => Promise<void>> = []
 
+  // Count of tasks enqueued but not yet settled (queued + currently running).
+  // Used by idle() to let graceful shutdown wait for the queue to fully drain
+  // (submitted tx receipt + Redis cleanup included) without polling.
+  private active = 0
+  private idleWaiters: Array<() => void> = []
+
   enqueue<T>(task: () => Promise<T>): Promise<T> {
+    this.active++
     return new Promise<T>((resolve, reject) => {
       this.pending.push(async () => {
         try {
           resolve(await task())
         } catch (err) {
           reject(err)
+        } finally {
+          this.active--
+          if (this.active === 0) {
+            const waiters = this.idleWaiters
+            this.idleWaiters = []
+            for (const w of waiters) w()
+          }
         }
       })
       this.drain()
@@ -144,6 +177,17 @@ export class NonceQueue {
       this.drain()
     })
   }
+
+  /**
+   * Resolves once every task enqueued so far (including the one currently
+   * running) has settled. Does NOT block new enqueues from extending the
+   * wait — a task enqueued after idle() is called but before it resolves is
+   * still awaited, since `active` only reaches 0 when nothing is left.
+   */
+  idle(): Promise<void> {
+    if (this.active === 0) return Promise.resolve()
+    return new Promise(resolve => this.idleWaiters.push(resolve))
+  }
 }
 
 // ─── Settler ──────────────────────────────────────────────────────────────────
@@ -158,6 +202,12 @@ declare interface Settler {
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 class Settler extends EventEmitter {
   private readonly nonceQueue = new NonceQueue()
+
+  // Describes whichever settlement is currently executing (gas estimate → tx
+  // submit → receipt wait → Redis cleanup), for graceful-shutdown timeout
+  // logging only — NOT used for any settlement/matching decision. The queue
+  // serialises settlements one at a time, so at most one of these is ever set.
+  private currentSettlement: { makerId: string; takerId: string; txHash?: Hash } | null = null
 
   constructor(
     private readonly engine: MatchingEngine,
@@ -177,6 +227,15 @@ class Settler extends EventEmitter {
   }
 
   private async settle(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+    this.currentSettlement = { makerId: maker.id, takerId: taker.id }
+    try {
+      await this.settleInner(maker, taker)
+    } finally {
+      this.currentSettlement = null
+    }
+  }
+
+  private async settleInner(maker: StoredOrder, taker: StoredOrder): Promise<void> {
     const makerArg = toContractOrder(maker)
     const takerArg = toContractOrder(taker)
     const makerSig = maker.signature as `0x${string}`
@@ -223,6 +282,10 @@ class Settler extends EventEmitter {
         await this.removeBoth(maker, taker)
         return
       }
+      if (revertName === 'NonceUsed') {
+        await this.handleNonceUsed(maker, taker)
+        return
+      }
 
       // Not a deterministic revert (e.g. RPC hiccup, OrderExpired, an
       // as-yet-unhandled revert reason) — no tx was ever submitted, so it's
@@ -256,6 +319,7 @@ class Settler extends EventEmitter {
     }
 
     console.log(`[settler] submitted ${txHash} maker=${maker.id} taker=${taker.id}`)
+    if (this.currentSettlement) this.currentSettlement.txHash = txHash
 
     // ── 3. Wait for receipt (read-only → safe to retry on RPC timeout) ───────
     let receipt: { status: 'success' | 'reverted' }
@@ -374,6 +438,62 @@ class Settler extends EventEmitter {
     if (!takerFlagged) this.engine.releasePendingSettlement(taker.id)
   }
 
+  // ── NonceUsed: one (or both) orders' nonces already landed on-chain —
+  // almost always a duplicate resubmission after a restart (the in-memory
+  // pendingSettlement set doesn't survive a kill, so filled-but-not-yet-
+  // cleaned-up orders get re-matched). Such an order can never fill, so it
+  // must be pruned or it wedges the book forever. The revert carries no args,
+  // so read usedNonces for both and prune ONLY the spent one(s): removing an
+  // innocent counterparty's valid resting order would let anyone knock orders
+  // off the book by crossing them with a spent-nonce order. If the read fails
+  // or shows neither spent, fall back to removing both (over-pruning is safe).
+  private async handleNonceUsed(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+    let makerSpent: boolean
+    let takerSpent: boolean
+    try {
+      ;[makerSpent, takerSpent] = await Promise.all([
+        this.readUsedNonce(maker),
+        this.readUsedNonce(taker),
+      ])
+    } catch (err) {
+      console.error(
+        `[settler] NonceUsed — usedNonces() read failed, removing both orders ` +
+        `maker=${maker.id} taker=${taker.id}:`, err,
+      )
+      await this.removeBoth(maker, taker)
+      return
+    }
+
+    if (!makerSpent && !takerSpent) {
+      console.error(
+        `[settler] NonceUsed but usedNonces() reports neither nonce spent — ` +
+        `removing both maker=${maker.id} taker=${taker.id}`,
+      )
+      await this.removeBoth(maker, taker)
+      return
+    }
+
+    console.error(
+      `[settler] NonceUsed — maker=${maker.id}(spent=${makerSpent}) ` +
+      `taker=${taker.id}(spent=${takerSpent})`,
+    )
+    const removals: Array<Promise<void>> = []
+    if (makerSpent) removals.push(this.orderRemover.removeOrder(maker.id, maker.side))
+    if (takerSpent) removals.push(this.orderRemover.removeOrder(taker.id, taker.side))
+    await Promise.all(removals)
+    if (!makerSpent) this.engine.releasePendingSettlement(maker.id)
+    if (!takerSpent) this.engine.releasePendingSettlement(taker.id)
+  }
+
+  private async readUsedNonce(order: StoredOrder): Promise<boolean> {
+    return this.publicClient.readContract({
+      address:      this.config.clobSettlementAddress,
+      abi:          CLOB_SETTLEMENT_ABI,
+      functionName: 'usedNonces',
+      args:         [order.maker as Address, BigInt(order.nonce)],
+    }) as Promise<boolean>
+  }
+
   private async readClaimable(user: Address): Promise<boolean> {
     return this.publicClient.readContract({
       address:      this.config.creditMarketAddress,
@@ -381,6 +501,26 @@ class Settler extends EventEmitter {
       functionName: 'claimable',
       args:         [user],
     }) as Promise<boolean>
+  }
+
+  /**
+   * Resolves once any settlement(s) currently queued or executing (gas
+   * estimate → tx submit → receipt wait → Redis cleanup) have finished. Used
+   * by graceful shutdown to drain in-flight work before the process exits.
+   */
+  whenIdle(): Promise<void> {
+    return this.nonceQueue.idle()
+  }
+
+  /**
+   * Human-readable description of whichever settlement is currently in
+   * flight, or null if idle. Includes the tx hash once known. For graceful-
+   * shutdown timeout logging only.
+   */
+  describePending(): string | null {
+    if (!this.currentSettlement) return null
+    const { makerId, takerId, txHash } = this.currentSettlement
+    return `maker=${makerId} taker=${takerId}` + (txHash ? ` tx=${txHash}` : ' (tx not yet submitted)')
   }
 
   private async removeBoth(maker: StoredOrder, taker: StoredOrder): Promise<void> {
@@ -393,7 +533,7 @@ class Settler extends EventEmitter {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-type DeterministicRevert = 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded'
+type DeterministicRevert = 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded' | 'NonceUsed'
 
 // Decodes a deterministic, non-retryable custom-error revert out of a thrown
 // estimateContractGas error. viem wraps on-chain reverts in a BaseError chain;
@@ -411,7 +551,8 @@ function decodeSettlementError(err: unknown): DeterministicRevert | undefined {
   if (
     errorName === 'FundingShortfall' ||
     errorName === 'PositionFrozen' ||
-    errorName === 'SlippageExceeded'
+    errorName === 'SlippageExceeded' ||
+    errorName === 'NonceUsed'
   ) return errorName
   return undefined
 }
@@ -484,7 +625,16 @@ export class RedisOrderRemover implements OrderRemover {
 
 // ─── Production factory ───────────────────────────────────────────────────────
 
-export function createSettler(engine: MatchingEngine): Settler {
+// A settler plus the underlying Redis connection it uses for order cleanup —
+// callers (main.ts) need the latter to quit() it cleanly on graceful shutdown
+// instead of letting the process exit yank the connection out from under any
+// in-flight command.
+export interface CreatedSettler {
+  settler: Settler
+  redis: { quit(): Promise<unknown> }
+}
+
+export function createSettler(engine: MatchingEngine): CreatedSettler {
   const privateKey = process.env.SETTLER_PRIVATE_KEY
   if (!privateKey) throw new Error('SETTLER_PRIVATE_KEY env var is required')
 
@@ -536,7 +686,7 @@ export function createSettler(engine: MatchingEngine): Settler {
         port: parseInt(process.env.REDIS_PORT ?? '6379'),
       })
 
-  return new Settler(
+  const settler = new Settler(
     engine,
     {
       clobSettlementAddress: deployments.clobSettlement as Address,
@@ -547,6 +697,8 @@ export function createSettler(engine: MatchingEngine): Settler {
     walletClient as unknown as IWalletClient,
     new RedisOrderRemover(redis),
   )
+
+  return { settler, redis }
 }
 
 export { Settler }

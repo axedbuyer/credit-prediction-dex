@@ -1,6 +1,8 @@
 import { HttpOrderBookClient } from './client'
 import { MatchingEngine } from './engine'
 import { createSettler } from './settler'
+import { createShutdownHandler } from './shutdown'
+import type { CreatedSettler } from './settler'
 import type { MatchingEngineConfig } from './types'
 
 const config: MatchingEngineConfig = {
@@ -22,9 +24,11 @@ engine.on('matched', (maker, taker) => {
 
 // The settler subscribes to 'matched' in its constructor and submits
 // CLOBSettlement.verifyAndSettle() on-chain. Without credentials, matches are
-// only logged (useful for dry-running the engine against a book).
+// only logged (useful for dry-running the engine against a book) — in that
+// mode there's no settlement queue or Redis connection for shutdown to drain.
+let created: CreatedSettler | undefined
 if (process.env.SETTLER_PRIVATE_KEY && process.env.BASE_SEPOLIA_RPC_URL) {
-  createSettler(engine)
+  created = createSettler(engine)
   console.log('[settler] wired — matched pairs will be settled on-chain')
 } else {
   console.warn('[settler] SETTLER_PRIVATE_KEY or BASE_SEPOLIA_RPC_URL not set — matches will be logged only')
@@ -32,3 +36,22 @@ if (process.env.SETTLER_PRIVATE_KEY && process.env.BASE_SEPOLIA_RPC_URL) {
 
 engine.start()
 console.log(`Matching engine polling ${orderBookUrl}/orderbook every ${config.pollIntervalMs ?? 500}ms`)
+
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+// Every git push redeploys this service (e.g. on Railway) by signalling the
+// running process — without this, a redeploy can land mid-settlement: after a
+// verifyAndSettle tx is submitted but before its receipt is processed and the
+// filled orders are pruned from Redis. Draining here (stop polling → await the
+// in-flight cycle → await the settler's queue → quit Redis) closes that window;
+// see src/shutdown.ts for the sequence and SHUTDOWN_TIMEOUT_MS for the bound.
+const shutdownHandler = createShutdownHandler({
+  log: (msg) => console.log(msg),
+  stopEngine: () => engine.stop(),
+  drainSettler: created ? () => created!.settler.whenIdle() : undefined,
+  describePending: created ? () => created!.settler.describePending() : undefined,
+  closeRedis: created ? () => created!.redis.quit().then(() => {}) : undefined,
+  timeoutMs: parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? '25000'),
+})
+
+process.on('SIGTERM', () => shutdownHandler('SIGTERM'))
+process.on('SIGINT', () => shutdownHandler('SIGINT'))
