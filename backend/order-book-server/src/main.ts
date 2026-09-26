@@ -3,14 +3,15 @@ import fs from 'fs'
 import { buildApp } from './server'
 import { RedisOrderStore, createRedisClient } from './orderbook'
 import { createChainReader } from './chain'
+import { createFeeSource, parseEnvFeeBps, envFeeBpsWasSet, parseFeeRefreshMs } from './feeSource'
 import type { AppConfig } from './types'
 import type { IChainReader } from './chain'
 import type { Address } from 'viem'
 import { parseOrderRateLimitMax, parseOrderRateLimitWindowMs, parseTrustProxy } from './rateLimit'
 
-// CREDIT_MARKET_ADDRESS / YES_TOKEN_ADDRESS env vars take precedence over the
-// deployments file, mirroring backend/keepers/*.ts.
-function loadDeployments(): { creditMarket?: string; yesToken?: string } {
+// CREDIT_MARKET_ADDRESS / YES_TOKEN_ADDRESS / CLOB_SETTLEMENT_ADDRESS env vars
+// take precedence over the deployments file, mirroring backend/keepers/*.ts.
+function loadDeployments(): { creditMarket?: string; yesToken?: string; clobSettlement?: string } {
   try {
     // Path: src/ → order-book-server/ → backend/ → project root → contracts/deployments/
     const deploymentsPath = path.join(
@@ -19,6 +20,7 @@ function loadDeployments(): { creditMarket?: string; yesToken?: string } {
     return JSON.parse(fs.readFileSync(deploymentsPath, 'utf8')) as {
       creditMarket?: string
       yesToken?: string
+      clobSettlement?: string
     }
   } catch {
     return {}
@@ -41,21 +43,30 @@ function parseCorsOrigins(raw: string | undefined): string[] | undefined {
 async function main() {
   const deployments = loadDeployments()
 
+  // CLOB_SETTLEMENT_ADDRESS env takes precedence over the deployments file,
+  // same pattern as creditMarketAddress/yesTokenAddress below. Only treated as
+  // "configured" (see clobSettlementConfigured, used to gate the live fee
+  // reader) when one of those two actually resolves — the hardcoded
+  // placeholder fallback below must never be mistaken for a real address.
+  const clobSettlementAddress = process.env.CLOB_SETTLEMENT_ADDRESS ?? deployments.clobSettlement
+  const clobSettlementConfigured = Boolean(clobSettlementAddress)
+
   const config: AppConfig = {
     // Base Sepolia USDC (official Circle deployment)
     usdcAddress: process.env.USDC_ADDRESS ?? '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
     yesTokenAddress: process.env.YES_TOKEN_ADDRESS ?? deployments.yesToken ?? '0x0000000000000000000000000000000000000001',
     noTokenAddress: process.env.NO_TOKEN_ADDRESS ?? '0x0000000000000000000000000000000000000002',
-    clobSettlementAddress: process.env.CLOB_SETTLEMENT_ADDRESS ?? '0x0000000000000000000000000000000000000003',
+    clobSettlementAddress: clobSettlementAddress ?? '0x0000000000000000000000000000000000000003',
     creditMarketAddress: process.env.CREDIT_MARKET_ADDRESS ?? deployments.creditMarket,
     // CHAIN_ID env override lets a local Anvil node (31337) work without code changes.
     chainId: parseInt(process.env.CHAIN_ID ?? '84532'),
     port: parseInt(process.env.PORT ?? '3001'),
     rpcUrl: process.env.BASE_SEPOLIA_RPC_URL,
-    // Must mirror CLOBSettlement.feeBps on-chain. Overstating is safe (NO bids
-    // sort slightly low, marginal crosses are skipped); understating produces
-    // deterministic SlippageExceeded reverts that the settler prunes.
-    feeBps: parseInt(process.env.FEE_BPS ?? '50'),
+    // STATIC fallback only — see feeSource below, which is the live rate
+    // server.ts actually reads per-request. Kept here for any caller that
+    // still inspects config.feeBps directly (defensive; buildApp prefers
+    // config.feeSource when both are set).
+    feeBps: parseEnvFeeBps(process.env.FEE_BPS),
     corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS),
     // Rate limiting for POST /order + DELETE /order/:id (see src/rateLimit.ts).
     orderRateLimitMax: parseOrderRateLimitMax(process.env.ORDER_RATE_LIMIT_MAX),
@@ -70,7 +81,22 @@ async function main() {
     parseInt(process.env.REDIS_PORT ?? '6379'),
   )
 
-  await redis.connect()
+  // Live, on-chain-backed fee rate (src/feeSource.ts) — the source of truth
+  // for feeBps is CLOBSettlement.feeBps() on-chain when RPC + the contract
+  // address are configured; FEE_BPS becomes a fallback (startup RPC failure,
+  // or no chain configured at all — e.g. local demo/tests). `start()` is
+  // bounded by an internal per-read timeout, so it can't hang server startup.
+  const feeSource = createFeeSource({
+    rpcUrl: clobSettlementConfigured ? config.rpcUrl : undefined,
+    chainId: config.chainId,
+    clobSettlementAddress: clobSettlementConfigured ? (clobSettlementAddress as Address) : undefined,
+    envFeeBps: config.feeBps ?? 50,
+    envFeeBpsWasSet: envFeeBpsWasSet(process.env.FEE_BPS),
+    refreshMs: parseFeeRefreshMs(process.env.FEE_REFRESH_MS),
+  })
+  config.feeSource = feeSource
+
+  await Promise.all([redis.connect(), feeSource.start()])
 
   const store = new RedisOrderStore(redis)
 

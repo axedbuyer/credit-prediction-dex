@@ -447,6 +447,92 @@ describe('POST /order — trading fee (feeBps=50)', () => {
   })
 })
 
+describe('POST /order — live feeSource (per-request rate, not cached at buildApp time)', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let store: MemoryOrderStore
+
+  // Mutable fake feeSource — mirrors FeeSourceReader's shape (getFeeBps/getSnapshot)
+  // without any RPC/timers, so mutating `.bps` between two requests simulates an
+  // admin setFeeConfig change picked up by feeSource.ts's periodic refresh.
+  function fakeFeeSource(initial: number) {
+    const state = { bps: initial }
+    return {
+      set: (n: number) => { state.bps = n },
+      getFeeBps: () => state.bps,
+      getSnapshot: () => ({ feeBps: state.bps, source: 'chain' as const, lastRefreshAt: Date.now() }),
+    }
+  }
+
+  beforeEach(() => {
+    store = new MemoryOrderStore()
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  it('a NO-bid order priced before and after a rate change reflects the CURRENT feeBps each time', async () => {
+    const feeSource = fakeFeeSource(50)
+    app = await buildApp(store, { ...TEST_CONFIG, feeSource })
+
+    // Gross 950e6 for 1000e6 NO @ feeBps=50 → net 949.75e6 (see the feeBps=50 fee test above).
+    const wire1 = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_USDC as Address, tokenOut: MOCK_NO as Address, amountIn: BigInt(950_000_000), minAmountOut: BigInt(1_000_000_000) },
+      BigInt(300),
+    )
+    const res1 = await app.inject({ method: 'POST', url: '/order', body: wire1 })
+    expect(res1.statusCode).toBe(201)
+    const stored1 = await store.getOrder(res1.json<{ orderId: string }>().orderId)
+    expect(stored1?.price).toBeCloseTo(0.94975, 10)
+
+    // Same order shape, but the fee rate has since changed (e.g. an on-chain
+    // setFeeConfig refresh) to 100 bps → net = 950e6 - min(950e6,50e6)*100/10000 = 949.5e6.
+    feeSource.set(100)
+    const wire2 = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_USDC as Address, tokenOut: MOCK_NO as Address, amountIn: BigInt(950_000_000), minAmountOut: BigInt(1_000_000_000) },
+      BigInt(301),
+    )
+    const res2 = await app.inject({ method: 'POST', url: '/order', body: wire2 })
+    expect(res2.statusCode).toBe(201)
+    const stored2 = await store.getOrder(res2.json<{ orderId: string }>().orderId)
+    expect(stored2?.price).toBeCloseTo(0.9495, 10)
+
+    expect(stored2!.price).not.toBeCloseTo(stored1!.price, 6)
+  })
+
+  it('the FundingShortfall pre-filter fee component also tracks the CURRENT feeBps', async () => {
+    const feeSource = fakeFeeSource(50)
+    const reader = mockChainReader({ fundingDebt: BigInt(30_000_000), previewDelta: BigInt(0) })
+    app = await buildApp(store, { ...TEST_CONFIG, feeSource }, reader)
+
+    // D = 30_000_000; at feeBps=50 this clears the debit but not debit+fee →
+    // rejected with hint 30_150_754 (same fixture as the fixed-config fee test above).
+    const wire1 = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(1_000_000_000), minAmountOut: BigInt(30_000_001) },
+      BigInt(302),
+    )
+    const res1 = await app.inject({ method: 'POST', url: '/order', body: wire1 })
+    expect(res1.statusCode).toBe(400)
+    expect(res1.json<{ minSellProceeds: string }>().minSellProceeds).toBe('30150754')
+
+    // Rate changes — same order, still rejected (fee only grew), but the hint moves.
+    feeSource.set(100)
+    const wire2 = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(1_000_000_000), minAmountOut: BigInt(30_000_001) },
+      BigInt(303),
+    )
+    const res2 = await app.inject({ method: 'POST', url: '/order', body: wire2 })
+    expect(res2.statusCode).toBe(400)
+    const hint2 = res2.json<{ minSellProceeds: string }>().minSellProceeds
+    expect(hint2).toBe('30303031')
+    expect(hint2).not.toBe('30150754')
+  })
+})
+
 describe('GET /health', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   let store: MemoryOrderStore
@@ -455,14 +541,19 @@ describe('GET /health', () => {
     await app.close()
   })
 
-  it('returns 200 { status: "ok" } when the store is reachable', async () => {
+  type HealthBody = { status: string; fee: { feeBps: number; source: string; lastRefreshAt: number | null } }
+
+  it('returns 200 { status: "ok" } plus a fee block when the store is reachable', async () => {
     store = new MemoryOrderStore()
     app = await buildApp(store, TEST_CONFIG)
 
     const res = await app.inject({ method: 'GET', url: '/health' })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ status: 'ok' })
+    const body = res.json<HealthBody>()
+    expect(body.status).toBe('ok')
+    // TEST_CONFIG sets neither feeBps nor feeSource → static fallback of 0, env-fallback.
+    expect(body.fee).toEqual({ feeBps: 0, source: 'env-fallback', lastRefreshAt: null })
   })
 
   it('returns 503 { status: "error" } when the store ping fails', async () => {
@@ -473,7 +564,9 @@ describe('GET /health', () => {
     const res = await app.inject({ method: 'GET', url: '/health' })
 
     expect(res.statusCode).toBe(503)
-    expect(res.json<{ status: string }>().status).toBe('error')
+    const body = res.json<HealthBody>()
+    expect(body.status).toBe('error')
+    expect(body.fee).toBeDefined()
   })
 
   it('returns 503 { status: "error" } when the store ping throws', async () => {
@@ -484,7 +577,24 @@ describe('GET /health', () => {
     const res = await app.inject({ method: 'GET', url: '/health' })
 
     expect(res.statusCode).toBe(503)
-    expect(res.json<{ status: string }>().status).toBe('error')
+    const body = res.json<HealthBody>()
+    expect(body.status).toBe('error')
+    expect(body.fee).toBeDefined()
+  })
+
+  it('reports the live feeSource snapshot (source=chain) when config.feeSource is set', async () => {
+    store = new MemoryOrderStore()
+    const feeSource = {
+      getFeeBps: () => 75,
+      getSnapshot: () => ({ feeBps: 75, source: 'chain' as const, lastRefreshAt: 1_700_000_000_000 }),
+    }
+    app = await buildApp(store, { ...TEST_CONFIG, feeSource })
+
+    const res = await app.inject({ method: 'GET', url: '/health' })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json<HealthBody>()
+    expect(body.fee).toEqual({ feeBps: 75, source: 'chain', lastRefreshAt: 1_700_000_000_000 })
   })
 })
 

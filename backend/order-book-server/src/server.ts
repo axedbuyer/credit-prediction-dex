@@ -8,8 +8,24 @@ import type { IChainReader } from './chain'
 import { verifyOrderSignature, verifyCancelSignature } from './validation'
 import { tradeFee, netNoBidProceeds, minGrossForNet } from './fee'
 import { DEFAULT_ORDER_RATE_LIMIT_MAX, DEFAULT_ORDER_RATE_LIMIT_WINDOW_MS } from './rateLimit'
+import type { FeeSourceSnapshot } from './feeSource'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// The CURRENT fee rate for this request. `config.feeSource` (live,
+// on-chain-backed — see src/feeSource.ts) takes precedence when present;
+// tests/callers that only set the static `config.feeBps` keep working
+// unchanged. Read fresh on every call — never cached — so an admin
+// `setFeeConfig` change (picked up by feeSource's periodic refresh) is
+// reflected on the very next request without a restart.
+function currentFeeBps(config: AppConfig): number {
+  return config.feeSource ? config.feeSource.getFeeBps() : (config.feeBps ?? 0)
+}
+
+function currentFeeSnapshot(config: AppConfig): FeeSourceSnapshot {
+  if (config.feeSource) return config.feeSource.getSnapshot()
+  return { feeBps: config.feeBps ?? 0, source: 'env-fallback', lastRefreshAt: null }
+}
 
 function wireToOrder(wire: OrderWire): Order {
   return {
@@ -48,7 +64,7 @@ function derivePrice(wire: OrderWire, config: AppConfig): number {
     if (minOut === 0n) return 0
     const isNoBid = wire.tokenOut.toLowerCase() === config.noTokenAddress.toLowerCase()
     const usdcLeg = isNoBid
-      ? netNoBidProceeds(minOut, amtIn, BigInt(config.feeBps ?? 0))
+      ? netNoBidProceeds(minOut, amtIn, BigInt(currentFeeBps(config)))
       : amtIn
     return Number(usdcLeg) / Number(minOut)
   }
@@ -94,7 +110,7 @@ async function runChainPreFilter(
       // tradePrice ≥ debit + fee, so the trading fee on this YES sell joins the
       // required proceeds; minSellProceeds inverts net(G) = G − fee(G) exactly.
       const netDebit = debt - previewDelta
-      const feeBps = BigInt(config.feeBps ?? 0)
+      const feeBps = BigInt(currentFeeBps(config))
       const fee = tradeFee(order.amountIn, order.minAmountOut, feeBps)
       if (netDebit > 0n && order.minAmountOut < netDebit + fee) {
         return {
@@ -216,15 +232,17 @@ export async function buildApp(store: OrderStore, config: AppConfig, chainReader
   // touches the chain/RPC — chain reads are best-effort and the public RPC is
   // flaky, so health must not depend on it (see runChainPreFilter's fail-open).
   app.get('/health', noRateLimit, async (_request, reply) => {
+    // Fee snapshot is an in-memory read (no RPC) — safe to include unconditionally.
+    const fee = currentFeeSnapshot(config)
     try {
       const reachable = await store.ping()
       if (!reachable) {
-        return reply.status(503).send({ status: 'error', error: 'Store unreachable' })
+        return reply.status(503).send({ status: 'error', error: 'Store unreachable', fee })
       }
-      return reply.status(200).send({ status: 'ok' })
+      return reply.status(200).send({ status: 'ok', fee })
     } catch (err) {
       console.error('[order-book-server] /health store check failed:', err)
-      return reply.status(503).send({ status: 'error', error: 'Store unreachable' })
+      return reply.status(503).send({ status: 'error', error: 'Store unreachable', fee })
     }
   })
 
