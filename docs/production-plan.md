@@ -32,7 +32,8 @@ from `Transfer` events (requirement 1 below).
    low-balance hot EOAs holding only their operational role. Deployer renounces
    everything.
 3. **Security gate** — Foundry **stateful invariant suite** encoding the 10 root-CLAUDE.md
-   invariants (only parametrized fuzz exists today), Slither clean, and an **external
+   invariants (only parametrized fuzz exists today), Slither clean (✅ first pass
+   2026-09-26: 0 real High/Medium — `docs/security/slither-2026-09-26.md`), and an **external
    audit** (see Phase 3). `depositCap` stays in regardless — audited code still launches
    capped; the cap rises with track record.
 4. **Credit-event dress rehearsal on Base Sepolia** — full lifecycle on the public

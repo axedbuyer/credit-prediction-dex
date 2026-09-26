@@ -35,7 +35,9 @@ TRUST_PROXY=2
 ```
 Leave `PORT` unset (Railway injects it). No Dockerfile override. Health check:
 `GET /health` (200 when Redis answers PING, 503 otherwise; never touches the RPC).
-`CORS_ORIGINS` is an exact-match allow-list; unset/empty/`*` means wildcard `*`. Vercel
+`FEE_BPS` is only a fallback: the live fee rate is read from `CLOBSettlement.feeBps()` and
+refreshed every 60s (`FEE_REFRESH_MS`). `GET /health` → `fee.source` should say `chain`;
+`env-fallback` means the RPC read failed. `CORS_ORIGINS` is an exact-match allow-list; unset/empty/`*` means wildcard `*`. Vercel
 preview URLs are NOT covered — add them (or unset the var) if you test previews against
 the hosted backend.
 
@@ -134,4 +136,5 @@ NEXT_PUBLIC_ORDER_BOOK_URL=https://<order-book-server Railway PUBLIC domain>
 NEXT_PUBLIC_LIQUIDATION_KEEPER_URL=https://<liquidation-keeper Railway PUBLIC domain>
 ```
 The two Railway public domains must exist before the Vercel deploy is useful (the app
-builds without them but the market page can't load a book).
+builds without them but the market page can't load a book). `NEXT_PUBLIC_FEE_BPS` is only the preview
+fallback while the live on-chain fee rate loads; Downbet buys can't be signed until it has.
