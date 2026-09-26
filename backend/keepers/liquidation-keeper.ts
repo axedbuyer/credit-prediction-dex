@@ -6,6 +6,7 @@ import { baseSepolia } from 'viem/chains'
 import type { Address } from 'viem'
 import { createHolderIndex } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
+import { installShutdownHandlers, closeHttpServer } from './shutdown'
 
 // ─── WAD constant (1e18, for fixed-point arithmetic) ──────────────────────────
 
@@ -132,6 +133,8 @@ export class LiquidationKeeper {
   private positions: ClaimablePosition[] = []
   private lastPolledAt: Date | null = null
   private intervalHandle: ReturnType<typeof setInterval> | null = null
+  private stopped = false
+  private inFlightPoll: Promise<void> | null = null
 
   constructor(
     private readonly publicClient: IPublicClient,
@@ -143,17 +146,32 @@ export class LiquidationKeeper {
     const interval = this.config.pollIntervalMs ?? 30_000
     console.log(`[liq-keeper] polling every ${interval / 1000}s`)
     // Fire immediately, then on every interval.
-    this.poll().catch(err => console.error('[liq-keeper] initial poll error:', err))
+    this.trackPoll(this.poll().catch(err => console.error('[liq-keeper] initial poll error:', err)))
     this.intervalHandle = setInterval(() => {
-      this.poll().catch(err => console.error('[liq-keeper] poll error:', err))
+      if (this.stopped) return
+      this.trackPoll(this.poll().catch(err => console.error('[liq-keeper] poll error:', err)))
     }, interval)
   }
 
-  stop(): void {
+  private trackPoll(p: Promise<void>): void {
+    this.inFlightPoll = p
+    void p.finally(() => {
+      if (this.inFlightPoll === p) this.inFlightPoll = null
+    })
+  }
+
+  /**
+   * Graceful-shutdown hook: clears the poll interval (no more polls will
+   * fire), then — if a poll() is currently in flight — waits for it to
+   * finish before resolving.
+   */
+  async stop(): Promise<void> {
+    this.stopped = true
     if (this.intervalHandle !== null) {
       clearInterval(this.intervalHandle)
       this.intervalHandle = null
     }
+    if (this.inFlightPoll) await this.inFlightPoll
   }
 
   async poll(): Promise<void> {
@@ -420,9 +438,19 @@ function main(): void {
   )
 
   keeper.start()
-  startServer(keeper, parseInt(process.env.PORT ?? '3003'), parseCorsOrigins(process.env.CORS_ORIGINS))
+  const server = startServer(keeper, parseInt(process.env.PORT ?? '3003'), parseCorsOrigins(process.env.CORS_ORIGINS))
 
   console.log('[liq-keeper] started')
+
+  // Graceful shutdown: every Railway redeploy sends SIGTERM to this process
+  // (it's PID 1 under the exec-form CMD `node -r ts-node/register`). Order:
+  // stop polling and let an in-flight poll finish (keeper.stop()), THEN
+  // close the HTTP server and release the holder index's Redis connection.
+  installShutdownHandlers('liquidation-keeper', [
+    { name: 'liquidation-keeper', run: () => keeper.stop() },
+    { name: 'http-server', run: () => closeHttpServer(server) },
+    { name: 'holder-index', run: () => holderSource.close() },
+  ])
 }
 
 if (require.main === module) {

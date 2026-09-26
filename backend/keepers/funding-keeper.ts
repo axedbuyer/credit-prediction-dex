@@ -8,6 +8,7 @@ import { baseSepolia } from 'viem/chains'
 import type { Address, Hash } from 'viem'
 import { createHolderIndex } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
+import { installShutdownHandlers, closeHttpServer } from './shutdown'
 
 // ─── CreditMarket ABI (minimal) ───────────────────────────────────────────────
 
@@ -111,14 +112,21 @@ export interface KeeperConfig {
 
 // ─── Scheduler interface (injected for testability) ───────────────────────────
 
+export interface ScheduledTaskHandle {
+  stop(): void
+}
+
 export interface CronScheduler {
-  schedule(expression: string, callback: () => void | Promise<void>): unknown
+  schedule(expression: string, callback: () => void | Promise<void>): ScheduledTaskHandle
 }
 
 // ─── FundingKeeper ────────────────────────────────────────────────────────────
 
 export class FundingKeeper {
   private lastRunAt: Date | null = null
+  private cronTask: ScheduledTaskHandle | null = null
+  private stopped = false
+  private inFlightRun: Promise<void> | null = null
 
   constructor(
     private readonly publicClient: IPublicClient,
@@ -139,13 +147,36 @@ export class FundingKeeper {
     })
 
     console.log('[keeper] scheduling accrueFunding @ "0 */8 * * *"')
-    scheduler.schedule('0 */8 * * *', async () => {
-      try {
-        await this.runOnce()
-      } catch (err) {
+    this.cronTask = scheduler.schedule('0 */8 * * *', async () => {
+      // Guards against a tick that was already queued/firing the instant
+      // stop() flipped this — the scheduler's own stop() prevents FUTURE
+      // ticks, this only guards the race on the current one.
+      if (this.stopped) return
+
+      const run = this.runOnce().catch(err => {
         console.error('[keeper] unhandled error in runOnce:', err)
+      })
+      this.inFlightRun = run
+      try {
+        await run
+      } finally {
+        if (this.inFlightRun === run) this.inFlightRun = null
       }
     })
+  }
+
+  /**
+   * Graceful-shutdown hook: stops scheduling new cron ticks, then — if a
+   * runOnce() is currently in flight (it may be waiting on an
+   * accrueFunding/flagClaimable tx receipt) — waits for it to finish rather
+   * than abandoning a submitted transaction mid-flight. Safe to call once
+   * during shutdown; idempotent if called again (no in-flight run left to
+   * await).
+   */
+  async stop(): Promise<void> {
+    this.stopped = true
+    this.cronTask?.stop()
+    if (this.inFlightRun) await this.inFlightRun
   }
 
   /**
@@ -506,9 +537,20 @@ function main(): void {
   )
 
   keeper.start()
-  startHealthServer(keeper, parseInt(process.env.HEALTH_PORT ?? '3002'))
+  const healthServer = startHealthServer(keeper, parseInt(process.env.HEALTH_PORT ?? '3002'))
 
   console.log('[keeper] started')
+
+  // Graceful shutdown: every Railway redeploy sends SIGTERM to this process
+  // (it's PID 1 under the exec-form CMD `node -r ts-node/register`). Order:
+  // stop scheduling new work and let an in-flight accrueFunding/flagClaimable
+  // tx finish (keeper.stop()), THEN close the health server and release the
+  // holder index's Redis connection.
+  installShutdownHandlers('funding-keeper', [
+    { name: 'funding-keeper', run: () => keeper.stop() },
+    { name: 'health-server', run: () => closeHttpServer(healthServer) },
+    { name: 'holder-index', run: () => holderSource.close() },
+  ])
 }
 
 if (require.main === module) {

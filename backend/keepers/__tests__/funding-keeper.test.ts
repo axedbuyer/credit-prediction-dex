@@ -91,19 +91,30 @@ function makeMocks(overrides: {
   return { publicClient, walletClient }
 }
 
-// Capture the cron callback so tests can drive it manually.
+// Capture the cron callback so tests can drive it manually. The returned
+// task handle's stop() is a spy — real node-cron's ScheduledTask.stop() is
+// what FundingKeeper.stop() calls to prevent future ticks.
 function makeMockScheduler() {
   let captured: (() => void | Promise<void>) | null = null
+  const taskStop = vi.fn()
   const scheduler: CronScheduler = {
     schedule: vi.fn((_expr: string, cb: () => void | Promise<void>) => {
       captured = cb
+      return { stop: taskStop }
     }),
   }
   const fire = async () => {
     if (!captured) throw new Error('scheduler.schedule was never called')
     await (captured as () => Promise<void>)()
   }
-  return { scheduler, fire }
+  // Invokes the captured callback WITHOUT awaiting it — lets a test observe
+  // the keeper mid-tick (e.g. to exercise FundingKeeper.stop() waiting on an
+  // in-flight run).
+  const fireWithoutAwait = (): Promise<void> => {
+    if (!captured) throw new Error('scheduler.schedule was never called')
+    return (captured as () => Promise<void>)()
+  }
+  return { scheduler, fire, fireWithoutAwait, taskStop }
 }
 
 // ─── Scheduling ───────────────────────────────────────────────────────────────
@@ -596,6 +607,80 @@ describe('FundingKeeper — seizure checks survive an accrual failure', () => {
     // phase's holder-index refresh and isSeizable read.
     expect(accrueWriteOrder).toBeLessThan(runOnceRefreshOrder)
     expect(accrueWriteOrder).toBeLessThan(isSeizableOrder)
+  })
+})
+
+// ─── stop() ───────────────────────────────────────────────────────────────────
+
+describe('FundingKeeper — stop()', () => {
+  it('calls the cron task\'s stop() so no future ticks are scheduled', async () => {
+    const { publicClient, walletClient } = makeMocks()
+    const { scheduler, taskStop } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
+    keeper.start(scheduler)
+
+    await keeper.stop()
+
+    expect(taskStop).toHaveBeenCalledOnce()
+  })
+
+  it('waits for an in-flight runOnce (stuck awaiting the accrueFunding receipt) before resolving', async () => {
+    // Deferred receipt promise — accrue() will block here until we resolve it,
+    // simulating a runOnce() that's mid-flight when SIGTERM arrives.
+    let resolveReceipt!: (r: { status: 'success' | 'reverted' }) => void
+    const receiptPromise = new Promise<{ status: 'success' | 'reverted' }>(resolve => {
+      resolveReceipt = resolve
+    })
+    const { publicClient, walletClient } = makeMocks({
+      waitForTransactionReceipt: () => receiptPromise,
+    })
+    const { scheduler, fireWithoutAwait } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
+    keeper.start(scheduler)
+
+    const tick = fireWithoutAwait()   // kicks off runOnce; accrue() blocks on the receipt
+
+    let stopResolved = false
+    const stopPromise = keeper.stop().then(() => { stopResolved = true })
+
+    // A couple of microtask turns — stop() must NOT resolve yet, since
+    // runOnce() is still stuck awaiting the receipt.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stopResolved).toBe(false)
+
+    resolveReceipt({ status: 'success' })
+    await tick
+    await stopPromise
+
+    expect(stopResolved).toBe(true)
+    // The submitted tx was never abandoned — it completed and updated lastRunAt.
+    expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+  })
+
+  it('prevents new cron ticks from running work after stop() (defensive race guard)', async () => {
+    const { publicClient, walletClient } = makeMocks()
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
+    keeper.start(scheduler)
+
+    await keeper.stop()
+
+    // Simulate the scheduler firing once more despite the task's stop() having
+    // been called — the keeper's own `stopped` guard must no-op this tick.
+    await fire()
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(publicClient.estimateContractGas).not.toHaveBeenCalled()
+  })
+
+  it('resolves immediately when there is no in-flight run', async () => {
+    const { publicClient, walletClient } = makeMocks()
+    const { scheduler } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), CONFIG)
+    keeper.start(scheduler)
+
+    await expect(keeper.stop()).resolves.toBeUndefined()
   })
 })
 

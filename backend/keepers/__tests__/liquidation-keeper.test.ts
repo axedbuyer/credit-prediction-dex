@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -439,6 +439,74 @@ describe('LiquidationKeeper — error resilience', () => {
     expect(positions).toHaveLength(1)
     expect(positions[0].user).toBe(HOLDER_A)
     expect(keeper.getLastPolledAt()).toBeInstanceOf(Date)
+  })
+})
+
+// ─── stop() ───────────────────────────────────────────────────────────────────
+
+describe('LiquidationKeeper — stop()', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('waits for an in-flight poll() (stuck reading currentMark) before resolving', async () => {
+    let resolveMark!: (v: bigint) => void
+    const markPromise = new Promise<bigint>(resolve => { resolveMark = resolve })
+    const client: IPublicClient = {
+      readContract: vi.fn().mockImplementation(({ functionName }: { functionName: string }) => {
+        if (functionName === 'currentMark') return markPromise
+        if (functionName === 'motionPending') return Promise.resolve(false)
+        return Promise.resolve(0n)
+      }),
+    }
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+
+    keeper.start()   // fires poll() immediately; it blocks awaiting currentMark
+
+    let stopResolved = false
+    const stopPromise = keeper.stop().then(() => { stopResolved = true })
+
+    // A couple of microtask turns — stop() must NOT resolve yet, since
+    // poll() is still stuck awaiting currentMark.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stopResolved).toBe(false)
+
+    resolveMark(DEFAULT_MARK)
+    await stopPromise
+
+    expect(stopResolved).toBe(true)
+  })
+
+  it('clears the interval so no further polls fire after stop()', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(
+      client,
+      makeHolderSource({ initialHolders: [HOLDER_A] }),
+      { ...BASE_CONFIG, pollIntervalMs: 1_000 },
+    )
+
+    keeper.start()
+    await vi.advanceTimersByTimeAsync(0)   // flush the immediate poll
+
+    const callsBeforeStop = (client.readContract as ReturnType<typeof vi.fn>).mock.calls.length
+    await keeper.stop()
+
+    await vi.advanceTimersByTimeAsync(5_000)   // several intervals' worth of ticks
+
+    const callsAfterStop = (client.readContract as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(callsAfterStop).toBe(callsBeforeStop)
+  })
+
+  it('resolves immediately when there is no in-flight poll (never started)', async () => {
+    const client = makePublicClient(makeReadContract({ claimable: false }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+
+    await expect(keeper.stop()).resolves.toBeUndefined()
   })
 })
 
