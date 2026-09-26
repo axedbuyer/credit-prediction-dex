@@ -243,4 +243,48 @@ describe('start / stop', () => {
     await new Promise(r => setTimeout(r, 100)) // wait to confirm no more calls
     expect(calls).toBe(snapshot)
   })
+
+  it('stop() resolves immediately when no cycle is in flight', async () => {
+    const client: OrderBookClient = { fetchOrderBook: async () => ({ bids: [], asks: [] }) }
+    const engine = new MatchingEngine(client, { ...CONFIG, pollIntervalMs: 50 })
+    // Never started — no timer, no in-flight cycle.
+    await expect(engine.stop()).resolves.toBeUndefined()
+  })
+
+  it('stop() waits for an in-flight cycle (triggered by the timer) to finish before resolving', async () => {
+    // Deferred fetchOrderBook — the cycle triggered by the interval timer
+    // will be sitting inside `await this.client.fetchOrderBook()` when
+    // stop() is called, exactly like a settlement whose tx receipt is still
+    // pending during a SIGTERM.
+    let releaseFetch: (() => void) | undefined
+    let fetchStarted = false
+    const client: OrderBookClient = {
+      fetchOrderBook: () => {
+        fetchStarted = true
+        return new Promise(resolve => {
+          releaseFetch = () => resolve({ bids: [], asks: [] })
+        })
+      },
+    }
+    const engine = new MatchingEngine(client, { ...CONFIG, pollIntervalMs: 20 })
+
+    engine.start()
+    // Wait for the timer to fire and enter the deferred fetch.
+    await new Promise<void>(resolve => {
+      const check = () => (fetchStarted ? resolve() : setTimeout(check, 5))
+      check()
+    })
+
+    let stopped = false
+    const stopPromise = engine.stop().then(() => { stopped = true })
+
+    // stop() must NOT resolve while the in-flight cycle is still pending.
+    await new Promise(r => setTimeout(r, 50))
+    expect(stopped).toBe(false)
+
+    // Release the in-flight cycle — NOW stop() should resolve.
+    releaseFetch!()
+    await stopPromise
+    expect(stopped).toBe(true)
+  })
 })

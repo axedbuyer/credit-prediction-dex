@@ -24,7 +24,7 @@ const CONFIG: SettlerConfig = {
 // A real ContractFunctionRevertedError, decoded from actual ABI-encoded revert
 // data — exercises the same decode path (`err.walk` / `.data.errorName`) that
 // real viem estimateContractGas failures produce, rather than a hand-rolled stub.
-function makeRevertError(errorName: 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded') {
+function makeRevertError(errorName: 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded' | 'NonceUsed') {
   const data = encodeErrorResult({ abi: CLOB_SETTLEMENT_ABI, errorName, args: [] })
   return new ContractFunctionRevertedError({
     abi: CLOB_SETTLEMENT_ABI,
@@ -467,6 +467,164 @@ describe('NonceQueue', () => {
     // All 6 orders (3 pairs) removed from Redis
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(6)
   })
+})
+
+// ─── NonceQueue: idle() draining ──────────────────────────────────────────────
+
+describe('NonceQueue — idle()', () => {
+  it('resolves immediately when nothing has ever been enqueued', async () => {
+    const queue = new NonceQueue()
+    await expect(queue.idle()).resolves.toBeUndefined()
+  })
+
+  it('resolves only after a task pending on a deferred promise completes', async () => {
+    const queue = new NonceQueue()
+    let release: (() => void) | undefined
+    const task = () => new Promise<void>(resolve => { release = resolve })
+
+    void queue.enqueue(task)
+
+    let idleResolved = false
+    const idlePromise = queue.idle().then(() => { idleResolved = true })
+
+    await sleep(20)
+    expect(idleResolved).toBe(false)  // task still pending — must not resolve yet
+
+    release!()
+    await idlePromise
+    expect(idleResolved).toBe(true)
+  })
+
+  it('waits for a task enqueued while the queue was already busy (queued behind another)', async () => {
+    const queue = new NonceQueue()
+    let releaseFirst: (() => void) | undefined
+    const first = () => new Promise<void>(resolve => { releaseFirst = resolve })
+    const second = vi.fn(() => Promise.resolve())
+
+    void queue.enqueue(first)
+    void queue.enqueue(second)  // queued — first hasn't resolved yet
+
+    let idleResolved = false
+    const idlePromise = queue.idle().then(() => { idleResolved = true })
+
+    await sleep(20)
+    expect(idleResolved).toBe(false)
+    expect(second).not.toHaveBeenCalled()
+
+    releaseFirst!()
+    await idlePromise
+    expect(idleResolved).toBe(true)
+    expect(second).toHaveBeenCalledOnce()
+  })
+})
+
+// ─── Settler — whenIdle() / describePending() (graceful shutdown support) ────
+
+describe('Settler — whenIdle() / describePending()', () => {
+  it('describePending() is null when idle, and whenIdle() resolves immediately', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks()
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    expect(settler.describePending()).toBeNull()
+    await expect(settler.whenIdle()).resolves.toBeUndefined()
+  })
+
+  it('describePending() reports maker/taker (and tx hash once submitted) while a settlement is in flight; whenIdle() resolves only after it finishes', async () => {
+    const engine = makeEngine()
+    let releaseReceipt: (() => void) | undefined
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      waitForTransactionReceipt: () => new Promise(resolve => {
+        releaseReceipt = () => resolve({ status: 'success' as const })
+      }),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-idle', 'ask'), makeOrder('bid-idle', 'bid'))
+
+    // Wait until the tx has been "submitted" (writeContract resolved) and the
+    // settlement is now parked on the deferred receipt wait.
+    await sleep(50)
+    expect(walletClient.writeContract).toHaveBeenCalledOnce()
+    expect(settler.describePending()).toBe('maker=ask-idle taker=bid-idle tx=' + TX_HASH)
+
+    let idleResolved = false
+    const idlePromise = settler.whenIdle().then(() => { idleResolved = true })
+    await sleep(20)
+    expect(idleResolved).toBe(false)
+
+    releaseReceipt!()
+    await idlePromise
+    expect(idleResolved).toBe(true)
+    expect(settler.describePending()).toBeNull()
+  })
+})
+
+// ─── Settler: NonceUsed (duplicate resubmission after a restart) ─────────────
+
+describe('Settler — NonceUsed handling', () => {
+  const MAKER_A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
+  const MAKER_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const
+
+  it('prunes ONLY the order whose nonce is spent on-chain and releases the other', async () => {
+    const engine = makeEngine()
+    const reads: Array<{ functionName: string; args: readonly unknown[] }> = []
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
+      readContract: (a) => {
+        reads.push(a)
+        const [user] = a.args as [string, bigint]
+        return Promise.resolve(user === MAKER_A)
+      },
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-nonce', 'ask', { maker: MAKER_A }), makeOrder('bid-nonce', 'bid', { maker: MAKER_B }))
+
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(reads.every(r => r.functionName === 'usedNonces')).toBe(true)
+    expect(reads.map(r => r.args)).toContainEqual([MAKER_A, 1n])
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nonce', 'ask')
+    // The innocent counterparty's order stays in the book and can match again.
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-nonce')
+    expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-nonce')
+  }, 10_000)
+
+  it('usedNonces() read throws → both orders removed (never wedge the book)', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
+      readContract: () => Promise.reject(new Error('RPC down')),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-nu-err', 'ask', { maker: MAKER_A }), makeOrder('bid-nu-err', 'bid', { maker: MAKER_B }))
+
+    await sleep(3000)
+
+    expect(walletClient.writeContract).not.toHaveBeenCalled()
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nu-err', 'ask')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-nu-err', 'bid')
+  }, 10_000)
+
+  it('usedNonces() reports neither spent → both orders removed', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
+      readContract: () => Promise.resolve(false),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-nu-none', 'ask'), makeOrder('bid-nu-none', 'bid'))
+
+    await sleep(3000)
+
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
+  }, 10_000)
 })
 
 // ─── RedisOrderRemover ────────────────────────────────────────────────────────
