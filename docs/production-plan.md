@@ -68,7 +68,8 @@ from `Transfer` events (requirement 1 below).
 ### Phase 2 — Production hardening (~1–2 weeks, parallel with Phase 3)
 
 - ✅ Holder indexing (requirement 1).
-- Graceful shutdown on all services (drain in-flight settlement before exit).
+- ✅ Graceful shutdown on all services (drain in-flight settlement before exit;
+  2026-09-26 — plus `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`).
 - `/health` on order-book-server ✅ (checks Redis) and matching-engine (still none — it
   has no HTTP server; keepers already have one).
 - Retry-and-alert wrapper on funding-keeper (today one RPC hiccup silently skips an

@@ -38,7 +38,7 @@ canonical references below.*
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 222 Vitest tests
+- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 269 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
@@ -187,6 +187,16 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
   assumed) to see real client IPs — see
   `docs/hosted-env-vars.md` for why the hop count matters and how to verify it.
   `buildApp()` is async (the plugin must be registered before routes are declared).
+- **All four services drain on SIGTERM** (every push redeploys them): order-book-server
+  closes Fastify (in-flight requests finish), keepers stop scheduling and wait for an
+  in-flight accrue/flag tx or poll, matching-engine stops matching and waits for the
+  in-flight settlement's receipt AND its Redis cleanup. Bounded by `SHUTDOWN_TIMEOUT_MS`
+  (25s) inside Railway's `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` — keep that ordering.
+  Railway also briefly OVERLAPS old and new deployments, so a pair can be re-matched by
+  the new matching-engine while the old one is still settling it; the chain rejects the
+  replay with `NonceUsed` and the settler reads `usedNonces` to prune only the spent
+  order(s). (Before 2026-09-26 `NonceUsed` wasn't handled, so a kill between a landed
+  settlement and its Redis cleanup left a phantom order re-matched and reverting forever.)
 - **PriceChart derives mark history from consecutive `FundingAccrued` events**
   (mark = ΔcumYES × 365d/Δt) plus a live `currentMark` tail — `setMark` emits no event,
   and `TokensMinted` is 2-arg (an older 4-arg chart ABI silently matched nothing).
