@@ -265,15 +265,32 @@ export class LiquidationKeeper {
 }
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
+//
+// CORS — same rationale as order-book-server: this is a read-only API with no
+// auth/cookies, consumed directly by the frontend's browser fetch(). Without
+// an ACAO header the browser silently blocks the response and the UI falls
+// back to placeholder fixtures even though /claimable itself returns real
+// data. No credentials are used, so a bare wildcard is safe and remains the
+// default.
+//
+// corsOrigins (from CORS_ORIGINS env, parsed by parseCorsOrigins) lets an
+// operator lock this down to an exact allow-list instead: unset/empty ⇒
+// unchanged wildcard behaviour; otherwise only an exact Origin match gets
+// echoed back (with Vary: Origin) and a non-matching/missing Origin gets no
+// ACAO header at all.
 
-export function startServer(keeper: LiquidationKeeper, port: number): http.Server {
+export function startServer(keeper: LiquidationKeeper, port: number, corsOrigins?: string[]): http.Server {
   const server = http.createServer((req, res) => {
-    // Permissive CORS — same rationale as order-book-server: this is a
-    // local dev/demo read-only API with no auth/cookies, consumed directly
-    // by the frontend's browser fetch(). Without this header the browser
-    // silently blocks the response and the UI falls back to placeholder
-    // fixtures even though /claimable itself returns real data.
-    res.setHeader('Access-Control-Allow-Origin', '*')
+    if (!corsOrigins || corsOrigins.length === 0) {
+      res.setHeader('Access-Control-Allow-Origin', '*')
+    } else {
+      const origin = req.headers.origin
+      if (origin && corsOrigins.includes(origin.trim().replace(/\/+$/, ''))) {
+        res.setHeader('Access-Control-Allow-Origin', origin)
+        res.setHeader('Vary', 'Origin')
+      }
+      // no match (or no Origin header) ⇒ omit Access-Control-Allow-Origin entirely
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' })
       res.end()
@@ -346,6 +363,23 @@ export function resolveAddresses(
   return { creditMarketAddress, yesTokenAddress }
 }
 
+// ─── CORS_ORIGINS parsing ──────────────────────────────────────────────────────
+//
+// Mirrors order-book-server's parseCorsOrigins exactly: comma-separated
+// allow-list of exact origins (e.g. "https://credit-prediction-dex.vercel.app,
+// http://localhost:3000"). Unset, empty, or "*" preserves the wildcard
+// default — see startServer's CORS handling above.
+
+export function parseCorsOrigins(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed === '*') return undefined
+  const origins = trimmed.split(',')
+    .map(o => o.trim().replace(/\/+$/, ''))
+    .filter(o => o.length > 0)
+  return origins.length > 0 ? origins : undefined
+}
+
 // ─── Production entry point ───────────────────────────────────────────────────
 
 function main(): void {
@@ -386,7 +420,7 @@ function main(): void {
   )
 
   keeper.start()
-  startServer(keeper, parseInt(process.env.PORT ?? '3003'))
+  startServer(keeper, parseInt(process.env.PORT ?? '3003'), parseCorsOrigins(process.env.CORS_ORIGINS))
 
   console.log('[liq-keeper] started')
 }
