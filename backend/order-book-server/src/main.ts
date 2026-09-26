@@ -8,6 +8,7 @@ import type { AppConfig } from './types'
 import type { IChainReader } from './chain'
 import type { Address } from 'viem'
 import { parseOrderRateLimitMax, parseOrderRateLimitWindowMs, parseTrustProxy } from './rateLimit'
+import { installShutdownHandlers } from './shutdown'
 
 // CREDIT_MARKET_ADDRESS / YES_TOKEN_ADDRESS / CLOB_SETTLEMENT_ADDRESS env vars
 // take precedence over the deployments file, mirroring backend/keepers/*.ts.
@@ -122,6 +123,28 @@ async function main() {
 
   const address = await app.listen({ port: config.port ?? 3001, host: '0.0.0.0' })
   console.log(`Order book server listening at ${address}`)
+
+  // Graceful shutdown: every Railway redeploy sends SIGTERM to this process
+  // (it's PID 1 under the exec-form CMD) — without this, an in-flight
+  // POST /order or DELETE /order/:id is killed mid-request. Order matters:
+  // stop accepting new HTTP work and let in-flight requests finish first
+  // (app.close()), THEN release the resources those requests might still be
+  // using (feeSource's refresh timer, the Redis connection).
+  installShutdownHandlers('order-book-server', [
+    { name: 'fastify', run: () => app.close() },
+    { name: 'fee-source', run: async () => { feeSource.stop() } },
+    {
+      name: 'redis',
+      run: async () => {
+        try {
+          await redis.quit()
+        } catch (err) {
+          console.error('[order-book-server] redis.quit() failed, forcing disconnect:', err)
+          redis.disconnect()
+        }
+      },
+    },
+  ])
 }
 
 main().catch(err => {

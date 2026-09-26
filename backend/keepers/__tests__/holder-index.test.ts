@@ -641,6 +641,76 @@ describe('HolderIndex — backfillRetryMs auto-retry', () => {
   })
 })
 
+// ─── 12b. close() ───────────────────────────────────────────────────────────────
+
+describe('MemoryHolderStore — close()', () => {
+  it('is a no-op that resolves', async () => {
+    const store = new MemoryHolderStore()
+    await expect(store.close()).resolves.toBeUndefined()
+  })
+})
+
+describe('HolderIndex — close()', () => {
+  it('cancels a pending backfill-retry timer — a later tick does not retry', async () => {
+    vi.useFakeTimers()
+    const client = new FakeLogClient(new Map(), 10n)
+    const store = new MemoryHolderStore()
+    const index = new HolderIndex(client, store, baseConfig({ fromBlock: 0n, backfillRetryMs: 1000 }))
+    client.setOverride(async () => { throw new Error('boom') })
+
+    await index.sync()   // fails, schedules a retry timer
+    expect(index.status().lastError).toBe('boom')
+
+    const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout')
+    await index.close()
+    expect(clearTimeoutSpy).toHaveBeenCalled()
+
+    // Advancing time after close() must NOT trigger a retry (timer was cancelled).
+    client.setOverride(async () => [])
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(index.status().backfillComplete).toBe(false)
+  })
+
+  it('awaits an in-flight sync before resolving', async () => {
+    const client = new FakeLogClient(new Map(), 100n)
+    const { promise, resolve } = deferred<ReadonlyArray<{ args: LogEntry }>>()
+    client.setOverride(() => promise)
+    const store = new MemoryHolderStore()
+    const index = new HolderIndex(client, store, baseConfig({ fromBlock: 0n }))
+
+    void index.sync()   // kicks off a sync that blocks on the deferred getLogs
+    await flush()
+
+    let closeResolved = false
+    const closePromise = index.close().then(() => { closeResolved = true })
+    await flush()
+    expect(closeResolved).toBe(false)
+
+    resolve([])
+    await closePromise
+    expect(closeResolved).toBe(true)
+  })
+
+  it('closes the underlying store', async () => {
+    const client = new FakeLogClient(new Map(), 0n)
+    const store = new MemoryHolderStore()
+    const closeSpy = vi.spyOn(store, 'close')
+    const index = new HolderIndex(client, store, baseConfig())
+
+    await index.close()
+
+    expect(closeSpy).toHaveBeenCalledOnce()
+  })
+
+  it('is safe to call with no prior sync and no pending timer', async () => {
+    const client = new FakeLogClient(new Map(), 0n)
+    const store = new MemoryHolderStore()
+    const index = new HolderIndex(client, store, baseConfig())
+
+    await expect(index.close()).resolves.toBeUndefined()
+  })
+})
+
 // ─── 13. RedisHolderStore (fake redis client) ──────────────────────────────────
 
 class FakeRedis {
@@ -673,6 +743,15 @@ class FakeRedis {
     const cur = this.store.get(key)
     if (cur === undefined || BigInt(cur) < BigInt(value)) this.store.set(key, value)
     return 1
+  }
+
+  async quit(): Promise<string> {
+    this.callOrder.push('quit')
+    return 'OK'
+  }
+
+  disconnect(): void {
+    this.callOrder.push('disconnect')
   }
 }
 
@@ -734,5 +813,25 @@ describe('RedisHolderStore', () => {
 
     const { cursor } = await store.load()
     expect(cursor).toBe(100n)
+  })
+
+  it('close() quits the redis connection', async () => {
+    const redis = new FakeRedis()
+    const quitSpy = vi.spyOn(redis, 'quit')
+    const store = new RedisHolderStore(redis as unknown as import('ioredis').default, 'prefix')
+
+    await store.close()
+
+    expect(quitSpy).toHaveBeenCalledOnce()
+  })
+
+  it('close() falls back to disconnect() when quit() rejects', async () => {
+    const redis = new FakeRedis()
+    vi.spyOn(redis, 'quit').mockRejectedValue(new Error('quit failed'))
+    const disconnectSpy = vi.spyOn(redis, 'disconnect')
+    const store = new RedisHolderStore(redis as unknown as import('ioredis').default, 'prefix')
+
+    await expect(store.close()).resolves.toBeUndefined()
+    expect(disconnectSpy).toHaveBeenCalledOnce()
   })
 })

@@ -49,6 +49,8 @@ export interface HolderStore {
   load(): Promise<{ cursor: bigint | null; holders: string[] }>
   /** Persist newly-found holders, THEN advance the cursor (never backwards). */
   commit(newHolders: string[], cursor: bigint): Promise<void>
+  /** Release any underlying resources (e.g. a Redis connection). No-op if none. */
+  close(): Promise<void>
 }
 
 export class MemoryHolderStore implements HolderStore {
@@ -62,6 +64,10 @@ export class MemoryHolderStore implements HolderStore {
   async commit(newHolders: string[], cursor: bigint): Promise<void> {
     for (const h of newHolders) this.holders.add(h)
     if (this.cursor === null || cursor > this.cursor) this.cursor = cursor
+  }
+
+  async close(): Promise<void> {
+    // Nothing to release — in-memory only.
   }
 }
 
@@ -93,6 +99,15 @@ export class RedisHolderStore implements HolderStore {
   async commit(newHolders: string[], cursor: bigint): Promise<void> {
     if (newHolders.length > 0) await this.redis.sadd(this.holdersKey, ...newHolders)
     await this.redis.eval(SET_CURSOR_IF_GREATER, 1, this.cursorKey, cursor.toString())
+  }
+
+  /** Gracefully quits the Redis connection; falls back to a hard disconnect on error. */
+  async close(): Promise<void> {
+    try {
+      await this.redis.quit()
+    } catch {
+      this.redis.disconnect()
+    }
   }
 }
 
@@ -193,6 +208,21 @@ export class HolderIndex {
       lastSyncAt:       this.lastSyncAt?.toISOString() ?? null,
       lastError:        this.lastError,
     }
+  }
+
+  /**
+   * Graceful-shutdown hook: cancels a pending backfill-retry timer, awaits
+   * any sync currently in flight (sync() never throws, so this is always
+   * safe to await directly), then closes the underlying store (releases the
+   * Redis connection for RedisHolderStore; no-op for MemoryHolderStore).
+   */
+  async close(): Promise<void> {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    if (this.inFlight) await this.inFlight
+    await this.store.close()
   }
 
   private async runSync(): Promise<void> {
