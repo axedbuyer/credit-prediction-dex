@@ -32,7 +32,9 @@ from `Transfer` events (requirement 1 below).
    low-balance hot EOAs holding only their operational role. Deployer renounces
    everything.
 3. **Security gate** — Foundry **stateful invariant suite** encoding the 10 root-CLAUDE.md
-   invariants (only parametrized fuzz exists today), Slither clean (✅ first pass
+   invariants (✅ built + mutation-tested 2026-09-26; found F1, a real collateral leak
+   that must be fixed before mainnet — `docs/security/invariant-findings-2026-09-26.md`),
+   Slither clean (✅ first pass
    2026-09-26: 0 real High/Medium — `docs/security/slither-2026-09-26.md`), and an **external
    audit** (see Phase 3). `depositCap` stays in regardless — audited code still launches
    capped; the cap rises with track record.
