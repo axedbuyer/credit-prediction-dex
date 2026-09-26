@@ -38,7 +38,7 @@ canonical references below.*
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 161 Vitest tests
+- **Tests: green.** 98 Foundry tests (`cd contracts && forge test`), 207 Vitest tests
   across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
@@ -173,6 +173,15 @@ inline per-push; the GitHub MCP API is the fallback if that's unavailable.
   holders found so far (plus any `TRACKED_HOLDERS` seeds), and a failed backfill retries
   itself every 30s. Both `/health` endpoints report `holderIndex` status
   (`backfillComplete`, `syncedToBlock`, `lastError`).
+- **funding-keeper's 8-hourly cycle has two independent phases:** accrue, then
+  seizure-check every holder. The check runs even if the accrual failed (it used to be
+  skipped too, leaving an 8h liquidation gap) — against the stored index, since
+  `isSeizable` doesn't include funding pending since `lastFundingTime`. `/health`'s
+  `lastRunAt` still means "last SUCCESSFUL accrual".
+- **order-book-server rate-limits `POST /order` + `DELETE /order/:id` per client IP**
+  (60/min default) and needs `TRUST_PROXY=1` on Railway to see real client IPs — see
+  `docs/hosted-env-vars.md` for why the hop count matters and how to verify it.
+  `buildApp()` is async (the plugin must be registered before routes are declared).
 - **PriceChart derives mark history from consecutive `FundingAccrued` events**
   (mark = ΔcumYES × 365d/Δt) plus a live `currentMark` tail — `setMark` emits no event,
   and `TokensMinted` is 2-arg (an older 4-arg chart ABI silently matched nothing).

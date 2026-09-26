@@ -71,9 +71,10 @@ from `Transfer` events (requirement 1 below).
 - `/health` on order-book-server ✅ (checks Redis) and matching-engine (still none — it
   has no HTTP server; keepers already have one).
 - Retry-and-alert wrapper on funding-keeper (today one RPC hiccup silently skips an
-  epoch cycle).
-- Rate limiting on `POST /order`; CORS origin from env instead of `*` ✅
-  (`CORS_ORIGINS` on order-book-server; liquidation-keeper is still `*`).
+  epoch cycle's accrual — seizure checks now run even when accrual fails, 2026-09-26).
+- ✅ Rate limiting on `POST /order` (+ `DELETE /order/:id`, per client IP,
+  `@fastify/rate-limit`); ✅ CORS origin from env instead of `*` (`CORS_ORIGINS` on
+  order-book-server and liquidation-keeper).
 - Mainnet plumbing: viem `base` chain object in settler/keepers, `deployments/base.json`
   naming convention, foundry.toml `[rpc_endpoints]`/`[etherscan]` `base` entries,
   `deploy-mainnet` Makefile target with a chain-id guard and mainnet USDC constant,
