@@ -57,7 +57,7 @@ export const DEV_YES_FROZEN: DevValues = {
   epochsToExpire: 0n,
   isSeizable:     true,
   claimable:      true,
-  cureCost:       14_550000n, // $14.55 — frozen obligation net of pending NO credit
+  cureCost:       14_550000n, // $14.55 — live owed() net of pending NO credit (a snapshot; grows while locked)
   carryNet:       undefined,
 }
 
@@ -162,7 +162,7 @@ export function PositionCard({
       { address: yesTokenAddress,     abi: ERC20_ABI,         functionName: 'balanceOf',       args: [userAddress] },
       { address: noTokenAddress,      abi: ERC20_ABI,         functionName: 'balanceOf',       args: [userAddress] },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'claimable',      args: [userAddress] },
-      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'frozenFunding',  args: [userAddress] },
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'owed',           args: [userAddress] },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'fundingDebt',    args: [userAddress] },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'currentMark' },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'cumFundingPerNO' },
@@ -181,7 +181,7 @@ export function PositionCard({
   const yesBalance     = (_dev?.yesBalance     ?? data?.[6]?.result) as bigint | undefined
   const noBalance      = (_dev?.noBalance      ?? data?.[7]?.result) as bigint | undefined
   const isClaimable    = (_dev?.claimable      ?? data?.[8]?.result) as boolean | undefined
-  const frozenFunding  = data?.[9]?.result as bigint | undefined
+  const owed           = data?.[9]?.result as bigint | undefined
   const fundingDebt    = data?.[10]?.result as bigint | undefined
   const currentMark    = data?.[11]?.result as bigint | undefined
   const cumFundingPerNO = data?.[12]?.result as bigint | undefined
@@ -206,7 +206,11 @@ export function PositionCard({
       : undefined)
 
   // ── Cure cost (client-side estimate, only meaningful while flagged) ──────────
-  // debit = fundingDebt + frozenFunding × yesBal / 1e18 − pendingNOCredit
+  // debit = owed(user) − pendingNOCredit, clamped at 0. There is no freeze — owed()
+  // is the live obligation (ledger debt + accrual on the current balance projected
+  // to now) and keeps growing every second the position waits to be cured or
+  // claimed, so this estimate goes stale between polls/refetches just like the
+  // unflagged carry preview does.
   // pendingNOCredit = noBal × (projected cumFundingPerNO − snapNO) / 1e18
   const nowSec = BigInt(Math.floor(Date.now() / 1000))
   const elapsed = lastFundingTime !== undefined && nowSec > lastFundingTime ? nowSec - lastFundingTime : 0n
@@ -220,7 +224,7 @@ export function PositionCard({
       ? (noBalance * (projectedCumFundingPerNO > snapNO ? projectedCumFundingPerNO - snapNO : 0n)) / ONE_E18
       : 0n
 
-  const debitRaw = (fundingDebt ?? 0n) + ((frozenFunding ?? 0n) * (yesBalance ?? 0n)) / ONE_E18
+  const debitRaw = owed ?? 0n
   const cureCostRaw = debitRaw > pendingNOCredit ? debitRaw - pendingNOCredit : 0n
   const cureCost = _dev?.cureCost ?? cureCostRaw
   const paddedApproval = cureCost + (cureCost * CURE_PAD_BPS) / 1000n + 1n
@@ -236,8 +240,8 @@ export function PositionCard({
     setCureError('')
     try {
       // Skip the approval step entirely when the client-side estimate shows nothing
-      // due (e.g. pending NO credit already covers the frozen debit) — cure() still
-      // needs calling to clear the flag, but it won't attempt a transferFrom.
+      // due (e.g. pending NO credit already covers owed()) — cure() still needs
+      // calling to clear the flag, but it won't attempt a transferFrom.
       if (cureCost > 0n) {
         const approveHash = await writeContractAsync({
           address: usdcAddress,
@@ -269,7 +273,9 @@ export function PositionCard({
   const { text: pnlText, neg: pnlNeg } = signedWadToPct(pnlRaw)
   const pnlColor = pnlRaw === undefined ? 'text-text-1' : pnlNeg ? 'text-danger' : 'text-success'
 
-  const isFrozen = isYES && isClaimable
+  // Named isLocked, not isFrozen: flagging LOCKS trading/redeeming, but funding
+  // keeps accruing on the position until it's cured or claimed — no accounting freeze.
+  const isLocked = isYES && isClaimable
 
   const carryLabel = carryNet === undefined
     ? null
@@ -280,7 +286,7 @@ export function PositionCard({
   return (
     <div
       className="pari-a-card"
-      style={isFrozen ? { borderColor: 'var(--color-warning)' } : undefined}
+      style={isLocked ? { borderColor: 'var(--color-warning)' } : undefined}
     >
 
       {/* Header */}
@@ -289,8 +295,8 @@ export function PositionCard({
           {sideLabel} position
         </span>
         <div className="flex items-center gap-2">
-          {isFrozen && (
-            <span className="pari-badge pari-badge--warning">Frozen — cure required</span>
+          {isLocked && (
+            <span className="pari-badge pari-badge--warning">Locked — cure required</span>
           )}
           {isYES && creditEventConfirmed && (
             <span className="pari-badge pari-badge--success">Credit event confirmed</span>
@@ -298,19 +304,22 @@ export function PositionCard({
         </div>
       </div>
 
-      {/* Frozen state (YES only) — takes priority over the plain seizable warning */}
-      {isFrozen && (
+      {/* Locked state (YES only) — takes priority over the plain seizable warning.
+          Not "frozen": daily carry keeps accruing while locked, so the cure cost
+          below keeps rising the longer this waits — it is a live quote, not a
+          fixed bill from the moment it was flagged. */}
+      {isLocked && (
         <div className="mb-4 rounded border border-warning/30 bg-warning/10 px-3 py-2.5">
           <p className="mb-1 text-xs font-semibold text-warning">
-            Position frozen — flagged for liquidation
+            Position locked — flagged for liquidation
           </p>
           <p className="mb-2 text-[11px] leading-relaxed text-text-2">
-            Trading and redeeming are locked until this is cured or claimed. Cure now to
-            keep your {sideLabel} and resume normally — you keep the position and pay only
-            the frozen carry owed.
+            Trading and redeeming are locked until this is cured or claimed, and daily
+            carry keeps accruing while you wait — the cure cost below rises the longer
+            you leave it. Cure now to lock in today&rsquo;s cost and keep your {sideLabel}.
           </p>
           <div className="mb-2 flex items-center justify-between text-xs">
-            <span className="text-text-2">Cure cost</span>
+            <span className="text-text-2">Cure cost (live)</span>
             <span className="font-serif tabular text-text-1">{usdcDisplay(cureCost)}</span>
           </div>
           <button

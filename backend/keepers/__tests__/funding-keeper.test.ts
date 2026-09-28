@@ -57,7 +57,7 @@ function defaultReadContract(args: { functionName: string }): Promise<unknown> {
     case 'cumFundingPerNO':         return Promise.resolve(5_000_000_000_000_000n)
     case 'claimable':               return Promise.resolve(false)
     case 'isSeizable':              return Promise.resolve(false)
-    case 'frozenFunding':           return Promise.resolve(0n)
+    case 'owed':                    return Promise.resolve(0n)
     default:                        return Promise.resolve(0n)
   }
 }
@@ -323,7 +323,7 @@ describe('FundingKeeper — seizure checks', () => {
       readContract: ({ functionName }) => {
         if (functionName === 'claimable')   return Promise.resolve(false)
         if (functionName === 'isSeizable')  return Promise.resolve(true)
-        if (functionName === 'frozenFunding') return Promise.resolve(4_500_000_000_000_000n)
+        if (functionName === 'owed')        return Promise.resolve(4_500_000n)
         return defaultReadContract({ functionName })
       },
     })
@@ -444,9 +444,9 @@ describe('FundingKeeper — seizure checks', () => {
 
 describe('FundingKeeper — seizure checks survive an accrual failure', () => {
   const seizableReadContract = ({ functionName }: { functionName: string }): Promise<unknown> => {
-    if (functionName === 'claimable')     return Promise.resolve(false)
-    if (functionName === 'isSeizable')    return Promise.resolve(true)
-    if (functionName === 'frozenFunding') return Promise.resolve(1_000_000n)
+    if (functionName === 'claimable')  return Promise.resolve(false)
+    if (functionName === 'isSeizable') return Promise.resolve(true)
+    if (functionName === 'owed')       return Promise.resolve(1_000_000n)
     return defaultReadContract({ functionName })
   }
 

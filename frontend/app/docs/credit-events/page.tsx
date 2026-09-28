@@ -38,15 +38,15 @@ export default function CreditEventsPage() {
         </li>
         <li>
           <strong>Determination window.</strong> The market can be paused and — always —
-          flagging and liquidation claims are frozen while the motion is pending. Nobody&rsquo;s
+          flagging and liquidation claims are paused while the motion is pending. Nobody&rsquo;s
           Upbet can be seized while its payout is being decided.
         </li>
         <li>
           <strong>Confirmed:</strong> every Upbet redeems for <strong>$1.00</strong> (its
           full backing); every Downbet is worth <strong>$0.00</strong>. Redemption is a
-          one-click settle from the Portfolio page. If your position was frozen pre-event,
-          settlement auto-cures it: the frozen carry bill is deducted from your
-          $1.00-per-Upbet payout.
+          one-click settle from the Portfolio page. If your position was locked
+          pre-event, settlement auto-cures it: the carry bill accrued up to that moment
+          is deducted from your $1.00-per-Upbet payout.
         </li>
         <li>
           <strong>Rejected:</strong> the motion is dismissed, the market unpauses, trading
