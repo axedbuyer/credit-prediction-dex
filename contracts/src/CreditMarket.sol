@@ -36,15 +36,14 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     mapping(address => uint256) public snapNO;          // NO snapshot per holder
     mapping(address => uint256) public fundingDebt;
     mapping(address => uint256) public costBasis;       // 1e18-scaled entry mark (weighted avg)
-    mapping(address => bool)    public claimable;       // true once keeper flags position
-    mapping(address => uint256) public frozenFunding;   // per-unit index delta frozen at flag time
+    mapping(address => bool)    public claimable;       // true once keeper flags position (a lock, not a freeze)
 
     event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
     event YESSettled(address indexed user, uint256 amount);
     event CreditEventTriggered();
     event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp);
-    event FlaggedClaimable(address indexed user, uint256 frozenFundingPerUnit, uint256 timestamp);
+    event FlaggedClaimable(address indexed user, uint256 owedPerUnit, uint256 timestamp);
     event FundingSettled(address indexed user, int256 delta);
     event PositionCured(address indexed user, uint256 amountPaid);
 
@@ -84,15 +83,25 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         emit FundingAccrued(cumulativeFundingPerYES, cumFundingPerNO, block.timestamp);
     }
 
-    function _syncUserFunding(address user) internal {
-        if (claimable[user]) return; // position frozen pending liquidation claim
-        uint256 delta = cumulativeFundingPerYES - fundingSnapshot[user];
-        if (delta > 0) {
-            uint256 balance = IERC20(yesToken).balanceOf(user);
-            fundingDebt[user] += balance * delta / 1e18;
-        }
-        fundingSnapshot[user] = cumulativeFundingPerYES;
-        snapNO[user] = cumFundingPerNO;
+    // Index value as of now, without writing it (views project accrual forward).
+    function _projectedCumYES() internal view returns (uint256) {
+        return cumulativeFundingPerYES + currentMark * (block.timestamp - lastFundingTime) / 365 days;
+    }
+
+    // THE single measure of a holder's YES-side funding obligation, used by the
+    // seizure trigger, the liquidation claim price, cure, and the display layer:
+    // the recorded ledger debt (already net of NO credit at the last settlement)
+    // plus live accrual on the current YES balance since the snapshot. There is no
+    // freeze — a flag only LOCKS the position; accrual continues until it is
+    // claimed, cured, or settled.
+    function owed(address user) public view returns (uint256) {
+        uint256 yesBal = IERC20(yesToken).balanceOf(user);
+        return fundingDebt[user] + yesBal * (_projectedCumYES() - fundingSnapshot[user]) / 1e18;
+    }
+
+    // owed() per unit of YES held (1e18-scaled) — the spec's f_now.
+    function _owedPerUnit(address user, uint256 yesBal) internal view returns (uint256) {
+        return owed(user) * 1e18 / yesBal;
     }
 
     // ─── core ───────────────────────────────────────────────────────────────────
@@ -150,8 +159,6 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // collateral.
     function settleYES(uint256 amount) external nonReentrant {
         if (!creditEventConfirmed) revert CreditEventNotConfirmed();
-        // Read BEFORE settleFunding: settleFunding zeroes frozenFunding but not
-        // claimable itself, so this must be captured before the call.
         bool wasFlagged = claimable[msg.sender];
         int256 delta = settleFunding(msg.sender);
         IRestrictedToken(yesToken).burn(msg.sender, amount);
@@ -165,14 +172,11 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         }
         IERC20(usdc).safeTransfer(msg.sender, usdcOut);
         // Auto-cure: settleYES stays open to flagged holders (never confiscate
-        // protection about to pay), and the freeze-aware settleFunding above already
-        // folded the entire frozen obligation into the payout deduction — the debt is
+        // protection about to pay), and settleFunding above already folded the
+        // holder's entire live obligation into the payout deduction — the debt is
         // fully collected by construction. Clear the flag so a later claim() can't
-        // seize the remaining YES at P=0.
-        if (wasFlagged) {
-            claimable[msg.sender] = false;
-            fundingSnapshot[msg.sender] = cumulativeFundingPerYES;
-        }
+        // seize the remaining YES.
+        if (wasFlagged) claimable[msg.sender] = false;
         emit YESSettled(msg.sender, amount);
     }
 
@@ -188,10 +192,11 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
 
     // ─── v1b display-layer views (1e18-scaled, per unit of YES held) ────────────
 
-    // m − f_now (unsettled per-unit funding since last sync); floors at 0 for display safety.
+    // m − f_now, with f_now = owed() per unit (ledger debt + live accrual); floors at 0.
     function equity(address user) public view returns (uint256) {
-        if (IERC20(yesToken).balanceOf(user) == 0) return 0;
-        uint256 fPerUnit = cumulativeFundingPerYES - fundingSnapshot[user];
+        uint256 yesBal = IERC20(yesToken).balanceOf(user);
+        if (yesBal == 0) return 0;
+        uint256 fPerUnit = _owedPerUnit(user, yesBal);
         return currentMark > fPerUnit ? currentMark - fPerUnit : 0;
     }
 
@@ -202,14 +207,17 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
 
     // Mark needed so that P&L = 0: costBasis + f_now.
     function breakevenMark(address user) public view returns (uint256) {
-        return costBasis[user] + (cumulativeFundingPerYES - fundingSnapshot[user]);
+        uint256 yesBal = IERC20(yesToken).balanceOf(user);
+        if (yesBal == 0) return costBasis[user];
+        return costBasis[user] + _owedPerUnit(user, yesBal);
     }
 
     // Epochs of runway before the seizure trigger fires, holding mark constant.
     // Returns type(uint256).max when already at/past trigger (UI should show "0" / warning).
     function epochsToExpire(address user) public view returns (uint256) {
-        if (IERC20(yesToken).balanceOf(user) == 0) return 0;
-        uint256 fPerUnit = cumulativeFundingPerYES - fundingSnapshot[user];
+        uint256 yesBal = IERC20(yesToken).balanceOf(user);
+        if (yesBal == 0) return 0;
+        uint256 fPerUnit = _owedPerUnit(user, yesBal);
         // m/1.03 via integer arithmetic (*100/103).
         uint256 mDiv103 = currentMark * 100 / 103;
         if (fPerUnit >= mDiv103) return type(uint256).max;
@@ -222,28 +230,32 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // ─── v1b: seizure trigger ────────────────────────────────────────────────────
 
     // Returns true when equity is thin enough to warrant seizure.
-    // Trigger: m <= 1.03 * f_next, where f_next = f_now + one epoch of accrual.
-    // Cost basis is intentionally absent — two holders with the same funding/mark
-    // exposure must be equally seizable regardless of their entry price.
+    // Trigger: m <= 1.03 * f_next, where f_next = f_now + one epoch of accrual and
+    // f_now = owed() per unit — the ledger debt INCLUDED (a trade resets the snapshot
+    // but moves the accrued debit into fundingDebt; ignoring it let any trade reset
+    // the clock). Evaluated in totals (m×Q vs 1.03×(owed + Q×Δf)) to avoid dividing
+    // by the balance. Cost basis is intentionally absent — two holders with the same
+    // funding/mark exposure must be equally seizable regardless of entry price.
     function isSeizable(address user) public view returns (bool) {
-        if (IERC20(yesToken).balanceOf(user) == 0) return false;
-        uint256 fNow   = cumulativeFundingPerYES - fundingSnapshot[user]; // per-unit, 1e18-scaled
-        uint256 m      = currentMark;
-        uint256 deltaF = m * epochLength / 365 days;
-        uint256 fNext  = fNow + deltaF;
-        return m <= (fNext * 103) / 100;
+        uint256 yesBal = IERC20(yesToken).balanceOf(user);
+        if (yesBal == 0) return false;
+        uint256 m          = currentMark;
+        uint256 value      = yesBal * m / 1e18;
+        uint256 nextEpoch  = yesBal * (m * epochLength / 365 days) / 1e18;
+        return value * 100 <= (owed(user) + nextEpoch) * 103;
     }
 
-    // KEEPER_ROLE: flag a seizable position as claimable and freeze its per-unit f_now.
-    // After flagging, _syncUserFunding skips this user — no further accrual until claimed.
+    // KEEPER_ROLE: flag a seizable position as claimable. The flag is a LOCK (no
+    // mint, redeem, or CLOB trade), not an accounting freeze: funding keeps accruing
+    // on the position until it is claimed (priced at claim time from owed()), cured,
+    // or settled after a credit event.
     function flagClaimable(address user) external onlyRole(KEEPER_ROLE) {
         if (motionPending) revert MotionInProgress();
-        if (!isSeizable(user)) revert PositionNotSeizable();
         if (claimable[user]) revert AlreadyFlagged();
-        _accrueFunding(); // update global index before snapshotting frozen value
-        claimable[user]      = true;
-        frozenFunding[user]  = cumulativeFundingPerYES - fundingSnapshot[user];
-        emit FlaggedClaimable(user, frozenFunding[user], block.timestamp);
+        _accrueFunding();
+        if (!isSeizable(user)) revert PositionNotSeizable();
+        claimable[user] = true;
+        emit FlaggedClaimable(user, _owedPerUnit(user, IERC20(yesToken).balanceOf(user)), block.timestamp);
     }
 
     // ORACLE_ROLE: raise or lower the motion-pending flag to freeze liquidation activity
@@ -252,18 +264,20 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         motionPending = pending;
     }
 
-    // LIQUIDATOR_ROLE: called by LiquidationEngine after verifying payment and transfer.
-    // Syncs the liquidator's existing YES position first (no back-funding on seized tokens),
-    // then clears all frozen state for the original holder.
+    // LIQUIDATOR_ROLE: called by LiquidationEngine, which has priced the claim from
+    // owed(originalHolder) in this same block and collects it from the liquidator.
+    // Fully settles the liquidator's EXISTING position first (YES debit and NO
+    // credit, on pre-claim balances), so the seized YES arrives on a fresh snapshot
+    // with no back-funding. A flagged address can't be a liquidator: a flagged
+    // position is fully locked (invariant 10).
     function clearLiquidatedPosition(address originalHolder, address liquidator)
         external
         onlyRole(LIQUIDATOR_ROLE)
     {
-        _accrueFunding();
-        _syncUserFunding(liquidator); // settle liquidator's pre-existing YES debt
+        if (claimable[liquidator]) revert PositionFrozen();
+        settleFunding(liquidator);
 
         claimable[originalHolder]       = false;
-        frozenFunding[originalHolder]   = 0;
         fundingDebt[originalHolder]     = 0;
         fundingSnapshot[originalHolder] = cumulativeFundingPerYES;
         // snapNO[originalHolder] intentionally left untouched: liquidation touches
@@ -291,12 +305,6 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         currentMark = newMark;
     }
 
-    // Called by CLOBSettlement before each trade to capture carry on pre-trade balances.
-    function syncUserFunding(address user) external onlyRole(CLOB_ROLE) {
-        _accrueFunding();
-        _syncUserFunding(user);
-    }
-
     // CLOB_ROLE: clears a user's outstanding fundingDebt ledger entry. Caller must
     // have already routed the equivalent USDC into collateral (e.g. CLOBSettlement's
     // YES-sale seller-debit path, which transfers the debt amount to this contract).
@@ -304,23 +312,22 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         fundingDebt[user] = 0;
     }
 
-    // Flagged holder pays their entire frozen funding obligation (net of any NO-side
-    // credit, per settleFunding's netting) in cash into collateral, the flag clears,
-    // and accrual resumes from now. The holder keeps their YES — economically they act
-    // as their own liquidator, keeping the ~3% sliver a claimant would otherwise earn.
+    // Flagged holder pays their entire live funding obligation (owed(), net of any
+    // NO-side credit, per settleFunding's netting) in cash into collateral and the
+    // flag clears. The holder keeps their YES — economically they act as their own
+    // liquidator, keeping the ~3% sliver a claimant would otherwise earn.
     // No tokenValue cap and no InsuranceFund involvement: in the tail case (debt >
     // token value) curing is voluntarily overpaying; the rational holder lets claim()
     // handle it instead. Intentionally NOT blocked by motionPending — motion freezes
     // only seizures; curing only ever helps the holder.
     function cure() external nonReentrant whenNotPaused {
         if (!claimable[msg.sender]) revert PositionNotFlagged();
-        int256 delta = settleFunding(msg.sender); // freeze-aware: folds frozen debt, nets NO credit
+        int256 delta = settleFunding(msg.sender); // live owed, nets NO credit, resets snapshot
         if (delta < 0) {
             IERC20(usdc).safeTransferFrom(msg.sender, address(this), uint256(-delta));
             fundingDebt[msg.sender] = 0;
         }
         claimable[msg.sender] = false;
-        fundingSnapshot[msg.sender] = cumulativeFundingPerYES; // resume live accrual from now
         emit PositionCured(msg.sender, delta < 0 ? uint256(-delta) : 0);
     }
 
@@ -339,15 +346,10 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // zero it out, or CLOB_ROLE calls markDebtCollected after routing the
     // equivalent USDC into collateral (e.g. the YES-sale seller-debit path).
     //
-    // Freeze-aware (v1b1-2c): if `user` is flagged claimable, the YES side charges
-    // ONLY the funding frozen at flag time (frozenFunding[user]) — never live
-    // accrual since then — and frozenFunding[user] is zeroed once consumed here
-    // (idempotent on repeat calls; the obligation has already flowed into the
-    // debit/noCredit netting below). fundingSnapshot is intentionally NOT advanced
-    // while flagged — it is meaningless during the freeze; whoever un-flags the
-    // position (cure, settleYES, or a liquidation claim) resets it. The NO side is
-    // identical in both branches: live noCredit is always paid, snapNO always
-    // advances — liquidation touches only the YES side, never NO.
+    // No freeze: a flagged holder is charged live accrual exactly like anyone else
+    // (a freeze let the paired NO keep earning credit nobody paid for — see
+    // docs/security/invariant-findings-2026-09-26.md, F1). Flagged positions can't
+    // trade, mint or redeem, so for them this only runs via cure() or settleYES().
     //
     // Returns a signed delta: positive = credit paid OUT to `user` now (from
     // collateral); negative = debit now recorded in fundingDebt[user] (not lost —
@@ -365,15 +367,8 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 yesBal = IERC20(yesToken).balanceOf(user);
         uint256 noBal  = IERC20(noToken).balanceOf(user);
 
-        uint256 yesOwed;
-        if (claimable[user]) {
-            yesOwed = frozenFunding[user] * yesBal / 1e18;
-            frozenFunding[user] = 0;
-            // fundingSnapshot NOT advanced — meaningless while flagged.
-        } else {
-            yesOwed = yesBal * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
-            fundingSnapshot[user] = cumulativeFundingPerYES;
-        }
+        uint256 yesOwed = yesBal * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
+        fundingSnapshot[user] = cumulativeFundingPerYES;
         uint256 noCredit = noBal * (cumFundingPerNO - snapNO[user]) / 1e18;
         snapNO[user] = cumFundingPerNO;
 

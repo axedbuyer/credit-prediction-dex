@@ -8,8 +8,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 interface ICreditMarket {
     function claimable(address user) external view returns (bool);
     function motionPending() external view returns (bool);
-    function frozenFunding(address user) external view returns (uint256);
-    function fundingDebt(address user) external view returns (uint256);
+    function owed(address user) external view returns (uint256);
     function currentMark() external view returns (uint256);
     function yesToken() external view returns (address);
     function usdc() external view returns (address);
@@ -52,43 +51,41 @@ contract LiquidationEngine is ReentrancyGuard {
         insuranceFund = _insuranceFund;
     }
 
-    // Claim a seizure-flagged YES position.
+    // Claim a seizure-flagged YES position, priced at claim time from the holder's
+    // live obligation owed(user) (ledger debt + accrual up to this block — there is
+    // no freeze; accrual continues while a flagged position waits to be claimed).
     //
-    // Normal case (fFrozenTotal ≤ tokenValue):
-    //   Liquidator pays P = fFrozenTotal USDC → to CreditMarket (NO accretion pool).
+    // Normal case (owed ≤ tokenValue):
+    //   Liquidator pays P = owed USDC → to CreditMarket.
     //   Liquidator receives Q YES tokens — the sliver (tokenValue − P) is the liquidator's
     //   profit for executing the seizure; residual is NOT returned to original holder.
+    //   The sliver shrinks the longer the position waits: an incentive to claim fast.
     //
-    // Tail case (fFrozenTotal > tokenValue — mark gap after flag):
+    // Tail case (owed > tokenValue — mark gap, or a claim that waited too long):
     //   Liquidator pays P = tokenValue USDC → to CreditMarket.
-    //   InsuranceFund covers shortfall (fFrozenTotal − tokenValue) → to CreditMarket.
+    //   InsuranceFund covers shortfall (owed − tokenValue) → to CreditMarket.
     //   NO is always made whole regardless of case.
     function claim(address user) external nonReentrant {
         // ── checks ───────────────────────────────────────────────────────────────
         if (!ICreditMarket(creditMarket).claimable(user)) revert NotClaimable();
         if (ICreditMarket(creditMarket).motionPending())  revert MotionPending();
 
-        // ── read frozen state ─────────────────────────────────────────────────────
-        address yesAddr        = ICreditMarket(creditMarket).yesToken();
-        address usdcAddr       = ICreditMarket(creditMarket).usdc();
-        uint256 Q              = IYESToken(yesAddr).balanceOf(user);
-        uint256 m              = ICreditMarket(creditMarket).currentMark();
-        uint256 fFrozenPerUnit = ICreditMarket(creditMarket).frozenFunding(user);
-        uint256 prevDebt       = ICreditMarket(creditMarket).fundingDebt(user);
-
-        // Total USDC owed by user: accumulated debt (from prior syncs) +
-        // per-unit delta since last sync (frozen at flag time) × Q tokens.
-        uint256 fFrozenTotal = prevDebt + fFrozenPerUnit * Q / 1e18;
-        uint256 tokenValue   = Q * m / 1e18;
-        bool    tailCase     = fFrozenTotal > tokenValue;
-        uint256 P            = tailCase ? tokenValue : fFrozenTotal;
+        // ── price from live state (owed() projects accrual to this block) ─────────
+        address yesAddr    = ICreditMarket(creditMarket).yesToken();
+        address usdcAddr   = ICreditMarket(creditMarket).usdc();
+        uint256 Q          = IYESToken(yesAddr).balanceOf(user);
+        uint256 m          = ICreditMarket(creditMarket).currentMark();
+        uint256 owedTotal  = ICreditMarket(creditMarket).owed(user);
+        uint256 tokenValue = Q * m / 1e18;
+        bool    tailCase   = owedTotal > tokenValue;
+        uint256 P          = tailCase ? tokenValue : owedTotal;
 
         // ── effects (clear CreditMarket state — YES side only) ────────────────────
-        // claim() touches ONLY the YES side: the pricing above already read
-        // frozenFunding/fundingDebt directly and is collected via the liquidator's
-        // P payment below. We deliberately do NOT call settleFunding(user) here —
-        // doing so would net the just-priced frozen debt against the holder's
-        // NO-side credit a second time (a double-charge on top of P). The holder's
+        // claim() touches ONLY the YES side: the pricing above already read owed()
+        // and is collected via the liquidator's P payment below. We deliberately do
+        // NOT call settleFunding(user) here — doing so would net the just-priced
+        // debt against the holder's NO-side credit a second time (a double-charge
+        // on top of P). The holder's
         // NO-side credit is untouched: their snapNO is left alone by
         // clearLiquidatedPosition and persists to be collected at their own next
         // touchpoint (redeem, settleYES, a CLOB sale, or a cure). No cash is ever
@@ -102,7 +99,7 @@ contract LiquidationEngine is ReentrancyGuard {
 
         // Tail case: InsuranceFund tops up the shortfall so NO holders are made whole.
         if (tailCase) {
-            uint256 shortfall = fFrozenTotal - tokenValue;
+            uint256 shortfall = owedTotal - tokenValue;
             IInsuranceFund(insuranceFund).coverShortfall(shortfall, creditMarket);
         }
 
