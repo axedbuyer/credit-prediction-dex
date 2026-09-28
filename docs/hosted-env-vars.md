@@ -130,6 +130,31 @@ CORS_ORIGINS=https://credit-prediction-dex.vercel.app,http://localhost:3000
 Health check `GET :3003/health`. Read-only, no private key. NOTE: the process binds
 `process.env.PORT` and Railway injects its own PORT — check the actual listen log line.
 
+## Railway — liquidator-bot (root dir `backend/keepers`, internal-only) — NOT YET CREATED
+
+```
+RAILWAY_DOCKERFILE_PATH=Dockerfile.liquidator-bot
+BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
+CHAIN_ID=84532
+LIQUIDATOR_PRIVATE_KEY=<SECRET — dedicated liquidator hot wallet>
+CREDIT_MARKET_ADDRESS=0x26C3d2E6C29e8E414A4424aa9c9AFa5eFF15F51b
+YES_TOKEN_ADDRESS=0x0228cf2f1BD7F11D07fA3c190F495171D35C85be
+USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+LIQUIDATION_ENGINE_ADDRESS=0x16Be3ac2f3d76f95a86BE961b2fE5B8EFB53c6B5
+INSURANCE_FUND_ADDRESS=0xEDbBF8ffF57198bc44897A519088FE5AcD828aB1
+CLOB_SETTLEMENT_ADDRESS=0xC31702C1C2c41FcCb57446E0fda5091412bccB8e
+ORDER_BOOK_URL=http://<order-book-server private domain>:<port>
+HOLDER_INDEX_FROM_BLOCK=43766743
+REDIS_URL=${{Redis.REDIS_URL}}
+POLL_INTERVAL_MS=30000
+RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
+```
+Optional: `AUTO_SELL` (true), `SELL_MAX_DISCOUNT_BPS` (300), `SELL_ORDER_TTL_SEC` (86400),
+`HEALTH_PORT` (3004). The wallet needs Base Sepolia ETH for gas and a USDC float ≥ the
+largest position it may claim (a claim costs ≤ m×Q); `/health` → `skippedByReason`
+shows `insufficientFloat` / `insuranceFundShortfall` when it can't claim. Update the
+contract addresses here after the CreditMarket-family redeploy.
+
 ## Vercel — frontend (root dir `frontend`)
 
 ```
