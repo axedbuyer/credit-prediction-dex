@@ -239,7 +239,11 @@ list.
    raw EOAs — see "Ops wallets and secrets" above), invariant/fuzz suite + audit (audit
    still deliberately deferred by the owner, not forgotten), credit-event dress
    rehearsal on Sepolia.
-2. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
+2. Stand up the liquidator bot (`backend/keepers/liquidator-bot.ts`, built + E2E-verified
+   on anvil 2026-09-28): a dedicated hot wallet with ETH + a USDC float, then a fourth
+   internal Railway service per `docs/hosted-env-vars.md`. Without it nobody claims
+   flagged positions, and every day a claim stalls past ~12 days costs the InsuranceFund.
+3. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
 
 For redeploying contracts or services after a code change, use `docs/redeploy-guide.md`
 — it captures the dry-run and EIP-712 domain-invalidation gotchas above in runbook form.

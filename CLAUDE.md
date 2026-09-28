@@ -186,6 +186,13 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
                       Both keepers discover YES holders from the token's Transfer
                       events (keepers/holder-index.ts; startup backfill + incremental
                       sync, progress in Redis) — no hand-maintained holder list.
+/liquidator-bot     — (keepers/liquidator-bot.ts) the team's liquidator of last resort:
+                      claims EVERY flagged position promptly, profitable or not
+                      (stalls are what cost the InsuranceFund), simulating first and
+                      alerting on a short float / short InsuranceFund / motion; then
+                      sells the Upbet via clob-seller.ts — crosses the best bid down to
+                      mark − SELL_MAX_DISCOUNT_BPS (3%), else rests an ask at the mark.
+                      Own hot wallet; uses only claim() (works on old + fixed contracts).
 /oracle-monitor     — placeholder for ISDA DC scraper (manual multisig in MVP).
 ```
 
