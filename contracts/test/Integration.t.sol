@@ -475,11 +475,13 @@ contract IntegrationV1bTest is Test {
 
         assertTrue(market.claimable(alice), "alice flagged claimable");
 
-        // No intermediate sync → frozenFunding == full 354-day cumulative per unit.
-        uint256 frozenPerUnit = market.frozenFunding(alice);
-        assertEq(frozenPerUnit, market.cumulativeFundingPerYES(),
-            "frozenFunding == 354-day cumulative (fundingSnapshot was 0 at mint, no mid-sync)");
-        assertGt(frozenPerUnit, 0, "frozen funding non-zero");
+        // No freeze (F1 fix): owed() is live, but no time has elapsed since the
+        // flag yet (no intermediate sync before it either), so it still equals
+        // the full 354-day cumulative x balance here.
+        uint256 owedAtFlag = market.owed(alice);
+        assertEq(owedAtFlag, market.cumulativeFundingPerYES() * NOTIONAL / 1e18,
+            "owed() == 354-day cumulative x balance (fundingSnapshot was 0 at mint, no mid-sync)");
+        assertGt(owedAtFlag, 0, "owed funding non-zero");
 
         // ── 5. Carol claims the flagged position ───────────────────────────
         uint256 aliceYesBefore  = yesToken.balanceOf(alice); // 100e18
@@ -487,8 +489,8 @@ contract IntegrationV1bTest is Test {
         uint256 aliceUsdcBefore = usdc.balanceOf(alice);
         uint256 carolUsdcBefore = usdc.balanceOf(carol);
 
-        // P = prevDebt(0) + frozenPerUnit × Q / 1e18 (normal case: P < tokenValue)
-        uint256 P          = frozenPerUnit * NOTIONAL / 1e18;
+        // P = owed() at claim time (no elapsed time between flag and claim below).
+        uint256 P          = owedAtFlag;
         uint256 tokenValue = NOTIONAL * market.currentMark() / 1e18; // 100 × 0.05 = 5 USDC
         assertLt(P, tokenValue, "pre-claim: funding owed < token value (normal case confirmed)");
 
@@ -515,11 +517,11 @@ contract IntegrationV1bTest is Test {
             "YES supply unchanged (forcedTransfer, not burn)");
 
         // (e) NO accretion: noFundingCredit(bob) == P
-        //     P   = frozenPerUnit × 100e18 / 1e18 = frozenPerUnit × 100
+        //     P = owed(alice) at claim time = 100e18 × cumulativeFundingPerYES / 1e18
         //     noFundingCredit(bob) = 100e18 × (cumFundingPerNO − snapNO[bob]) / 1e18
         //       where snapNO[bob] = 0 (set at initial CLOB trade when cumFundingPerNO = 0)
-        //     Since cumFundingPerNO == frozenPerUnit (no time elapsed between flag and claim),
-        //     both equal frozenPerUnit × 100. ✓
+        //     Since cumFundingPerNO == cumulativeFundingPerYES (no time elapsed between
+        //     flag and claim), both equal the same total. ✓
         assertEq(market.noFundingCredit(bob), P,
             "bob noFundingCredit == P (liquidator payment replenishes NO accretion pool)");
 
@@ -654,5 +656,112 @@ contract IntegrationV1bTest is Test {
                       + usdc.balanceOf(bob)
                       + usdc.balanceOf(address(market));
         assertEq(total, 2_000e18, "USDC conservation: total unchanged");
+    }
+
+    // ─── F4 regression + owed() coverage (2026-09-26 fix) ──────────────────────
+    //
+    // docs/security/invariant-findings-2026-09-26.md, F4: any CLOB trade calls
+    // settleFunding on both parties, which folds the trader's accrued YES debit
+    // into fundingDebt and resets fundingSnapshot to now. The OLD isSeizable read
+    // only (cumulativeFundingPerYES - fundingSnapshot), so that reset made a YES
+    // holder's position look perpetually healthy even as real debt piled up in
+    // the ledger. owed() folds fundingDebt back in everywhere (trigger, claim,
+    // cure, display layer), closing the gap.
+
+    // A real CLOB buy (not just a second mint) resets alice's snapshot; owed()
+    // must still cross the seizure trigger once enough time passes afterward.
+    function test_F4_CLOBBuyResetsSnapshot_ButOwedStillTriggersSeizure() public {
+        vm.prank(alice);
+        market.mint(NOTIONAL); // 100 YES + 100 NO
+
+        // Alice becomes a pure YES holder (sells her NO to Bob).
+        uint256 expiry0 = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory a0 = _order(
+            alice, address(noToken), address(usdc), NOTIONAL, NOTIONAL, expiry0, 0
+        );
+        CLOBSettlement.Order memory b0 = _order(
+            bob, address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry0, 0
+        );
+        clob.verifyAndSettle(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0));
+
+        // 300 days: not yet seizable at 5% mark (~354-day runway).
+        vm.warp(block.timestamp + 300 days);
+        market.accrueFunding();
+        assertFalse(market.isSeizable(alice), "not seizable yet at 300 days");
+
+        // Alice buys a tiny amount of NO back from Bob — a real CLOB trade that
+        // runs settleFunding(alice), folding her accrued YES debit into
+        // fundingDebt[alice] and resetting fundingSnapshot[alice] to now.
+        uint256 tinyAmt = 1e18;
+        uint256 expiry1 = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory b1 = _order(
+            bob, address(noToken), address(usdc), tinyAmt, tinyAmt, expiry1, 1
+        );
+        CLOBSettlement.Order memory a1 = _order(
+            alice, address(usdc), address(noToken), tinyAmt, tinyAmt, expiry1, 1
+        );
+        clob.verifyAndSettle(b1, _sign(bobKey, b1), a1, _sign(aliceKey, a1));
+
+        assertGt(market.fundingDebt(alice), 0, "the trade folded the debit into fundingDebt");
+        assertEq(market.fundingSnapshot(alice), market.cumulativeFundingPerYES(),
+            "the trade reset alice's YES snapshot to now");
+
+        // 300 MORE days pass. Under the OLD bug, isSeizable would read only
+        // (cumulativeFundingPerYES - fundingSnapshot), which the trade just reset
+        // to ~0 -- the position would look perpetually healthy forever.
+        vm.warp(block.timestamp + 300 days);
+        market.accrueFunding();
+
+        assertTrue(market.isSeizable(alice),
+            "F4 fix: owed() includes fundingDebt, so the trade-reset snapshot cannot hide the debt");
+
+        vm.prank(keeper);
+        market.flagClaimable(alice); // must NOT revert PositionNotSeizable
+        assertTrue(market.claimable(alice), "flagClaimable succeeds once owed() crosses the trigger");
+    }
+
+    // owed() must equal fundingDebt[user] + live accrual on the current YES
+    // balance since the (possibly just-reset) snapshot — the single source of
+    // truth used by the trigger, claim price, cure, and the display layer.
+    function test_Owed_EqualsFundingDebtPlusLiveAccrual_AfterCLOBBuyResetsSnapshot() public {
+        vm.prank(alice);
+        market.mint(NOTIONAL); // 100 YES + 100 NO
+
+        uint256 expiry0 = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory a0 = _order(
+            alice, address(noToken), address(usdc), NOTIONAL, NOTIONAL, expiry0, 0
+        );
+        CLOBSettlement.Order memory b0 = _order(
+            bob, address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry0, 0
+        );
+        clob.verifyAndSettle(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0));
+
+        vm.warp(block.timestamp + 100 days);
+        market.accrueFunding();
+
+        // A CLOB buy resets alice's snapshot and moves her pre-trade debit into fundingDebt.
+        uint256 tinyAmt = 1e18;
+        uint256 expiry1 = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory b1 = _order(
+            bob, address(noToken), address(usdc), tinyAmt, tinyAmt, expiry1, 1
+        );
+        CLOBSettlement.Order memory a1 = _order(
+            alice, address(usdc), address(noToken), tinyAmt, tinyAmt, expiry1, 1
+        );
+        clob.verifyAndSettle(b1, _sign(bobKey, b1), a1, _sign(aliceKey, a1));
+
+        uint256 debtAfterTrade = market.fundingDebt(alice);
+        assertGt(debtAfterTrade, 0, "trade recorded a ledger debit");
+        assertEq(market.owed(alice), debtAfterTrade,
+            "owed() == fundingDebt right after the trade (snapshot just reset, zero live accrual yet)");
+
+        // More time passes -> owed() must equal ledger debt PLUS fresh live accrual.
+        vm.warp(block.timestamp + 50 days);
+        market.accrueFunding();
+
+        uint256 yesBal = yesToken.balanceOf(alice);
+        uint256 liveAccrual = yesBal * (market.cumulativeFundingPerYES() - market.fundingSnapshot(alice)) / 1e18;
+        assertEq(market.owed(alice), debtAfterTrade + liveAccrual,
+            "owed() == fundingDebt + live accrual on current YES balance since the reset snapshot");
     }
 }

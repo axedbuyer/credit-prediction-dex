@@ -24,7 +24,7 @@ contract MockUSDC is ERC20 {
 //
 // Three top-level scenarios:
 //   1. Normal case — steps 1-5 from the spec
-//   2. Tail case   — frozenFunding > tokenValue at flag time; InsuranceFund covers shortfall
+//   2. Tail case   — owed() > tokenValue at flag time; InsuranceFund covers shortfall
 //   3. Cost-basis independence — negative-MTM holder and at-par holder trigger identically
 contract V1bSmokeTest is Test {
     MockUSDC      usdc;
@@ -90,19 +90,20 @@ contract V1bSmokeTest is Test {
 
     // ─── helper ───────────────────────────────────────────────────────────────
 
-    // Returns the total USDC owed for a flagged position (prevDebt + per-unit × Q).
+    // Returns the total live USDC owed for a (possibly flagged) position.
+    // UPDATED (F1 fix): there is no frozenFunding anymore -- owed() keeps
+    // accruing live even while flagged, so this must be read at the exact point
+    // a caller needs the claim price (right before claim(), since any warp in
+    // between changes the answer).
     function _fFrozenTotal(address holder) internal view returns (uint256) {
-        uint256 Q        = yes.balanceOf(holder);
-        uint256 perUnit  = market.frozenFunding(holder);
-        uint256 prevDebt = market.fundingDebt(holder);
-        return prevDebt + perUnit * Q / 1e18;
+        return market.owed(holder);
     }
 
     // ─── Smoke test 1: Normal case, steps 1-5 ────────────────────────────────
     //
     // 1. Alice mints at 5%; Bob mints the matching NO.
     // 2. Warp time: verify isSeizable false at 353 d, true at 354 d (worked example).
-    // 3. flagClaimable(Alice): confirm frozenFunding == yesFundingOwed at flag time.
+    // 3. flagClaimable(Alice): confirm owed() == yesFundingOwed at flag time.
     // 4. Carol calls LiquidationEngine.claim(Alice).
     // 5. Assert: Carol holds Alice's YES; Alice.YES=0; Alice USDC unchanged;
     //    Bob.NO unchanged; noFundingCredit(Bob) == P; totalSupply invariant.
@@ -136,7 +137,7 @@ contract V1bSmokeTest is Test {
         // so the formula returns 0 (no full epochs remain) rather than max.
         assertEq(market.epochsToExpire(alice), 0, "epochsToExpire = 0 at trigger boundary");
 
-        // ── Step 3: flag and verify frozenFunding == yesFundingOwed ──────────
+        // ── Step 3: flag and verify owed() == yesFundingOwed at flag time ─────
         // Capture before flagging; flagClaimable calls _accrueFunding() with elapsed=0
         // (same block), so the global index doesn't move.
         uint256 yesOwedAtFlag = market.yesFundingOwed(alice);
@@ -146,19 +147,19 @@ contract V1bSmokeTest is Test {
 
         assertTrue(market.claimable(alice),  "alice must be claimable after flag");
 
-        uint256 Q        = yes.balanceOf(alice);        // 1000e18 (unchanged)
-        uint256 fPerUnit = market.frozenFunding(alice); // per-unit index delta
-        uint256 prevDebt = market.fundingDebt(alice);   // 0 — no prior intermediate syncs
-        uint256 fFrozen  = prevDebt + fPerUnit * Q / 1e18;
+        uint256 Q       = yes.balanceOf(alice); // 1000e18 (unchanged)
+        uint256 fFrozen = market.owed(alice);   // UPDATED: no frozenFunding -- owed() is live, but
+                                                 // no time has elapsed since the flag yet, so it
+                                                 // still equals the flag-time value here.
 
         assertEq(fFrozen, yesOwedAtFlag,
-            "fFrozenTotal must equal yesFundingOwed at flag time");
+            "owed() must equal yesFundingOwed at flag time (no elapsed time yet)");
 
         // Normal case: funding owed < token value (3% buffer not yet fully eroded)
         uint256 tokenValue = Q * market.currentMark() / 1e18;
         assertLt(fFrozen, tokenValue,
-            "normal case: fFrozenTotal must be less than tokenValue");
-        uint256 P = fFrozen; // normal case: P = fFrozenTotal
+            "normal case: owed() must be less than tokenValue");
+        uint256 P = fFrozen; // normal case: P = owed()
 
         // Bob holds 1000 NO, started at index=0 (same as alice's fundingSnapshot).
         // His noFundingCredit should equal exactly P because both indices and balances match.
@@ -208,10 +209,10 @@ contract V1bSmokeTest is Test {
     // ─── Smoke test 2: Tail case ──────────────────────────────────────────────
     //
     // Steps 1-4 repeated but with a forced tail case: warp far enough that
-    // fFrozenTotal > tokenValue AT FLAG TIME (no post-flag mark manipulation).
+    // owed() > tokenValue AT FLAG TIME (no post-flag mark manipulation).
     // At 5% mark: after 365 days f_now ≈ m; after 370 days f_now > m → tail case.
     // InsuranceFund must cover the shortfall; Bob's NO must still be fully made whole.
-    function test_smoke_02_tailCase_frozenFundingExceedsTokenValueAtFlag() public {
+    function test_smoke_02_tailCase_owedExceedsTokenValueAtFlag() public {
         vm.prank(alice); market.mint(MINT_AMT);
         vm.prank(bob);   market.mint(MINT_AMT);
 
@@ -326,9 +327,10 @@ contract V1bSmokeTest is Test {
         assertTrue(market.claimable(alice), "alice must be claimable");
         assertTrue(market.claimable(dave),  "dave must be claimable");
 
-        // frozenFunding per unit is identical (same fundingSnapshot = 0, same cumFunding)
-        assertEq(market.frozenFunding(alice), market.frozenFunding(dave),
-            "frozenFunding per unit must be identical for both holders");
+        // owed() is identical for both (same balance, same fundingSnapshot = 0,
+        // same cumFunding, zero fundingDebt for both -- cost basis plays no part).
+        assertEq(market.owed(alice), market.owed(dave),
+            "owed() must be identical for both holders (cost basis has zero effect)");
 
         // Complete-set invariant holds after flagging both
         assertEq(yes.totalSupply(), no.totalSupply(),
