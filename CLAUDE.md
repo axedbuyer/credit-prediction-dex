@@ -72,7 +72,7 @@ directory-specific stack notes; this root doc is the canonical product/economics
 
 ```
 CreditMarket.sol      — mints/burns YES+NO, holds USDC collateral, funding accrual/ledger,
-                        seizure trigger, freeze/cure, pause
+                        seizure trigger, flag-lock/cure, pause
 YESToken.sol          — ERC-20, minted by CreditMarket; transfer restricted to CLOB_ROLE
 NOToken.sol           — ERC-20, minted by CreditMarket; transfer restricted to CLOB_ROLE
 CLOBSettlement.sol    — validates EIP-712 orders, atomically swaps tokens ↔ USDC, settles
@@ -179,8 +179,8 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
                       and prunes the offending order(s) instead of retrying (other reverts
                       keep the retry behavior). Wires the settler when SETTLER_PRIVATE_KEY +
                       BASE_SEPOLIA_RPC_URL are set (log-only fallback otherwise).
-/funding-keeper     — accrueFunding() every epoch; flags + freezes f_now for any
-                      position breaching the seizure trigger.
+/funding-keeper     — accrueFunding() every epoch; flags (locks) any position
+                      breaching the seizure trigger.
 /liquidation-keeper — exposes GET /claimable (flagged positions + formulaic price P);
                       does not claim itself — claiming is permissionless.
                       Both keepers discover YES holders from the token's Transfer
@@ -206,11 +206,10 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
     NEXT_PUBLIC_FEE_BPS is only a preview fallback) — NO-buy signing is blocked until
     the live rate has loaded.
   PositionCard — Cost Basis, Equity, P&L, Breakeven Mark; YES adds Epochs To Expire with
-    a warning as it nears zero. A distinct frozen panel shows a client-side cure-cost
-    estimate (fundingDebt + frozenFunding×yesBal/1e18 minus pending NO credit — NOT
-    previewFunding, which isn't freeze-aware) plus approve→cure(); redeem disabled while
-    frozen, settleYES stays enabled.
-  LiquidationCard — no discount ticker (price is fixed by formula) — just P + Claim
+    a warning as it nears zero. A distinct flagged panel shows a client-side cure-cost
+    estimate (owed(user) minus pending NO credit — it keeps growing until cured or
+    claimed) plus approve→cure(); redeem disabled while flagged, settleYES stays enabled.
+  LiquidationCard — no discount ticker (P = min(owed, m×Q) from live state) — just P + Claim
 ```
 
 `lib/creditMarketAbi.ts` is the shared CreditMarket/ERC20 ABI plus a `netFundingDebit`
@@ -233,8 +232,9 @@ keeps paying (a liquidator), never by burning it unilaterally.
 
 ```
 Cost Basis (c)        = entry mark (the mark at which YES was bought)
-Equity (E)             = m − f_now              // m = current mark, f_now = funding
-                                                  // accrued per unit since entry
+Equity (E)             = m − f_now              // m = current mark, f_now = owed(user)
+                                                  // per unit: fundingDebt ledger + live
+                                                  // accrual since the snapshot
 P&L                    = E − c = (m − c) − f_now
 Breakeven Mark         = c + f_now               // mark needed for P&L = 0
 Epochs To Expire (YES) = floor( (m/1.03 − f_now) / Δf ),  Δf = m × Δt/365
@@ -249,9 +249,16 @@ Implemented as `equity`, `pnl`, `breakevenMark`, `epochsToExpire` views on `Cred
 ### Seizure trigger (solvency-based, cost-basis-independent)
 
 ```
+f_now  = owed(user) / Q                      // owed = fundingDebt + Q × (cumYES − snapshot)
 f_next = f_now + m × Δt/365                  // funding owed after one more epoch
 Seize when:  m ≤ 1.03 × f_next               // 3% buffer, evaluated one epoch ahead
 ```
+
+`f_now` MUST include the `fundingDebt` ledger: every CLOB trade (buyer included) moves
+accrued debit into `fundingDebt` and resets the snapshot, so a snapshot-only f_now lets any
+trade reset the liquidation clock (finding F4, fixed 2026-09-26). `owed(user)` is the single
+definition of the YES-side obligation — the trigger, the claim price, cure and the display
+layer all use it.
 
 Implemented as `CreditMarket.isSeizable(user)`. This keys on **equity remaining relative to
 token value**, never on P&L or cost basis. A holder deep underwater on the mark but current
@@ -262,45 +269,53 @@ equally liquidatable, or one gets a free option at the other's (and NO's) expens
 buffer doubles as the liquidator's profit margin — the incentive that makes someone actually
 claim the position.
 
-**Freeze semantics:** once flagged (`CreditMarket.flagClaimable`, KEEPER_ROLE), the position
-is fully locked — no `mint()`, no `redeem()`, no CLOB trade on either side (all revert
-`PositionFrozen`). YES-side funding is frozen at the flagged value (`frozenFunding[user]`,
-no live accrual while flagged). The only exits are a liquidation claim
-(`LiquidationEngine.claim`), `cure()` (the holder pays the frozen obligation in cash, keeps
-the YES and the ~3% sliver a claimant would otherwise earn, and accrual resumes from now),
-or `settleYES` after a credit event (which auto-cures, collecting the frozen debt from the
-payout before clearing the flag).
+**Flag semantics (a lock, not a freeze):** once flagged (`CreditMarket.flagClaimable`,
+KEEPER_ROLE), the position is fully locked — no `mint()`, no `redeem()`, no CLOB trade on
+either side (all revert `PositionFrozen`), and it can't act as a liquidator. Funding keeps
+accruing: there is NO accounting freeze (a freeze let the paired NO keep earning credit
+nobody paid for — finding F1). The only exits are a liquidation claim
+(`LiquidationEngine.claim`), `cure()` (the holder pays the live `owed()` in cash net of NO
+credit, keeps the YES and the sliver a claimant would otherwise earn), or `settleYES` after
+a credit event (which auto-cures, collecting `owed()` from the payout before clearing the
+flag).
 
 ### Liquidation math (formulaic, no Dutch auction)
 
-When the trigger fires, the keeper flags the position claimable and **freezes its funding
-accrual** — f_now is locked at the flagging value, so the price formula stays deterministic.
+When the trigger fires, the keeper flags (locks) the position. The claim is priced at
+CLAIM time from live state — deterministic within the claiming block:
 
 ```
-At flag time: f_now = funding owed, frozen; m = current mark (token value per unit).
+At claim time: owed = owed(user) (ledger + accrual to this block); m = current mark.
 
-Claim (anyone, first to call — no auction, no discount ramp): P = min(f_now, m)
+Claim (anyone, first to call — no auction, no discount ramp): P = min(owed, m × Q)
 
-  NORMAL CASE (f_now ≤ m — expected, given the 3% buffer):
-    Liquidator pays P = f_now USDC → into collateral (NO made whole, untouched).
+  NORMAL CASE (owed ≤ m×Q — expected when claimed promptly, given the 3% buffer):
+    Liquidator pays P = owed USDC → into collateral (NO made whole, untouched).
     YES token TRANSFERS to liquidator (NOT burned); liquidator's funding snapshot resets
       to now — fresh start, inherits full value m, owes no back-funding.
     Residual (m − P ≈ 0.03×m) is NOT returned to the original holder — it is the
       liquidator's profit for executing the seizure (they resell the YES for ≈ m).
 
-  TAIL CASE (f_now > m — keeper downtime / mark gap caused a missed window):
-    Liquidator pays P = m (full token value) → into collateral.
-    InsuranceFund tops up the shortfall (f_now − m) → into collateral, so NO is ALWAYS
-      made whole. YES still transfers to liquidator at P = m (fair — full value paid).
+  TAIL CASE (owed > m×Q — mark gap, keeper downtime, or a claim that waited too long):
+    Liquidator pays P = m×Q (full token value) → into collateral.
+    InsuranceFund tops up the shortfall (owed − m×Q) → into collateral, so NO is ALWAYS
+      made whole. YES still transfers to liquidator at P = m×Q (fair — full value paid).
 ```
+
+**Stall economics:** the claimer's margin (`m×Q − owed`) starts at ≈3.2% of `m×Q` (the 3%
+buffer plus the one-epoch look-ahead, less keeper lag) and shrinks by one day of carry
+(`m×Q/365` ≈ 0.27% of `m×Q`) per day unclaimed, so at a constant mark a position crosses
+into the tail case ≈11–12 days after flagging; a falling mark gets there sooner. From then
+on every further day of stall costs the InsuranceFund one day of carry — paid only when
+someone finally claims. Stalls are an operational risk: run a claiming liquidator bot.
 
 **Claim touches ONLY the YES side:** the holder's NO-side credit is NOT netted, paid out, or
 forfeited during a claim — `snapNO` is untouched and pays out at their own next settlement
 touchpoint. No USDC is ever pushed to the original holder inside `claim()` (pull-over-push).
 
 **Not "sold at zero":** the YES token is *transferred*, not burned — it still carries full
-value `m`. Paying zero would short NO the funding already promised to it; `P = f_now` settles
-that promise, and the liquidator's profit is only the buffer sliver (`m − f_now`) — the same
+value `m`. Paying zero would short NO the funding already promised to it; `P = owed` settles
+that promise, and the liquidator's profit is only the buffer sliver (`m×Q − owed`) — the same
 sliver a seller keeps on a normal CLOB sale, just redirected to whoever performs the seizure.
 
 ### Funding settlement points (unified per-user `settleFunding` + `fundingDebt` ledger)
@@ -320,8 +335,9 @@ third party's fill.
 ```
 mint/redeem/settleYES: settleFunding(user) — credit paid out, debit folds into/out of
                         fundingDebt against the payout (zeroed on redeem/settleYES)
-liquidation:            LiquidationEngine.claim prices P from fundingDebt[user] +
-                        frozenFunding × Q (see Liquidation math)
+liquidation:            LiquidationEngine.claim prices P = min(owed(user), m×Q) at
+                        claim time; the liquidator is settleFunding'd first (its own
+                        NO credit paid, YES debit recorded) (see Liquidation math)
 
 CLOB sale — NO side (seller selling NO): settleFunding(seller) nets full position —
   net credit paid in cash immediately (fundingDebt zeroed); net debit recorded in
@@ -357,8 +373,9 @@ on-chain check is the backstop; this filter is pure UX.
 2. Negative MTM is NEVER a liquidation trigger by itself — only equity-vs-mark matters.
 3. YES tokens are NEVER burned in liquidation — only TRANSFERRED. Complete-set invariant
    (YES.totalSupply() == NO.totalSupply()) must hold before and after every liquidation.
-4. NO holders are ALWAYS made whole on a liquidation — P = f_now in the normal case,
-   topped up by InsuranceFund in the tail case. NO is never haircut.
+4. NO holders are ALWAYS made whole on a liquidation — P = owed in the normal case,
+   topped up by InsuranceFund in the tail case. NO is never haircut, and collateral always
+   backs every outstanding pair (no accounting freeze may break this — F1).
 5. FREEZE all flagging and claims during a pending credit-event motion (motionPending).
    Never seize someone's protection at a discount moments before it could pay.
 6. Liquidation claims are permissionless and first-come — no single liquidator is
@@ -376,23 +393,16 @@ on-chain check is the backstop; this filter is pure UX.
 9. A net funding debit recorded in `fundingDebt` is NEVER erased without the equivalent
    USDC landing in (or staying in) collateral — snapshots may advance, but debt persists
    until collected.
-10. A flagged (claimable) position is fully locked — no mint, redeem, or CLOB trade on
-    either side — and its YES-side funding is frozen at the flagged value. The only exits
-    are claim(), cure(), or post-credit-event settleYES. Liquidation itself touches ONLY
-    the YES side: the holder's NO-side credit survives a claim untouched.
+10. A flagged (claimable) position is fully locked — no mint, redeem, CLOB trade on
+    either side, or acting as a liquidator — while its funding keeps accruing (owed() is
+    non-decreasing while flagged). The only exits are claim(), cure(), or
+    post-credit-event settleYES. Liquidation itself touches ONLY the YES side: the
+    holder's NO-side credit survives a claim untouched.
 ```
 
-**Open findings (2026-09-26) — contract fix + redeploy pending,**
-`docs/security/invariant-findings-2026-09-26.md`:
-- **F4 (HIGH):** `isSeizable` ignores the `fundingDebt` ledger, and any CLOB buy resets
-  the snapshot it does read — so a YES holder can owe more than the position is worth and
-  never be flagged or liquidated (carry-free protection). Violates the trigger spec.
-- **F1 (MEDIUM):** freezing a flagged holder's YES funding while the paired NO keeps
-  accruing live credit leaks collateral (invariant 4) and gives the holder a free option.
-- **F2 (LOW):** a liquidator's own accrued NO credit is forfeited on claim.
-Recommended fix: one live `owed(user)` used by trigger, claim price and cure; drop the
-accounting freeze. The invariant suite (`contracts/test/invariant/`) models F1/F2
-explicitly and has a repro test per finding until fixed.
+**Findings fixed in source 2026-09-26, NOT YET REDEPLOYED** (Base Sepolia still runs the
+old contracts): F4 (trigger ignored the ledger), F1 (flag froze accounting), F2 (liquidator
+NO credit forfeited) — `docs/security/invariant-findings-2026-09-26.md`.
 
 ### What stays true across model iterations
 
