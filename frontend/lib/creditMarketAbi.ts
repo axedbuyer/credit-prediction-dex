@@ -41,7 +41,7 @@ export const CREDIT_MARKET_ABI = [
     outputs: [{ name: '', type: 'bool' }],
   },
   {
-    name: 'frozenFunding',
+    name: 'owed',
     type: 'function',
     stateMutability: 'view',
     inputs: [{ name: '', type: 'address' }],

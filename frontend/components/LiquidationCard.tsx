@@ -25,10 +25,12 @@ const LIQUIDATION_ENGINE_ABI = [
 export interface ClaimablePosition {
   user: string         // holder address
   notional: string     // YES token balance, 6-decimal, as bigint string
-  frozenFunding: string // total funding owed at flag time, 6-decimal
+  owed: string         // owed(user) at poll time, 6-decimal — NOT fixed at flag time;
+                        // grows every second the position waits to be claimed, so this
+                        // (and claimPrice below) is a live quote that changes between polls
   tokenValue: string   // Q × currentMark / WAD, 6-decimal
-  claimPrice: string   // min(frozenFunding, tokenValue), 6-decimal
-  tailCase: boolean    // frozenFunding > tokenValue — insurance fund tops up
+  claimPrice: string   // min(owed, tokenValue), 6-decimal
+  tailCase: boolean    // owed > tokenValue — insurance fund tops up
   frozen: boolean      // true when motionPending — claim() will revert
   frozenReason?: string
 }
@@ -197,28 +199,28 @@ function BStat({
 export const DEV_POSITIONS: ClaimablePosition[] = [
   {
     user: '0xDeAdBeEf00000000000000000000000000000001',
-    notional:      '500000000',   // 500 YES tokens (6-dec)
-    frozenFunding: '14550000',    // $14.55
-    tokenValue:    '15000000',    // $15.00 (mark ≈ 3%)
-    claimPrice:    '14550000',    // normal case: P = frozenFunding
+    notional:   '500000000',   // 500 YES tokens (6-dec)
+    owed:       '14550000',    // $14.55
+    tokenValue: '15000000',    // $15.00 (mark ≈ 3%)
+    claimPrice: '14550000',    // normal case: P = owed
     tailCase: false,
     frozen: false,
   },
   {
     user: '0xDeAdBeEf00000000000000000000000000000002',
-    notional:      '1000000000',  // 1,000 YES tokens
-    frozenFunding: '31200000',    // $31.20 (tail: funded > mark)
-    tokenValue:    '30000000',    // $30.00
-    claimPrice:    '30000000',    // tail case: P = tokenValue
+    notional:   '1000000000',  // 1,000 YES tokens
+    owed:       '31200000',    // $31.20 (tail: owed > mark)
+    tokenValue: '30000000',    // $30.00
+    claimPrice: '30000000',    // tail case: P = tokenValue
     tailCase: true,
     frozen: false,
   },
   {
     user: '0xDeAdBeEf00000000000000000000000000000003',
-    notional:      '200000000',   // 200 YES tokens
-    frozenFunding: '5820000',     // $5.82
-    tokenValue:    '6000000',     // $6.00
-    claimPrice:    '5820000',
+    notional:   '200000000',   // 200 YES tokens
+    owed:       '5820000',     // $5.82
+    tokenValue: '6000000',     // $6.00
+    claimPrice: '5820000',
     tailCase: false,
     frozen: true,
     frozenReason: 'credit event under review',
