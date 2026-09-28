@@ -17,8 +17,20 @@ import {Handler, MockUSDC} from "./Handler.sol";
 /// section against the REAL deployed contracts (contracts/src/*.sol), driven by
 /// Handler.sol over a small fixed actor set. See docs/security/slither-2026-09-26.md
 /// "Not covered by Slither" — this suite exists specifically to close that gap
-/// ("fundingDebt/frozenFunding ledger correctness across all settlement paths...
-/// this remains squarely a testing/fuzzing/formal-methods concern").
+/// ("fundingDebt ledger correctness across all settlement paths... this remains
+/// squarely a testing/fuzzing/formal-methods concern").
+///
+/// ── Post-fix (docs/security/invariant-findings-2026-09-26.md) ──
+///
+/// `owed(user) = fundingDebt + yesBal * (cumYES - fundingSnapshot) / 1e18` is now the
+/// SINGLE funding obligation, used everywhere (trigger, claim price, cure, display).
+/// `frozenFunding` and the `_syncUserFunding`/`syncUserFunding` accounting-freeze path
+/// are gone: a flag is a pure LOCK — funding keeps accruing live on a flagged position
+/// exactly like an unflagged one. This closes F1 (frozen-YES/live-NO collateral leak)
+/// and F4 (a CLOB trade resetting the seizure clock while ledger debt grows unseen) at
+/// the root — there is no compensation term left to carry in the solvency formula, and
+/// the seizure trigger reads live, ledger-inclusive `owed()` so a trade can no longer
+/// hide debt from it.
 ///
 /// ── The flagship invariant: Collateral Solvency (invariant_CollateralSolvencyPreEvent) ──
 ///
@@ -28,19 +40,20 @@ import {Handler, MockUSDC} from "./Handler.sol";
 ///   usdc.balanceOf(market)
 ///     == YES.totalSupply()                                    (full $1-per-pair backing)
 ///      - Σ_u fundingDebt[u]                                    (uncollected YES-side debt)
-///      - Σ_{u flagged}   frozenFunding[u] * YES.balanceOf(u) / 1e18   (frozen, uncollected)
-///      - Σ_{u unflagged} YES.balanceOf(u) * (cumYES - fundingSnapshot[u]) / 1e18  (live accrual, uncollected)
+///      - Σ_u YES.balanceOf(u) * (cumYES - fundingSnapshot[u]) / 1e18  (live accrual, uncollected)
 ///      + Σ_u NO.balanceOf(u) * (cumNO - snapNO[u]) / 1e18       (live NO credit, unpaid)
 ///
-/// This is an EXACT equality (not a bound) because every term is computed with the
-/// same floor-division the contract itself uses internally, and because
-/// YES.totalSupply() == NO.totalSupply() always pre-event (complete-set). It
-/// directly encodes CLAUDE.md invariants 4 (NO always made whole), 7 (every
-/// settlement path nets funding through the same ledger), and 9 (a funding debit
-/// is never erased without equivalent USDC reaching collateral) — if any code path
-/// ever paid out a NO credit, or forgave a YES debit, or mis-collected a
-/// liquidation payment, without the corresponding cash actually landing in (or
-/// staying in) `market`, this equality breaks immediately.
+/// This is an EXACT equality (not a bound, modulo floor-rounding slack — see below) because
+/// every term is computed with the same floor-division the contract itself uses internally,
+/// and because YES.totalSupply() == NO.totalSupply() always pre-event (complete-set). It
+/// directly encodes CLAUDE.md invariants 4 (NO always made whole), 7 (every settlement path
+/// nets funding through the same ledger), and 9 (a funding debit is never erased without
+/// equivalent USDC reaching collateral) — if any code path ever paid out a NO credit, or
+/// forgave a YES debit, or mis-collected a liquidation payment, without the corresponding
+/// cash actually landing in (or staying in) `market`, this equality breaks immediately.
+/// Post-fix there is NO per-actor claimable/frozen branch and NO compensation ghost terms —
+/// every actor (flagged or not) is summed identically, because there is no longer a frozen
+/// state for the formula to special-case.
 contract CreditMarketInvariantTest is StdInvariant, Test {
     MockUSDC usdc;
     YESToken yesToken;
@@ -111,7 +124,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](16);
+        bytes4[] memory selectors = new bytes4[](18);
         selectors[0] = Handler.mint.selector;
         selectors[1] = Handler.redeem.selector;
         selectors[2] = Handler.settleYES.selector;
@@ -128,6 +141,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         selectors[13] = Handler.fundInsurance.selector;
         selectors[14] = Handler.seekSeizureBoundary.selector;
         selectors[15] = Handler.probeFlaggedActor.selector;
+        selectors[16] = Handler.nearBoundaryTinyBuy.selector;
+        selectors[17] = Handler.probeMissedSeizureFlag.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -172,43 +187,12 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
     // ── the flagship solvency invariant ─────────────────────────────────────────
 
-    // KNOWN-VIOLATION (compensated, not skipped): CreditMarket.settleFunding's
-    // claimable-branch (see CreditMarket.sol ~L368-378) prices a FLAGGED
-    // holder's YES-side obligation at a value CAPPED at flag time
-    // (frozenFunding), while ANY NO holder who next syncs (a CLOB sale, redeem,
-    // settleYES) still collects credit off the LIVE, uncapped
-    // `cumFundingPerNO` -- which keeps climbing globally at the full
-    // mark-implied rate regardless of the freeze. This is a real, PERMANENT
-    // (never later collected from anyone), uncollateralized collateral leak,
-    // proportional to mark x (time the position sits flagged before
-    // cure/claim) x (the frozen holder's balance) -- proven with a minimal,
-    // deterministic, two-actor repro in test_Repro_FrozenYesLiveNoCreditLeak
-    // (this file), which shows the market can no longer fully back every
-    // outstanding YES+NO pair at $1 even AFTER the frozen holder pays their
-    // entire (capped) bill via cure(). This breaks invariant 4 ("NO holders
-    // are ALWAYS made whole") and invariant 9 ("a funding debit is never
-    // erased without equivalent USDC landing in collateral") -- here it's a
-    // funding CREDIT paid out of collateral with no matching debit ever
-    // collected. NOT fixed here (contracts/src is off limits for this task).
-    //
-    // Rather than going silent for the rest of a campaign the first time any
-    // position is ever flagged (which would blind this invariant to every
-    // OTHER bug for the remainder of the run -- e.g. it originally hid a
-    // planted debt-forgiveness mutation in redeem() during mutation testing),
-    // the KNOWN leak is instead precisely QUANTIFIED and added back to the
-    // expected side of the equation, leaving the formula fully sensitive to
-    // any OTHER deviation:
-    //   - for a position CURRENTLY still flagged, the outstanding leak is a
-    //     pure function of live state: yesBal(u) * (cumFundingPerNO_now -
-    //     frozenFunding(u)) / 1e18 (recomputed fresh every check, needs no
-    //     ghost -- both frozenFunding(u) and yesBal(u) stay pinned while
-    //     flagged).
-    //   - once a flagged position RESOLVES (cure/settleYES/liquidation
-    //     claim), the (by-then realized, permanent) leak amount is captured
-    //     by the Handler at that moment (Handler.ghost_lockedLeak, computed
-    //     from pre-call state -- see Handler.sol's `_pendingLeak`) and added
-    //     here forever after, since the position's own live-state terms
-    //     revert to normal post-resolution and would otherwise "forget" it.
+    // Post-fix: NO compensation terms. Every actor is summed identically —
+    // fundingDebt (uncollected ledger debt) + live unsynced YES accrual, netted
+    // against live unsynced NO credit — regardless of whether they're currently
+    // flagged, because a flag no longer changes how funding is priced (it only
+    // locks mint/redeem/trade). See the contract-level doc comment above for the
+    // full derivation.
     function invariant_CollateralSolvencyPreEvent() public view {
         if (market.creditEventConfirmed()) return;
 
@@ -218,49 +202,24 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         int256 sumFundingDebt;
         int256 sumUnsyncedYesDebit;
         int256 sumUnsyncedNoCredit;
-        int256 sumKnownLeak;
-        int256 sumForfeitedNoCredit;
 
         uint256 n = handler.numActors();
         for (uint256 i = 0; i < n; i++) {
             address u = handler.actorAt(i);
 
             sumFundingDebt += int256(market.fundingDebt(u));
-            // KNOWN-VIOLATION #2: see Handler.ghost_forfeitedNoCredit's comment --
-            // clearLiquidatedPosition's liquidator-sync step silently forfeits
-            // (never pays) any NO credit the liquidator had accrued before a
-            // stale snapNO. That cash never leaves collateral, so it must be
-            // added back here or this invariant would (wrongly) expect a lower
-            // balance than the market actually, correctly, holds.
-            sumForfeitedNoCredit += int256(handler.ghost_forfeitedNoCredit(u));
 
             uint256 yesBal = yesToken.balanceOf(u);
-            if (market.claimable(u)) {
-                uint256 frozen = market.frozenFunding(u);
-                sumUnsyncedYesDebit += int256(frozen * yesBal / 1e18);
-                // frozen is a DELTA since u's own pre-flag fundingSnapshot (left
-                // untouched while claimable), NOT the absolute cumYES index at
-                // flag time -- reconstruct that index as frozen + fundingSnapshot(u)
-                // before comparing to the current absolute cumNO. See
-                // Handler._pendingLeak's comment for the full explanation of why
-                // using `frozen` alone here overstates the leak.
-                uint256 cumYESAtFlag = frozen + market.fundingSnapshot(u);
-                if (cumNO > cumYESAtFlag) {
-                    sumKnownLeak += int256(yesBal * (cumNO - cumYESAtFlag) / 1e18); // still-open leak
-                }
-            } else {
-                uint256 fPerUnit = cumYES - market.fundingSnapshot(u);
-                sumUnsyncedYesDebit += int256(yesBal * fPerUnit / 1e18);
-            }
-            sumKnownLeak += int256(handler.ghost_lockedLeak(u)); // permanently-realized leak
+            uint256 fPerUnit = cumYES - market.fundingSnapshot(u);
+            sumUnsyncedYesDebit += int256(yesBal * fPerUnit / 1e18);
 
             uint256 noBal = noToken.balanceOf(u);
             uint256 nPerUnit = cumNO - market.snapNO(u);
             sumUnsyncedNoCredit += int256(noBal * nPerUnit / 1e18);
         }
 
-        int256 expected = int256(yesToken.totalSupply()) - sumFundingDebt - sumUnsyncedYesDebit
-            + sumUnsyncedNoCredit - sumKnownLeak + sumForfeitedNoCredit;
+        int256 expected =
+            int256(yesToken.totalSupply()) - sumFundingDebt - sumUnsyncedYesDebit + sumUnsyncedNoCredit;
 
         // Tolerance, not laxity: the contract settles each user's funding with its
         // OWN independent floor division at the moment that user is actually
@@ -306,11 +265,17 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         );
     }
 
-    function invariant_FrozenFundingImmutableWhileFlagged() public view {
+    // Post-fix replacement for invariant_FrozenFundingImmutableWhileFlagged:
+    // frozenFunding no longer exists -- a flag is a pure LOCK, not an accounting
+    // freeze, so funding must keep accruing live on a flagged position. owed()
+    // for any actor who remains flagged/claimable across an action must never
+    // DECREASE (it can only grow with time, or hold steady if none elapsed) --
+    // see Handler.trackFlagged.
+    function invariant_OwedNonDecreasingWhileFlagged() public view {
         assertEq(
-            handler.ghost_frozenFundingChangedWhileFlagged(),
+            handler.ghost_owedDecreasedWhileFlagged(),
             0,
-            "frozenFunding[user] changed for a user who remained flagged/claimable across an action"
+            "owed(user) decreased for a user who remained flagged/claimable across an action -- funding must keep accruing (no freeze) while locked"
         );
     }
 
@@ -335,7 +300,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         assertEq(
             handler.ghost_liquidationLedgerNotCleared(),
             0,
-            "fundingDebt/frozenFunding for the original holder were not both zero immediately after claim()"
+            "fundingDebt for the original holder was not zero immediately after claim()"
         );
     }
 
@@ -361,12 +326,17 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
     // ── invariants 1 & 2: seizure trigger consistency, cost-basis independence ──
 
-    // Recomputes isSeizable(user) independently from public state, using exactly
-    // the spec formula (m <= 1.03 * f_next, f_next = f_now + one epoch of accrual)
-    // with NO reference to costBasis anywhere -- costBasis is not even read here,
-    // which is itself part of what's being asserted: the trigger cannot depend on
-    // it if an independent, cost-basis-free reimplementation always agrees with
-    // the contract's own isSeizable().
+    // Recomputes isSeizable(user) independently from public state, using the
+    // SPEC's formula re-derived from docs/security/invariant-findings-2026-09-26.md's
+    // "Recommended fix": f_now is the TOTAL owed per unit, INCLUDING fundingDebt --
+    // NOT just cumYES - fundingSnapshot(u) alone (that was the pre-fix formula this
+    // suite used to mirror, which is exactly how F4 slipped through: a CLOB trade
+    // resets fundingSnapshot and moves the accrued debit into fundingDebt, and the
+    // old trigger-consistency check never looked at fundingDebt either, so it
+    // couldn't have caught the bug it was nominally guarding). costBasis is not
+    // even read here, which is itself part of what's being asserted: the trigger
+    // cannot depend on it if an independent, cost-basis-free reimplementation
+    // always agrees with the contract's own isSeizable().
     function invariant_SeizureTriggerConsistency() public view {
         uint256 cumYES = market.cumulativeFundingPerYES();
         uint256 m = market.currentMark();
@@ -379,18 +349,37 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
             bool expected;
             if (yesBal != 0) {
-                uint256 fNow = cumYES - market.fundingSnapshot(u);
-                uint256 deltaF = m * epochLength / 365 days;
-                uint256 fNext = fNow + deltaF;
-                expected = m <= (fNext * 103) / 100;
+                uint256 accruedPerUnit = cumYES - market.fundingSnapshot(u);
+                uint256 owedTotal = market.fundingDebt(u) + yesBal * accruedPerUnit / 1e18;
+                uint256 value = yesBal * m / 1e18;
+                uint256 nextEpoch = yesBal * (m * epochLength / 365 days) / 1e18;
+                // Evaluated in totals (value vs owed+nextEpoch) rather than
+                // per-unit, to avoid dividing by the balance -- equivalent to the
+                // spec's per-unit "m <= 1.03 * f_next" scaled by yesBal on both sides.
+                expected = value * 100 <= (owedTotal + nextEpoch) * 103;
             }
 
             assertEq(
                 market.isSeizable(u),
                 expected,
-                "isSeizable() diverged from an independent, cost-basis-free reimplementation of the spec formula"
+                "isSeizable() diverged from an independent, spec-derived (fundingDebt-inclusive) reimplementation"
             );
         }
+    }
+
+    // F4-type direct probe (docs/security/invariant-findings-2026-09-26.md,
+    // "Next" section): no actor whose owed() + one epoch of projected accrual
+    // crosses the spec's seizure threshold may remain unflaggable while
+    // motionPending is false. Handler.probeMissedSeizureFlag independently
+    // recomputes that threshold (not via market.isSeizable()) and attempts the
+    // flag for every actor that satisfies it; any revert increments
+    // ghost_missedSeizureFlag, asserted here to stay 0.
+    function invariant_NoMissedSeizureFlags() public view {
+        assertEq(
+            handler.ghost_missedSeizureFlag(),
+            0,
+            "an actor whose owed()+one epoch crossed the seizure threshold could not be flagged (F4-type regression)"
+        );
     }
 
     // ── CLOBSettlement never custodies funds; fees never touch collateral ───────
@@ -460,50 +449,20 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         assertEq(actualBalance, exactExpected + 1, "the per-actor-floor projection undershoots actual by 1 wei");
     }
 
-    // ── KNOWN-VIOLATION: frozen-YES / live-NO asymmetry leaks collateral ────────
+    // ── regression: F1 (frozen-YES / live-NO asymmetry) fixed ───────────────────
     //
-    // Minimal, deterministic, standalone repro (independent of Handler/fuzzing)
-    // of a genuine invariant-4/9 violation discovered via the fuzzer above
-    // (invariant_CollateralSolvencyPreEvent, sequence: mint -> two large warps ->
-    // flagClaimable -> another warp -> check). See the top-of-contract comment
-    // and the report for the full writeup; this test isolates the mechanism with
-    // two independent actors (no shared wallet) to show it's a systemic pricing
-    // asymmetry, not merely a self-dealing curiosity.
+    // Was test_Repro_FrozenYesLiveNoCreditLeak (KNOWN-VIOLATION), demonstrating a
+    // real, permanent, uncollateralized collateral leak: CreditMarket.settleFunding's
+    // claimable-branch priced a flagged holder's YES-side obligation at a value
+    // CAPPED at flag time (frozenFunding), while any NO holder who synced during
+    // the freeze window kept collecting credit off the LIVE, uncapped cumFundingPerNO.
     //
-    // Root cause: CreditMarket.settleFunding's claimable-branch (CreditMarket.sol
-    // ~L368-378) prices the YES side at the FROZEN value (frozenFunding[user],
-    // fixed at flag time) but ALWAYS prices the NO side off the LIVE
-    // `cumFundingPerNO - snapNO[user]`, uncapped, regardless of whether the
-    // *matching* YES supply for that NO is currently frozen. Once ANY YES
-    // position is flagged, the global `cumulativeFundingPerYES`/`cumFundingPerNO`
-    // indices keep climbing at the full mark-implied rate (accrual is global,
-    // per-unit, and does not exempt frozen balances) — so every NO holder's
-    // *live* credit keeps growing through the freeze window as if the frozen
-    // holder's YES were still paying in full, while that holder's ACTUAL
-    // obligation is capped at the frozen snapshot. The gap (mark * frozen-window
-    // length * frozen holder's balance, roughly) is paid out of collateral to
-    // whichever NO holder next syncs, funded by nothing — not the frozen
-    // holder (whose bill stopped growing) and not InsuranceFund (which only
-    // ever tops up LiquidationEngine.claim's own P-formula shortfall, never this
-    // path). It is realized as real cash the moment that NO holder's own
-    // settleFunding runs (a CLOB sale, redeem, or settleYES) — cure()/settleYES()
-    // on the FROZEN holder's own side never realize it (their own freeze exempts
-    // them from paying it), so it is a pure, uncompensated leak.
-    //
-    // Impact: breaks invariant 4 ("NO holders are ALWAYS made whole") in the
-    // general case — the leak comes out of the SAME collateral pool that must
-    // still fully back every other outstanding YES/NO pair at $1, so if the
-    // frozen position stays flagged for a while before cure()/claim(), the
-    // payout to the syncing NO holder can leave the pool short of what later
-    // redemptions need. It also breaks invariant 9 ("a funding debit is never
-    // erased without equivalent USDC landing in collateral") from the other
-    // direction: a funding CREDIT is being paid out of collateral that was never
-    // matched by an equivalent debit collection. Severity scales with mark ×
-    // (time a large YES position sits flagged before cure/claim) × (total NO
-    // supply that syncs during the window) — plausibly small per-incident given
-    // KEEPER_ROLE is expected to flag promptly, but it is a real, unbounded (in
-    // principle) collateral drain with no code path that stops it, not a rounding
-    // artifact.
+    // Post-fix, there is no claimable branch and no frozenFunding: settleFunding
+    // always charges live accrual, for every user, flagged or not. Same scenario,
+    // flipped assertion: the market must be FULLY backed (no leak) after alice's
+    // cure, because her live owed() at cure time exactly matches what was already
+    // paid out to bob (same live index, same balance size) -- there is no longer a
+    // frozen/live asymmetry for a flagged window to leak through.
     struct ReproActors {
         address alice;
         uint256 aliceKey;
@@ -597,81 +556,66 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         marketOutflow = marketBalanceBefore - usdc.balanceOf(address(market));
     }
 
-    function test_Repro_FrozenYesLiveNoCreditLeak() public {
+    function test_Regression_NoFreezeNoCollateralLeak() public {
         ReproActors memory a = _reproSetup();
 
         // 1. Alice mints $1000, sells all NO to Bob -> alice pure YES, bob pure NO.
         _reproMintAndSplit(a);
 
         // 2. Warp 354 days (the CLAUDE.md worked example) so alice is seizable
-        //    at the 5% initial mark, then flag her -- freezing her YES-side debt.
+        //    at the 5% initial mark, then flag her -- post-fix this is a pure
+        //    LOCK, not an accounting freeze.
         vm.warp(block.timestamp + 354 days);
         market.accrueFunding();
         assertTrue(market.isSeizable(a.alice), "alice should be seizable after 354 days at 5% mark");
         market.flagClaimable(a.alice);
-        uint256 frozenPerUnit = market.frozenFunding(a.alice);
 
         // 3. MORE time passes while alice sits flagged (unclaimed/uncured) --
-        //    cumFundingPerNO keeps climbing globally; alice's frozen debt does not.
+        //    her funding keeps accruing LIVE (no freeze), in lockstep with the
+        //    paired NO side's live credit.
         vm.warp(block.timestamp + 30 days);
         market.accrueFunding();
-        uint256 cumNOAfterFreeze = market.cumFundingPerNO();
-        assertGt(cumNOAfterFreeze, frozenPerUnit, "global index advanced past the frozen snapshot");
 
-        // 4. Bob (holds his original 1000 NO, snapNO==0 since the initial trade)
-        //    triggers his own settleFunding via a trivial CLOB sale to Carol --
-        //    this nets his funding over his FULL NO balance, using the LIVE index.
-        //    This payout is a mix of (a) his LEGITIMATE pre-flag credit, which is
-        //    merely FRONTED from base collateral ahead of alice's not-yet-collected
-        //    frozen debt (fine -- restored the moment alice cures/gets claimed),
-        //    and (b) the permanent, uncollateralized post-flag sliver. Isolate (b)
-        //    by having alice cure IMMEDIATELY afterward: cure() pays in exactly her
-        //    frozen obligation (frozenPerUnit * balance), which tops collateral
-        //    back up for (a) in full -- whatever shortfall remains after that is
-        //    purely (b), the permanent leak.
+        // 4. Bob (holds his original 1000 NO) triggers his own settleFunding via
+        //    a trivial CLOB sale to Carol -- pays his full LIVE NO credit from
+        //    collateral (nets his funding over his FULL NO balance).
         _reproBobTriggeredSync(a);
 
-        uint256 aliceMaxObligation = 1_000e18 * frozenPerUnit / 1e18;
+        // 5. Alice cures -- pays her full LIVE owed() (fundingDebt + accrual
+        //    since her last sync, uncapped), exactly matching what was already
+        //    paid out to Bob at the same live index, same balance size.
         vm.prank(a.alice);
-        market.cure(); // pays in exactly aliceMaxObligation; frozenFunding is capped there, no more
+        market.cure();
 
-        uint256 fullPeriodCredit = 1_000e18 * cumNOAfterFreeze / 1e18;
-        uint256 uncollateralizedLeak = fullPeriodCredit - aliceMaxObligation;
-        assertGt(uncollateralizedLeak, 0, "sanity: the freeze window should create a real, permanent gap");
-
-        // The market is now missing EXACTLY the permanent leak relative to full
-        // backing for every outstanding YES+NO pair -- not fronted, not
-        // recoverable from alice (her bill was capped at flag time), not covered
-        // by InsuranceFund (that only ever tops up LiquidationEngine.claim's own
-        // formula, never this path).
-        uint256 shortfall = yesToken.totalSupply() - usdc.balanceOf(address(market));
+        // The market must be FULLY backed again -- no permanent leak survives
+        // the fix: every outstanding YES+NO pair can still redeem at $1. (Small
+        // dust tolerance from the trivial 1e18 trade's own funding leg, same as
+        // the original repro's tolerance.)
         assertApproxEqAbs(
-            shortfall,
-            uncollateralizedLeak,
-            2, // dust from the trivial 1e18 trade's own tiny funding leg
-            "post-cure collateral shortfall == the frozen window's uncollateralized NO credit, permanently"
-        );
-
-        // Concretely: the market can no longer fully back every outstanding
-        // YES+NO pair at $1 -- the base invariant this whole protocol rests on --
-        // even though alice has ALREADY paid her entire (frozen-capped) bill.
-        assertLt(
             usdc.balanceOf(address(market)),
             yesToken.totalSupply(),
-            "market can no longer fully redeem all outstanding pairs, even after alice paid her full frozen bill"
+            2,
+            "post-cure collateral must be fully backed -- the F1 freeze/live asymmetry no longer exists"
         );
     }
 
-    // ── F4 (docs/security/invariant-findings-2026-09-26.md) ─────────────────────
+    // ── regression: F4 (trade resets the seizure clock) fixed ──────────────────
     //
-    // isSeizable() measures f_now as cumulativeFundingPerYES - fundingSnapshot[user]
-    // only; it never reads the fundingDebt ledger. But every CLOB trade runs
-    // settleFunding on BOTH parties (CLOBSettlement.sol:250-251), and for a buyer
-    // that moves the accrued YES debit into fundingDebt and resets the snapshot.
-    // So a YES holder can reset their liquidation clock with a tiny purchase every
-    // < ~353 days (at a constant mark) while their debt keeps growing in a ledger
-    // the trigger ignores: the position ends up owing far more than it's worth,
-    // yet can never be flagged or claimed.
+    // Was test_Repro_F4_TradeResetsSeizureClockWhileDebtGrows (KNOWN-VIOLATION):
+    // isSeizable() measured f_now as cumulativeFundingPerYES - fundingSnapshot[user]
+    // only, never reading fundingDebt. Every CLOB trade runs settleFunding on both
+    // parties, and for a buyer that moves the accrued YES debit into fundingDebt
+    // and resets the snapshot -- so a YES holder could reset their liquidation
+    // clock with a tiny purchase every < ~353 days while real debt grew in a
+    // ledger the trigger ignored, ending up owing far more than the position was
+    // worth yet remaining permanently unflaggable.
+    //
+    // Post-fix, isSeizable() reads owed() (fundingDebt included), so the same
+    // repeated-tiny-buy trick can no longer hide debt from the trigger: this test
+    // performs the identical pattern and asserts the position becomes seizable
+    // once owed() crosses the spec threshold, flagClaimable() succeeds, and the
+    // debt at that point never blew past the position's value (allowing the
+    // trigger's own one-epoch look-ahead plus this test's 1-day step granularity).
     function _reproAliceBuysOneNoFromBob(ReproActors memory a, uint256 nonce) internal {
         uint256 expiry = block.timestamp + 1 hours;
         CLOBSettlement.Order memory bSell = CLOBSettlement.Order({
@@ -695,43 +639,117 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         clob.verifyAndSettle(bSell, _sign(a.bobKey, bSell), aBuy, _sign(a.aliceKey, aBuy));
     }
 
-    function test_Repro_F4_TradeResetsSeizureClockWhileDebtGrows() public {
+    function test_Regression_F4_TradeResetsSeizureClockWhileDebtGrows() public {
         ReproActors memory a = _reproSetup();
         _reproMintAndSplit(a); // alice: 1000 YES, bob: 1000 NO
 
         uint256 m = market.currentMark();
-        uint256 marketBefore = usdc.balanceOf(address(market));
-
-        // Three 300-day stretches (each < the ~353-day trigger), with one tiny
-        // NO purchase before each stretch ends. 900 days of carry in total.
-        for (uint256 i = 0; i < 3; i++) {
-            vm.warp(block.timestamp + 300 days);
-            market.accrueFunding();
-            assertFalse(market.isSeizable(a.alice), "not yet seizable within a 300-day stretch");
-            _reproAliceBuysOneNoFromBob(a, 10 + i);
-        }
-
         uint256 yesBal = yesToken.balanceOf(a.alice);
         uint256 positionValue = yesBal * m / 1e18;
-        uint256 debt = market.fundingDebt(a.alice);
 
-        // Alice now owes ~2.4x what her position is worth (900d at the mark vs
-        // 1x the mark), and her equity m - f is deeply negative...
-        assertGt(debt, 2 * positionValue, "debt far exceeds position value");
+        // Step in 1-day increments (== epochLength) so the boundary crossing is
+        // caught tightly, with alice doing the tiny F4 buy from bob every 60 days
+        // (well inside the ~353-day natural trigger window on its own -- only the
+        // ACCUMULATED ledger debt across repeated resets should ever trip it).
+        uint256 nonce = 10;
+        bool becameSeizable;
+        for (uint256 i = 0; i < 500 && !becameSeizable; i++) {
+            vm.warp(block.timestamp + 1 days);
+            market.accrueFunding();
 
-        // ...yet the trigger still reads f_now ~= 0 (snapshot just reset), so she
-        // can't be flagged, so LiquidationEngine can never claim her.
-        assertFalse(market.isSeizable(a.alice), "BUG: deeply insolvent position is not seizable");
-        vm.expectRevert(CreditMarket.PositionNotSeizable.selector);
+            if (i % 60 == 59) {
+                _reproAliceBuysOneNoFromBob(a, nonce++);
+            }
+
+            if (market.isSeizable(a.alice)) {
+                becameSeizable = true;
+            }
+        }
+
+        assertTrue(becameSeizable, "sanity: alice's position must eventually cross the seizure threshold");
+
+        uint256 debtAtTrigger = market.owed(a.alice);
+
+        // The core F4 regression: flagClaimable must SUCCEED once isSeizable is
+        // true, regardless of how many snapshot resets happened along the way --
+        // the ledger debt is no longer invisible to the trigger.
+        market.flagClaimable(a.alice);
+        assertTrue(market.claimable(a.alice), "alice must be flaggable once owed() crosses the spec threshold");
+
+        // And debt must not have blown past the position's value by the time it's
+        // flagged -- not the pre-fix behaviour, where debt reached ~2.5x position
+        // value with isSeizable() permanently false. Allow slack for the
+        // trigger's own one-epoch look-ahead plus this test's 1-day step
+        // granularity (two epochs' worth of accrual, generously).
+        uint256 oneEpochAccrual = yesBal * (m * 1 days / 365 days) / 1e18;
+        assertLe(
+            debtAtTrigger,
+            positionValue + 2 * oneEpochAccrual + 1,
+            "debt must not exceed position value (beyond the one-epoch look-ahead) by the time it's flagged"
+        );
+
+        // Bob (the paired NO side) was paid legitimate LIVE credit throughout,
+        // matched step-for-step by alice's growing ledger debt via owed() -- not
+        // an unbacked IOU exceeding her position's worth (the pre-fix bug's
+        // impact). Aggregate solvency itself is covered continuously by
+        // invariant_CollateralSolvencyPreEvent in the fuzz campaign.
+    }
+
+    // ── regression: F2 (liquidator's own NO credit forfeited on claim) fixed ───
+    //
+    // Pre-fix, clearLiquidatedPosition routed the liquidator through
+    // `_syncUserFunding`, which folded their YES debit into fundingDebt but reset
+    // `snapNO[liquidator]` WITHOUT ever paying out any NO credit they had
+    // accrued — silently forfeiting it (the cash stayed in collateral, so this
+    // was never a solvency risk, just a liquidator shortchanged). Post-fix,
+    // clearLiquidatedPosition routes the liquidator through the same
+    // `settleFunding` every other settlement path uses, so a pending NO credit
+    // is paid out in cash exactly like anywhere else.
+    //
+    // Reuses the F1/F4 repro's own setup: alice mints and sells her NO to bob,
+    // so bob holds a large, genuinely UNSYNCED NO credit (he never trades again)
+    // in parallel with alice's YES position becoming seizable — bob then claims
+    // alice's own flagged position as the liquidator.
+    function test_Regression_F2_LiquidatorNoCreditPaid() public {
+        ReproActors memory a = _reproSetup();
+        _reproMintAndSplit(a); // alice: 1000 YES, bob: 1000 NO
+
+        vm.prank(a.bob);
+        usdc.approve(address(liquidationEngine), type(uint256).max);
+
+        // Warp so alice is seizable; bob's paired NO accrues a large, entirely
+        // unsynced credit alongside it (he performs no other action here).
+        vm.warp(block.timestamp + 354 days);
+        market.accrueFunding();
+        assertTrue(market.isSeizable(a.alice), "alice should be seizable after 354 days at 5% mark");
         market.flagClaimable(a.alice);
 
-        // Meanwhile bob (the paired NO side) has been paid his accrued credit out of
-        // collateral at every sync: collateral is down by roughly that amount,
-        // backed only by alice's ledger IOU, which exceeds anything she could ever
-        // realise by selling her YES (a sale must clear >= her debit, and her
-        // whole position is worth `positionValue` < debt).
-        uint256 marketOutflow = marketBefore - usdc.balanceOf(address(market));
-        assertGt(marketOutflow, positionValue, "collateral already paid out more than the debtor's position is worth");
+        uint256 bobNoBal = noToken.balanceOf(a.bob);
+        uint256 cumNO = market.cumFundingPerNO();
+        uint256 expectedBobCredit = bobNoBal * (cumNO - market.snapNO(a.bob)) / 1e18;
+        assertGt(expectedBobCredit, 0, "sanity: bob must have real unsynced NO credit going into the claim");
+
+        uint256 Q = yesToken.balanceOf(a.alice);
+        uint256 m = market.currentMark();
+        uint256 owedTotal = market.owed(a.alice);
+        uint256 tokenValue = Q * m / 1e18;
+        uint256 P = owedTotal > tokenValue ? tokenValue : owedTotal;
+
+        uint256 bobUsdcBefore = usdc.balanceOf(a.bob);
+
+        // Bob (the liquidator) holds zero YES, so clearLiquidatedPosition's
+        // settleFunding(bob) call is a pure credit: it must pay expectedBobCredit
+        // in cash, net of the P he pays in as the claim price.
+        vm.prank(a.bob);
+        liquidationEngine.claim(a.alice);
+
+        int256 actualDelta = int256(usdc.balanceOf(a.bob)) - int256(bobUsdcBefore);
+        int256 expectedDelta = int256(expectedBobCredit) - int256(P);
+        assertEq(
+            actualDelta,
+            expectedDelta,
+            "bob's pending NO credit must be paid out as part of the claim, not silently forfeited (F2 regression)"
+        );
     }
 
     function _sign(uint256 key, CLOBSettlement.Order memory order) internal view returns (bytes memory) {
