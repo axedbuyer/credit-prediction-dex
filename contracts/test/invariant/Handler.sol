@@ -113,6 +113,16 @@ contract Handler is Test {
     uint256 public ghost_redeemPayoutMismatch;
     uint256 public ghost_settleYESPayoutMismatch;
 
+    // a9476ea launch guard-rails (depositCap, bounded setMark/adminSetMark):
+    // these three must stay 0 forever, exactly like the frozen-lock ghosts above.
+    uint256 public ghost_mintExceededCap;          // a mint() succeeded that pushed
+                                                    // YES.totalSupply() past depositCap
+    uint256 public ghost_keeperStepViolation;      // a KEEPER_ROLE setMark() succeeded
+                                                    // with |delta| > maxMarkStep
+    uint256 public ghost_keeperIntervalViolation;  // a KEEPER_ROLE setMark() succeeded
+                                                    // sooner than minMarkInterval after
+                                                    // the previous mark update
+
     // ── call tallies (for the report) ────────────────────────────────────────
     string[] public actionNames;
     mapping(string => bool) internal _seenAction;
@@ -251,11 +261,14 @@ contract Handler is Test {
         address a = _actor(actorSeed);
         uint256 amount = bound(amountSeed, 1e15, 2_000e18);
         bool flagged = market.claimable(a);
+        uint256 supplyBefore = yesToken.totalSupply();
+        uint256 capNow = market.depositCap();
 
         vm.prank(a);
         try market.mint(amount) {
             ghost_yesMinted += amount;
             if (flagged) ghost_frozenMintSuccesses++;
+            if (supplyBefore + amount > capNow) ghost_mintExceededCap++;
             _record("mint", true);
         } catch {
             _record("mint", false);
@@ -530,12 +543,127 @@ contract Handler is Test {
         }
     }
 
-    function setMark(uint256 seed) external trackFlagged {
-        uint256 newMark = bound(seed, 0.01e18, 0.60e18);
+    // KEEPER_ROLE setMark, now bounded (a9476ea: maxMarkStep/minMarkInterval are
+    // turned ON in the invariant setUp, unlike the unit-test defaults). Branches
+    // between a small step straddling maxMarkStep (so plenty of draws land both
+    // just inside and just outside the bound) and the old broad 0.01-0.60e18
+    // jump (almost always beyond the bound) -- and occasionally skips warping
+    // time first, so back-to-back calls also exercise MarkUpdateTooSoon. Any
+    // call that SUCCEEDS is checked against the bounds actually in force at
+    // that moment; a violation on a successful call means the guard-rail
+    // itself is broken (M9-type regression), not that the fuzzer got unlucky.
+    function setMark(uint256 seed, uint256 warpSeed) external trackFlagged {
+        if (warpSeed % 3 != 0) {
+            // 2-in-3 calls warp a little first (0..2h) -- sometimes enough to
+            // clear minMarkInterval (1h in the invariant setUp), sometimes not.
+            vm.warp(block.timestamp + bound(warpSeed, 0, 2 hours));
+            // setMark() below only calls _accrueFunding() on its OWN success path
+            // (after the step/interval/validity checks) -- and this action's
+            // whole point is to draw plenty of calls that REVERT on those checks.
+            // Without syncing here, a reverting call would leave lastFundingTime
+            // stale relative to the block.timestamp we just warped to, which
+            // desyncs owed()'s live projection (used by isSeizable()) from
+            // invariant_SeizureTriggerConsistency's raw-index reimplementation --
+            // a real bug this suite introduced, not a contract bug (caught by a
+            // deep-profile run). accrueFunding() is unrestricted and can never
+            // revert, so this is always safe to call unconditionally.
+            market.accrueFunding();
+        }
+        // else: no warp at all -- back-to-back setMark calls with zero elapsed
+        // time deterministically test MarkUpdateTooSoon whenever the previous
+        // update was itself recent.
+
+        uint256 oldMark = market.currentMark();
+        uint256 maxStep = market.maxMarkStep();
+        uint256 minInterval = market.minMarkInterval();
+        uint256 lastUpdate = market.lastMarkUpdate();
+
+        uint256 newMark;
+        if (seed % 3 == 0) {
+            // Small step straddling maxMarkStep: [0, maxStep + 0.02e18] --
+            // roughly half the draws land inside the bound, half just beyond it.
+            uint256 step = bound(seed, 0, maxStep + 0.02e18);
+            newMark = (seed / 7) % 2 == 0 ? oldMark + step : (oldMark > step ? oldMark - step : oldMark + step);
+        } else {
+            // Broad jump -- the old unbounded behavior, almost always beyond
+            // maxMarkStep, keeping that failure path well exercised too.
+            newMark = bound(seed, 0.01e18, 0.60e18);
+        }
+        newMark = bound(newMark, 1, 1e18 - 1);
+
         try market.setMark(newMark) {
+            uint256 actualStep = newMark > oldMark ? newMark - oldMark : oldMark - newMark;
+            if (actualStep > maxStep) ghost_keeperStepViolation++;
+            if (block.timestamp < lastUpdate + minInterval) ghost_keeperIntervalViolation++;
             _record("setMark", true);
         } catch {
             _record("setMark", false);
+        }
+    }
+
+    // DEFAULT_ADMIN_ROLE override: bypasses maxMarkStep/minMarkInterval entirely
+    // (validity check only). Provides the big, unbounded mark moves the suite
+    // relies on for tail-case/seizure coverage now that the plain KEEPER setMark
+    // action above is bounded -- mirrors real usage (a sudden repricing on real
+    // news goes through this path, not the throttled keeper one).
+    function adminSetMark(uint256 seed) external trackFlagged {
+        uint256 newMark = bound(seed, 0.001e18, 0.99e18);
+        try market.adminSetMark(newMark) {
+            _record("adminSetMark", true);
+        } catch {
+            _record("adminSetMark", false);
+        }
+    }
+
+    // Direct step-bound probe (mirrors probeMissedSeizureFlag/probeFlaggedActor's
+    // style): jumps to whichever extreme (0.02e18 / 0.9e18) is farther from the
+    // current mark, guaranteeing a step far beyond any realistic maxMarkStep
+    // bound, so MarkStepTooLarge is deterministically exercised on essentially
+    // every call -- rather than relying on setMark()'s own randomized draws to
+    // occasionally land far enough beyond the bound by chance.
+    function probeMarkStepBound() external trackFlagged {
+        uint256 oldMark = market.currentMark();
+        uint256 maxStep = market.maxMarkStep();
+        uint256 minInterval = market.minMarkInterval();
+        uint256 lastUpdate = market.lastMarkUpdate();
+
+        uint256 newMark = oldMark < 0.5e18 ? 0.9e18 : 0.02e18;
+
+        try market.setMark(newMark) {
+            uint256 actualStep = newMark > oldMark ? newMark - oldMark : oldMark - newMark;
+            if (actualStep > maxStep) ghost_keeperStepViolation++;
+            if (block.timestamp < lastUpdate + minInterval) ghost_keeperIntervalViolation++;
+            _record("probeMarkStepBound", true);
+        } catch {
+            _record("probeMarkStepBound", false);
+        }
+    }
+
+    // Direct depositCap probe (mirrors probeMissedSeizureFlag/probeFlaggedActor's
+    // style): sizes a mint to land EXACTLY at the remaining headroom under the
+    // cap, or 1 wei past it, deterministically exercising the cap boundary on
+    // essentially every call (whenever there's headroom) instead of relying on
+    // the broader mint() action's uniform random amount to stumble past the cap
+    // by chance.
+    function probeDepositCap(uint256 actorSeed, uint256 overSeed) external trackFlagged {
+        address a = _actor(actorSeed);
+        uint256 supply = yesToken.totalSupply();
+        uint256 cap = market.depositCap();
+        if (supply >= cap) {
+            _record("probeDepositCap", false);
+            return;
+        }
+        uint256 headroom = cap - supply;
+        uint256 over = bound(overSeed, 0, 1); // 0 -> exactly at cap, 1 -> 1 wei over
+        uint256 amount = headroom + over;
+
+        vm.prank(a);
+        try market.mint(amount) {
+            ghost_yesMinted += amount;
+            if (supply + amount > cap) ghost_mintExceededCap++;
+            _record("probeDepositCap", true);
+        } catch {
+            _record("probeDepositCap", false);
         }
     }
 
@@ -590,7 +718,12 @@ contract Handler is Test {
         }
         newMark = bound(newMark, 0.001e18, 0.65e18);
 
-        try market.setMark(newMark) {
+        // Uses adminSetMark, not the plain keeper setMark: this action needs to
+        // land PRECISELY at the computed boundary mark in one shot regardless of
+        // distance from the current mark, and a9476ea's maxMarkStep/minMarkInterval
+        // bounds (turned on for the keeper path in this suite's setUp) would
+        // otherwise block exactly the large, well-timed jumps this probe depends on.
+        try market.adminSetMark(newMark) {
             _record("seekSeizureBoundary", true);
         } catch {
             _record("seekSeizureBoundary", false);
@@ -616,11 +749,27 @@ contract Handler is Test {
             if (!market.claimable(a)) continue;
             probedAny = true;
             uint256 amount = bound(amountSeed, 1e15, 100e18);
+            uint256 supplyBefore = yesToken.totalSupply();
+            uint256 capNow = market.depositCap();
+
+            // This probe exists specifically to test the FREEZE check (invariant
+            // 10) -- not the depositCap check (that's probeDepositCap's job).
+            // Guarantee headroom so a cap collision can never masquerade as (or
+            // mask) a mint-ignores-freeze regression: without this, depositCap
+            // being nearly full (probeDepositCap deliberately drives it there)
+            // would make this attempt revert DepositCapExceeded regardless of
+            // whether the freeze check itself is intact, silently starving
+            // invariant_FlaggedPositionsLocked's coverage of this exact path.
+            if (supplyBefore + amount > capNow) {
+                capNow = supplyBefore + amount + 1;
+                market.setDepositCap(capNow);
+            }
 
             vm.prank(a);
             try market.mint(amount) {
                 ghost_yesMinted += amount;
                 ghost_frozenMintSuccesses++;
+                if (supplyBefore + amount > capNow) ghost_mintExceededCap++;
             } catch {}
 
             uint256 yesBal = yesToken.balanceOf(a);

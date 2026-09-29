@@ -459,4 +459,14 @@ contract LiquidationEngineTest is Test {
         vm.expectRevert(CreditMarket.PositionFrozen.selector);
         engine.claim(alice);
     }
+
+    // ─── a9476ea: constructor ZeroAddress guard ────────────────────────────────
+
+    function test_Constructor_ZeroAddress_Reverts() public {
+        vm.expectRevert(LiquidationEngine.ZeroAddress.selector);
+        new LiquidationEngine(address(0), address(insuranceFund));
+
+        vm.expectRevert(LiquidationEngine.ZeroAddress.selector);
+        new LiquidationEngine(address(market), address(0));
+    }
 }
