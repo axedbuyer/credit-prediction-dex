@@ -11,6 +11,7 @@ import {
   startHealthServer,
   decodeClaimRevert,
   parseLiquidatedEvent,
+  parsePrivateKey,
   LIQUIDATION_ENGINE_ABI,
   type IPublicClient,
   type IWalletClient,
@@ -685,5 +686,18 @@ describe('LiquidatorBot — /health', () => {
     } finally {
       server.close()
     }
+  })
+})
+
+describe('parsePrivateKey', () => {
+  const HEX = 'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+  it('accepts a key with or without 0x, trimming whitespace and quotes', () => {
+    expect(parsePrivateKey(HEX, 'K')).toBe(`0x${HEX}`)
+    expect(parsePrivateKey(`0x${HEX}`, 'K')).toBe(`0x${HEX}`)
+    expect(parsePrivateKey(`  "0x${HEX}"\n`, 'K')).toBe(`0x${HEX}`)
+  })
+  it('rejects malformed keys without echoing them', () => {
+    expect(() => parsePrivateKey('0x1234', 'LIQUIDATOR_PRIVATE_KEY')).toThrow(/LIQUIDATOR_PRIVATE_KEY must be a 32-byte hex/)
+    try { parsePrivateKey('not-a-key-zzzz', 'K') } catch (e) { expect(String(e)).not.toContain('zzzz') }
   })
 })
