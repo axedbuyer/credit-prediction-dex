@@ -100,6 +100,7 @@ Keys live only in gitignored `.env` files (`.gitignore` now ignores all `.env*` 
 | Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN, PAUSER |
 | Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE |
 | Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | (none needed) |
+| Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only (owner holds it) | (none needed — claim() is permissionless); funded 0.0005 ETH + 10 USDC float 2026-09-29 |
 
 RPC is public `https://sepolia.base.org`. Each wallet holds only dust ETH (~0.00015);
 top up before heavy tx activity. Everything runs off raw EOAs — moving admin to a Safe
@@ -239,7 +240,10 @@ list.
    raw EOAs — see "Ops wallets and secrets" above), invariant/fuzz suite + audit (audit
    still deliberately deferred by the owner, not forgotten), credit-event dress
    rehearsal on Sepolia.
-2. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
+2. ~~Liquidator bot~~ — live on Railway since 2026-09-29 (`liquidator-bot`, internal).
+   Keep its USDC float ≥ the largest position it may claim (a claim costs ≤ m×Q) and watch
+   its logs for `ALERT` lines (float / InsuranceFund short).
+3. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
 
 For redeploying contracts or services after a code change, use `docs/redeploy-guide.md`
 — it captures the dry-run and EIP-712 domain-invalidation gotchas above in runbook form.

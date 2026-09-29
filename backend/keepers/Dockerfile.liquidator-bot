@@ -1,0 +1,33 @@
+# liquidator-bot — the liquidator of last resort: claims every seizure-flagged
+# Upbet (YES) position promptly (profitable or not) and hands whatever YES it
+# accumulates to the CLOB via clob-seller.ts. Internal-only service — /health
+# is the only HTTP surface, no public API. Entry point: liquidator-bot.ts, run
+# DIRECTLY via `node -r ts-node/register` — same execution model as the other
+# two keepers (see Dockerfile.liquidation-keeper for the rationale: ts-node is
+# a devDependency but required at runtime here, so the install forces
+# --include=dev).
+#
+# Build context: this directory (backend/keepers/). Railway "Root Directory" =
+# backend/keepers, "RAILWAY_DOCKERFILE_PATH" = Dockerfile.liquidator-bot.
+#
+# Build & run:
+#   docker build -f Dockerfile.liquidator-bot -t liquidator-bot .
+#   docker run --env-file .env -p 3004:3004 liquidator-bot
+
+FROM node:20-slim
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
+
+COPY tsconfig.json ./
+COPY liquidator-bot.ts holder-index.ts shutdown.ts seller.ts clob-seller.ts ./
+
+RUN groupadd --system --gid 1001 nodejs \
+ && useradd --system --uid 1001 --gid nodejs appuser \
+ && chown -R appuser:nodejs /app
+USER appuser
+
+EXPOSE 3004
+CMD ["node", "-r", "ts-node/register", "liquidator-bot.ts"]
