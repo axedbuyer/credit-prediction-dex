@@ -500,6 +500,17 @@ export function resolveAddresses(
   return { creditMarketAddress, yesTokenAddress }
 }
 
+// Accepts a hex private key with or without the 0x prefix (wallet exports often
+// omit it) and tolerates surrounding whitespace/quotes; throws a clear error
+// naming the env var — never echoing the value — if it isn't 32 bytes of hex.
+export function parsePrivateKey(raw: string, envName: string): `0x${string}` {
+  const body = raw.trim().replace(/^['"]|['"]$/g, '').replace(/^0x/i, '')
+  if (!/^[0-9a-fA-F]{64}$/.test(body)) {
+    throw new Error(`${envName} must be a 32-byte hex private key (64 hex chars, 0x optional)`)
+  }
+  return `0x${body}`
+}
+
 // ─── Production entry point ───────────────────────────────────────────────────
 
 function main(): void {
@@ -511,7 +522,7 @@ function main(): void {
 
   const { creditMarketAddress, yesTokenAddress } = resolveAddresses()
 
-  const account   = privateKeyToAccount(privateKey as `0x${string}`)
+  const account   = privateKeyToAccount(parsePrivateKey(privateKey, 'KEEPER_PRIVATE_KEY'))
   const transport = viemHttp(rpcUrl)
 
   // CHAIN_ID env var lets local Anvil (31337) work without code changes
