@@ -38,6 +38,18 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     mapping(address => uint256) public costBasis;       // 1e18-scaled entry mark (weighted avg)
     mapping(address => bool)    public claimable;       // true once keeper flags position (a lock, not a freeze)
 
+    // Launch guard-rails (admin-set; the constructor leaves both OFF so tests and the
+    // local demo can move freely — the deploy script turns them on):
+    // - depositCap: max outstanding complete sets (YES.totalSupply) mint() may create.
+    // - setMark bound: a KEEPER_ROLE update may move the mark by at most maxMarkStep
+    //   (absolute, 1e18-scaled) and no sooner than minMarkInterval after the previous
+    //   one, so a compromised keeper key can't teleport the mark (it would take
+    //   (Δ / maxMarkStep) × minMarkInterval to walk it). The admin can override.
+    uint256 public depositCap      = type(uint256).max;
+    uint256 public maxMarkStep     = 1e18;
+    uint256 public minMarkInterval;
+    uint256 public lastMarkUpdate;
+
     event TokensMinted(address indexed user, uint256 amount);
     event TokensRedeemed(address indexed user, uint256 tokenAmount);
     event YESSettled(address indexed user, uint256 amount);
@@ -46,6 +58,9 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     event FlaggedClaimable(address indexed user, uint256 owedPerUnit, uint256 timestamp);
     event FundingSettled(address indexed user, int256 delta);
     event PositionCured(address indexed user, uint256 amountPaid);
+    event MarkUpdated(uint256 oldMark, uint256 newMark, bool adminOverride);
+    event DepositCapUpdated(uint256 depositCap);
+    event MarkBoundsUpdated(uint256 maxMarkStep, uint256 minMarkInterval);
 
     error CreditEventAlreadyConfirmed();
     error CreditEventNotConfirmed();
@@ -54,6 +69,11 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     error MotionInProgress();
     error PositionFrozen();
     error PositionNotFlagged();
+    error ZeroAddress();
+    error DepositCapExceeded();
+    error InvalidMark();
+    error MarkStepTooLarge();
+    error MarkUpdateTooSoon();
 
     constructor(
         address admin,
@@ -63,6 +83,10 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 _initialMark,
         uint256 _epochLength
     ) {
+        if (admin == address(0) || _usdc == address(0) || _yesToken == address(0) || _noToken == address(0)) {
+            revert ZeroAddress();
+        }
+        if (_initialMark == 0 || _initialMark >= 1e18) revert InvalidMark();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         usdc = _usdc;
         yesToken = _yesToken;
@@ -70,6 +94,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         currentMark = _initialMark;
         epochLength = _epochLength;
         lastFundingTime = block.timestamp;
+        lastMarkUpdate  = block.timestamp;
     }
 
     // ─── funding ────────────────────────────────────────────────────────────────
@@ -110,6 +135,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // currentMark is the CLOB price of YES, not the mint ratio.
     function mint(uint256 usdcAmount) external nonReentrant whenNotPaused {
         if (claimable[msg.sender]) revert PositionFrozen();
+        if (IERC20(yesToken).totalSupply() + usdcAmount > depositCap) revert DepositCapExceeded();
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), usdcAmount);
         _accrueFunding();
         // Read pre-mint balance before settling so cost basis uses the same snapshot.
@@ -299,10 +325,43 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         _accrueFunding();
     }
 
-    // Accrues at the old mark first, then updates. KEEPER_ROLE only.
+    // Accrues at the old mark first, then updates. KEEPER_ROLE only, bounded by
+    // maxMarkStep per update and minMarkInterval between updates.
     function setMark(uint256 newMark) external onlyRole(KEEPER_ROLE) {
+        if (newMark == 0 || newMark >= 1e18) revert InvalidMark();
+        if (block.timestamp < lastMarkUpdate + minMarkInterval) revert MarkUpdateTooSoon();
+        uint256 step = newMark > currentMark ? newMark - currentMark : currentMark - newMark;
+        if (step > maxMarkStep) revert MarkStepTooLarge();
+        _setMark(newMark, false);
+    }
+
+    // Admin override for the bounds (e.g. a sudden repricing on real news): same
+    // validity check, no step/interval limit. DEFAULT_ADMIN_ROLE (the Safe after the
+    // role ceremony).
+    function adminSetMark(uint256 newMark) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newMark == 0 || newMark >= 1e18) revert InvalidMark();
+        _setMark(newMark, true);
+    }
+
+    function _setMark(uint256 newMark, bool adminOverride) internal {
         _accrueFunding();
-        currentMark = newMark;
+        emit MarkUpdated(currentMark, newMark, adminOverride);
+        currentMark    = newMark;
+        lastMarkUpdate = block.timestamp;
+    }
+
+    function setMarkBounds(uint256 _maxMarkStep, uint256 _minMarkInterval) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_maxMarkStep == 0) revert InvalidMark();
+        maxMarkStep     = _maxMarkStep;
+        minMarkInterval = _minMarkInterval;
+        emit MarkBoundsUpdated(_maxMarkStep, _minMarkInterval);
+    }
+
+    // Max outstanding complete sets. Lowering it below the current supply only blocks
+    // new mints — it never touches existing positions.
+    function setDepositCap(uint256 _depositCap) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        depositCap = _depositCap;
+        emit DepositCapUpdated(_depositCap);
     }
 
     // CLOB_ROLE: clears a user's outstanding fundingDebt ledger entry. Caller must

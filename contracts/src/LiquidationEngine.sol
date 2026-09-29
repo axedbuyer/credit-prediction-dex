@@ -45,8 +45,10 @@ contract LiquidationEngine is ReentrancyGuard {
 
     error NotClaimable();
     error MotionPending();
+    error ZeroAddress();
 
     constructor(address _creditMarket, address _insuranceFund) {
+        if (_creditMarket == address(0) || _insuranceFund == address(0)) revert ZeroAddress();
         creditMarket  = _creditMarket;
         insuranceFund = _insuranceFund;
     }

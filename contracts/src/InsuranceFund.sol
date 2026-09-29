@@ -41,8 +41,10 @@ contract InsuranceFund is AccessControl, ReentrancyGuard {
     error TimelockNotExpired(uint256 executeAfter);
     error AlreadyExecuted();
     error InvalidWithdrawalId();
+    error ZeroAddress();
 
     constructor(address admin, address _usdc) {
+        if (admin == address(0) || _usdc == address(0)) revert ZeroAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         usdc = _usdc;
     }
@@ -88,6 +90,7 @@ contract InsuranceFund is AccessControl, ReentrancyGuard {
     // Called by LiquidationEngine in tail-case claims to top up NO accretion shortfall.
     function coverShortfall(uint256 amount, address recipient)
         external
+        nonReentrant
         onlyRole(LIQUIDATOR_ROLE)
     {
         IERC20(usdc).safeTransfer(recipient, amount);
