@@ -733,7 +733,7 @@ contract CLOBSettlementTest is Test {
 
         // A mark of ≤1% keeps one year of carry on the taker's full 1,000e18 balance
         // at or below 10e18, comfortably under the price floor chosen below.
-        uint256 mark = bound(uint256(markRaw), 0, 0.01e18);
+        uint256 mark = bound(uint256(markRaw), 1, 0.01e18); // 0 is an invalid mark (setMark reverts InvalidMark)
         market.grantRole(market.KEEPER_ROLE(), admin);
         market.setMark(mark);                 // elapsed == 0: sets the rate, accrues nothing
         vm.warp(block.timestamp + 365 days);  // → cumFundingPerYES == cumFundingPerNO == mark
