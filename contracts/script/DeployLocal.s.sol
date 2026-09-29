@@ -94,6 +94,13 @@ contract DeployLocal is Script {
         // ── trading fee: 50 bps of min(p, 1-p) x Q, split 50/50 team/insurance ─
         clob.setFeeConfig(50, deployer, address(insuranceFund), 5_000);
 
+        // Launch guard-rails (depositCap, setMark bounds) are deliberately left OFF
+        // here — contract defaults are depositCap = type(uint256).max, maxMarkStep =
+        // 1e18, minMarkInterval = 0, i.e. unbounded. The anvil demo (scripts/demo/)
+        // moves the mark freely and warps time, so bounding it would break beats
+        // that jump the mark or fast-forward past minMarkInterval. Only
+        // script/Deploy.s.sol (the real Base Sepolia deploy) turns these on.
+
         vm.stopBroadcast();
 
         // ── 8. summary ────────────────────────────────────────────────────────
