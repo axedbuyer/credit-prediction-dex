@@ -145,4 +145,14 @@ contract OracleRouterTest is Test {
         vm.expectRevert(); // whenNotPaused fires before CreditEventAlreadyConfirmed
         market.redeem(1e18);
     }
+
+    // ─── a9476ea: constructor ZeroAddress guard ────────────────────────────────
+
+    function test_Constructor_ZeroAddress_Reverts() public {
+        vm.expectRevert(OracleRouter.ZeroAddress.selector);
+        new OracleRouter(address(0), address(market));
+
+        vm.expectRevert(OracleRouter.ZeroAddress.selector);
+        new OracleRouter(admin, address(0));
+    }
 }

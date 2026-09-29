@@ -790,4 +790,14 @@ contract CLOBSettlementTest is Test {
             assertEq(b0.market - b1.market, owed, "paid NO credit is the only collateral outflow");
         }
     }
+
+    // ─── a9476ea: constructor ZeroAddress guard ────────────────────────────────
+
+    function test_Constructor_ZeroAddress_Reverts() public {
+        vm.expectRevert(CLOBSettlement.ZeroAddress.selector);
+        new CLOBSettlement(address(0), admin);
+
+        vm.expectRevert(CLOBSettlement.ZeroAddress.selector);
+        new CLOBSettlement(address(market), address(0));
+    }
 }

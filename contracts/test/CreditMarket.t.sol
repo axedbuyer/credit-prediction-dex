@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {YESToken} from "../src/YESToken.sol";
 import {NOToken} from "../src/NOToken.sol";
@@ -1028,5 +1029,250 @@ contract CreditMarketTest is Test {
             "epochsToExpire must be finite -- the ledger debt already eats into runway");
         assertEq(mkt.breakevenMark(bob), mkt.costBasis(bob) + debt * 1e18 / 100e18,
             "breakevenMark == costBasis + owed()-per-unit (ledger debt included)");
+    }
+
+    // ─── a9476ea: constructor guard-rails (ZeroAddress, InvalidMark) ──────────
+
+    function test_Constructor_ZeroAddress_Reverts() public {
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(address(0), address(mockUsdc), address(yesToken), address(noToken), 0.23e18, 1 days);
+
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(admin, address(0), address(yesToken), address(noToken), 0.23e18, 1 days);
+
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(admin, address(mockUsdc), address(0), address(noToken), 0.23e18, 1 days);
+
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(admin, address(mockUsdc), address(yesToken), address(0), 0.23e18, 1 days);
+    }
+
+    function test_Constructor_InvalidMark_Reverts() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        new CreditMarket(admin, address(mockUsdc), address(yesToken), address(noToken), 0, 1 days);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        new CreditMarket(admin, address(mockUsdc), address(yesToken), address(noToken), 1e18, 1 days);
+    }
+
+    // ─── a9476ea: depositCap ────────────────────────────────────────────────
+
+    function test_DepositCap_DefaultUncapped() public {
+        assertEq(market.depositCap(), type(uint256).max, "depositCap starts uncapped");
+    }
+
+    function test_DepositCap_AdminCanSetRaiseLower_EmitsEvent() public {
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.DepositCapUpdated(5_000e18);
+        market.setDepositCap(5_000e18);
+        assertEq(market.depositCap(), 5_000e18, "cap set");
+
+        market.setDepositCap(9_000e18); // raise
+        assertEq(market.depositCap(), 9_000e18, "cap raised");
+
+        market.setDepositCap(500e18); // lower
+        assertEq(market.depositCap(), 500e18, "cap lowered");
+    }
+
+    function test_DepositCap_NonAdmin_Reverts() public {
+        bytes32 adminRole = market.DEFAULT_ADMIN_ROLE(); // cache before prank -- external call
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        market.setDepositCap(1_000e18);
+    }
+
+    function test_Mint_ExactlyAtCap_Succeeds_OneWeiOver_Reverts() public {
+        market.setDepositCap(1_000e18);
+
+        vm.prank(alice);
+        market.mint(1_000e18); // exactly at cap
+        assertEq(yesToken.totalSupply(), 1_000e18, "minted exactly to the cap");
+
+        address bob = makeAddr("bob-cap-over");
+        mockUsdc.mint(bob, 10);
+        vm.prank(bob);
+        mockUsdc.approve(address(market), type(uint256).max);
+
+        vm.prank(bob);
+        vm.expectRevert(CreditMarket.DepositCapExceeded.selector);
+        market.mint(1); // 1 wei over the cap
+    }
+
+    function test_DepositCap_LoweringBelowSupply_BlocksMint_ButRedeemStillWorks() public {
+        vm.prank(alice);
+        market.mint(1_000e18); // supply now 1000e18
+
+        market.setDepositCap(500e18); // below current supply -- only blocks NEW mints
+
+        vm.prank(alice);
+        vm.expectRevert(CreditMarket.DepositCapExceeded.selector);
+        market.mint(1e18);
+
+        vm.prank(alice);
+        market.redeem(200e18); // must still work despite supply sitting above the cap
+        assertEq(yesToken.totalSupply(), 800e18, "redeem unaffected by a cap set below current supply");
+    }
+
+    // ─── a9476ea: bounded setMark / adminSetMark / setMarkBounds ──────────────
+
+    function test_SetMark_KeeperWithinBound_Succeeds_AccruesAtOldMarkFirst() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 2 hours); // clear the constructor-set interval
+
+        uint256 oldMark = market.currentMark(); // 0.23e18
+        uint256 newMark = oldMark + 0.03e18;     // within the 0.05e18 step bound
+        uint256 expectedCum = oldMark * 2 hours / 365 days; // accrual at the OLD mark, over the 2h just warped
+
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.MarkUpdated(oldMark, newMark, false);
+        market.setMark(newMark);
+
+        assertEq(market.cumulativeFundingPerYES(), expectedCum,
+            "funding accrued at the OLD mark before the mark changed");
+        assertEq(market.currentMark(), newMark, "mark updated");
+        assertEq(market.lastMarkUpdate(), block.timestamp, "lastMarkUpdate advanced");
+    }
+
+    function test_SetMark_StepTooLarge_Reverts() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 2 hours);
+
+        uint256 newMark = market.currentMark() + 0.06e18; // exceeds the 0.05e18 step bound
+        vm.expectRevert(CreditMarket.MarkStepTooLarge.selector);
+        market.setMark(newMark);
+    }
+
+    function test_SetMark_TooSoon_Reverts_ThenSucceedsAfterInterval() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 2 hours);
+
+        uint256 mark1 = market.currentMark() + 0.02e18;
+        market.setMark(mark1); // succeeds; lastMarkUpdate reset to now
+
+        uint256 mark2 = mark1 + 0.01e18;
+        vm.expectRevert(CreditMarket.MarkUpdateTooSoon.selector);
+        market.setMark(mark2); // same block -- immediately too soon
+
+        vm.warp(block.timestamp + 30 minutes); // still short of the 1h interval
+        vm.expectRevert(CreditMarket.MarkUpdateTooSoon.selector);
+        market.setMark(mark2);
+
+        vm.warp(block.timestamp + 31 minutes); // now 61 min since mark1 -- interval cleared
+        market.setMark(mark2);
+        assertEq(market.currentMark(), mark2, "second update succeeds once minMarkInterval has elapsed");
+    }
+
+    // 23% -> 43% at a 5%/1h bound is a 20-point move over a 5-point step: exactly
+    // 4 updates, needing at least 3 intervening 1h intervals (>= 3h total elapsed
+    // from the first update to the last).
+    function test_SetMark_WalkingFarRequiresMultipleIntervals() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 1 hours); // clear the constructor-set interval
+
+        assertEq(market.currentMark(), 0.23e18, "sanity: starting mark");
+        uint256 startTime = block.timestamp;
+
+        market.setMark(0.28e18);
+        vm.warp(block.timestamp + 1 hours);
+        market.setMark(0.33e18);
+        vm.warp(block.timestamp + 1 hours);
+        market.setMark(0.38e18);
+        vm.warp(block.timestamp + 1 hours);
+        market.setMark(0.43e18);
+
+        assertEq(market.currentMark(), 0.43e18, "reached the 43% target after 4 bounded 5%-steps");
+        assertGe(block.timestamp - startTime, 3 hours,
+            "walking 20 points at a 5%/1h bound takes at least 3 intervals (>=3h)");
+    }
+
+    function test_SetMark_ZeroOrOneE18_Reverts() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMark(0);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMark(1e18);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMark(2e18);
+    }
+
+    // Both guard-rails default OFF (maxMarkStep = 1e18, minMarkInterval = 0), so
+    // a big jump works immediately, with no warp needed between calls.
+    function test_SetMark_BoundsOffByDefault_BigJumpWorks() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.setMark(0.05e18); // big jump down from 0.23e18
+        assertEq(market.currentMark(), 0.05e18);
+
+        market.setMark(0.95e18); // big jump up, immediately again -- no interval wait
+        assertEq(market.currentMark(), 0.95e18);
+    }
+
+    function test_AdminSetMark_BypassesStepAndInterval_ResetsIntervalClock() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.01e18, 1 hours); // tight bound
+
+        uint256 oldMark = market.currentMark(); // 0.23e18
+        uint256 newMark = 0.90e18;              // far beyond the 0.01e18 step bound
+
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.MarkUpdated(oldMark, newMark, true);
+        market.adminSetMark(newMark);
+
+        assertEq(market.currentMark(), newMark, "admin override bypasses the step bound");
+        assertEq(market.lastMarkUpdate(), block.timestamp, "adminSetMark also resets the interval clock");
+
+        // Proof the clock was actually reset (not left at its pre-override value):
+        // the KEEPER path is immediately blocked by the still-configured interval,
+        // measured from THIS update, not some earlier one.
+        vm.expectRevert(CreditMarket.MarkUpdateTooSoon.selector);
+        market.setMark(newMark + 0.005e18);
+    }
+
+    function test_AdminSetMark_Validity_NotBypassed() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.adminSetMark(0);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.adminSetMark(1e18);
+    }
+
+    function test_AdminSetMark_NonAdmin_Reverts() public {
+        bytes32 adminRole = market.DEFAULT_ADMIN_ROLE(); // cache before prank -- external call
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        market.adminSetMark(0.5e18);
+    }
+
+    function test_SetMarkBounds_NonAdmin_Reverts() public {
+        bytes32 adminRole = market.DEFAULT_ADMIN_ROLE(); // cache before prank -- external call
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        market.setMarkBounds(0.05e18, 1 hours);
+    }
+
+    function test_SetMarkBounds_ZeroStep_Reverts() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMarkBounds(0, 1 hours);
+    }
+
+    function test_SetMarkBounds_EmitsEvent() public {
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.MarkBoundsUpdated(0.05e18, 1 hours);
+        market.setMarkBounds(0.05e18, 1 hours);
+        assertEq(market.maxMarkStep(), 0.05e18);
+        assertEq(market.minMarkInterval(), 1 hours);
     }
 }

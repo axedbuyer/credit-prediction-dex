@@ -106,11 +106,24 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         market.grantRole(market.LIQUIDATOR_ROLE(), address(liquidationEngine));
         insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(), address(liquidationEngine));
 
+        // a9476ea launch guard-rails: turn ON both, with realistic values, so the
+        // suite actually exercises the bounds (not just the unbounded defaults
+        // the unit tests use). depositCap is set high enough to leave headroom
+        // for test_Repro_SolvencyFormulaOneWeiRoundingSlack's own ~5024.13e18
+        // mint total (same setUp(), so it must stay under this cap too) while
+        // still being reachable by the fuzz campaign's mints well within a
+        // single run's depth budget -- Handler.probeDepositCap additionally
+        // drives supply deterministically up against the cap every call it
+        // fires, rather than relying on mint()'s random amounts alone.
+        market.setMarkBounds(0.05e18, 1 hours);
+        market.setDepositCap(10_000e18);
+
         // ── deploy handler, then grant it the privileged roles it drives ───────
         handler = new Handler(usdc, yesToken, noToken, market, clob, router, insuranceFund, liquidationEngine, teamWallet);
 
         market.grantRole(market.KEEPER_ROLE(), address(handler));
         market.grantRole(market.ORACLE_ROLE(), address(handler)); // setMotionPending
+        market.grantRole(market.DEFAULT_ADMIN_ROLE(), address(handler)); // adminSetMark (bypasses the bounds above)
         router.grantRole(router.ORACLE_ROLE(), address(handler)); // confirmCreditEvent
         clob.grantRole(clob.DEFAULT_ADMIN_ROLE(), address(handler)); // toggleFee
 
@@ -124,7 +137,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](18);
+        bytes4[] memory selectors = new bytes4[](21);
         selectors[0] = Handler.mint.selector;
         selectors[1] = Handler.redeem.selector;
         selectors[2] = Handler.settleYES.selector;
@@ -143,6 +156,9 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         selectors[15] = Handler.probeFlaggedActor.selector;
         selectors[16] = Handler.nearBoundaryTinyBuy.selector;
         selectors[17] = Handler.probeMissedSeizureFlag.selector;
+        selectors[18] = Handler.adminSetMark.selector;
+        selectors[19] = Handler.probeMarkStepBound.selector;
+        selectors[20] = Handler.probeDepositCap.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -277,6 +293,38 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             0,
             "owed(user) decreased for a user who remained flagged/claimable across an action -- funding must keep accruing (no freeze) while locked"
         );
+    }
+
+    // ── a9476ea launch guard-rails: depositCap and bounded setMark ──────────────
+
+    function invariant_DepositCapRespected() public view {
+        assertEq(
+            handler.ghost_mintExceededCap(),
+            0,
+            "mint() succeeded that pushed YES.totalSupply() above the depositCap in force at that moment"
+        );
+    }
+
+    function invariant_MarkStepAndIntervalBoundsRespected() public view {
+        assertEq(
+            handler.ghost_keeperStepViolation(),
+            0,
+            "a KEEPER_ROLE setMark() succeeded with |newMark - oldMark| > maxMarkStep"
+        );
+        assertEq(
+            handler.ghost_keeperIntervalViolation(),
+            0,
+            "a KEEPER_ROLE setMark() succeeded sooner than minMarkInterval after the previous mark update"
+        );
+    }
+
+    // currentMark must always satisfy the same 0 < mark < 1e18 validity the
+    // constructor and every setMark/adminSetMark call enforce -- across every
+    // action in the campaign, including adminSetMark's bypass of the step/
+    // interval bounds (which still enforces this validity check).
+    function invariant_MarkAlwaysInValidRange() public view {
+        uint256 m = market.currentMark();
+        assertTrue(m > 0 && m < 1e18, "currentMark left the valid (0, 1e18) range");
     }
 
     // ── invariant 5: no flag/claim succeeds during a pending motion ─────────────
