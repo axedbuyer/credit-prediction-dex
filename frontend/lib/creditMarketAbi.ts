@@ -151,6 +151,9 @@ export const CREDIT_MARKET_ABI = [
     inputs: [{ name: '', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  // Custom errors, so viem decodes reverts by name (TradePanel maps them to copy).
+  { type: 'error', name: 'DepositCapExceeded', inputs: [] },
+  { type: 'error', name: 'PositionFrozen',     inputs: [] },
 ] as const
 
 export const ERC20_ABI = [
