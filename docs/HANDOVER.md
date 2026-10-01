@@ -29,10 +29,10 @@ canonical references below.*
   2026-10-01** (`docs/redeploy-batch1-runbook.md`, start block 47528136): unified `owed()`
   fix for F1/F2/F4, `depositCap` (50,000 USDC), bounded keeper `setMark` (≤ 5 points per
   update, ≥ 1h apart; admin `adminSetMark` bypasses), Slither follow-ups. One
-  `Deploy.s.sol` broadcast granted every role and asserted the config on-chain. Explorer
-  source verification: YES, NO, CreditMarket, CLOBSettlement verified on Blockscout;
-  OracleRouter / InsuranceFund / LiquidationEngine were still being retried through
-  Blockscout's rate limiting ("Too many requests") — re-check on the explorer. The
+  `Deploy.s.sol` broadcast granted every role and asserted the config on-chain. All 7
+  source-verified on Blockscout (2026-10-01, after riding out its "Too many requests"
+  rate limiting — check status via `/api/v2/smart-contracts/<addr>`, not forge's own
+  status poll, which is rate-limited too). The
   `ETHERSCAN_API_KEY` in `contracts/.env` is rejected by Etherscan v2; use the
   `forge verify-contract … --verifier blockscout` form in the runbook's Outcome section.
   Addresses: `contracts/deployments/base-sepolia.json` (tracked; do not hand-edit).
