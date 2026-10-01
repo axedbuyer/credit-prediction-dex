@@ -12,11 +12,19 @@ src/YESToken.sol          — ERC-20, transfer restricted to CLOB_ROLE
 src/NOToken.sol           — ERC-20, transfer restricted to CLOB_ROLE
 src/CLOBSettlement.sol    — EIP-712 order settlement
 src/OracleRouter.sol      — credit event trigger
-src/InsuranceFund.sol     — USDC reserve with timelock
+src/InsuranceFund.sol     — USDC reserve with timelock (ONE, shared by all markets)
+src/LiquidationEngine.sol — formulaic claim of flagged YES positions
+src/MarketRegistry.sol    — (multi-market) slug → per-market contract set; entries immutable
+
+Multi-market: one CreditMarket/YES/NO/CLOBSettlement/OracleRouter/LiquidationEngine set
+per market (script/AddMarket.s.sol), recorded in MarketRegistry. Never let one market's
+contracts touch another market's collateral.
 
 ## Invariant
-YES.totalSupply() × currentMark + NO.totalSupply() × (1 − currentMark)
-must always equal USDC balance of CreditMarket. Never break this.
+Per market: YES.totalSupply() == NO.totalSupply(), and the CreditMarket's USDC collateral
+always backs every outstanding pair (1 USDC each) plus credited-but-unpaid NO funding.
+The 10 hard invariants in root CLAUDE.md are canonical and hold per market.
 
 ## Do not build
-MarketFactory, LiquidityVault, ISDARelayer, BondModule
+MarketFactory (use AddMarket.s.sol + MarketRegistry), LiquidityVault, ISDARelayer, BondModule,
+shared multi-market CLOBSettlement (v2)

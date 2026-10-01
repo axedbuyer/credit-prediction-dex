@@ -1,7 +1,7 @@
-# Multi-market — design doc (DRAFT, decisions pending)
+# Multi-market — design doc (decisions LOCKED 2026-10-01)
 
-*Written 2026-10-01, right after the batch-1 redeploy. Status: **proposal — nothing built**.
-Owner decisions in §3 gate all code. Read with root `CLAUDE.md` (canonical spec) and
+*Written 2026-10-01, right after the batch-1 redeploy. Status: **D1–D6 decided 2026-10-01
+(see §3 "Decision record"); phase 0 (spec) done, phases 1–4 not started.** Read with root `CLAUDE.md` (canonical spec) and
 `docs/HANDOVER.md` (live state).*
 
 ## 1. Goal and non-goals
@@ -37,7 +37,20 @@ Those lines get rewritten as part of phase 0 (§5) once §3 is decided.
 | Frontend | `MSTR_MARKET` constant; addresses from build-time `NEXT_PUBLIC_*` vars (one set); `/market/[id]` exists but `id` only feeds chart/book components; portfolio, liquidate, admin all single-market; entity text in several pages | `frontend/lib/{constants,contracts}.ts`, `app/**` |
 | Ops | Railway env vars hold one address set; `uptime.yml` checks one CreditMarket's `lastFundingTime` | `docs/hosted-env-vars.md`, `.github/workflows/uptime.yml` |
 
-## 3. Decisions for the owner (each with a recommendation)
+## 3. Decisions (owner-approved 2026-10-01)
+
+### Decision record
+
+| # | Decision | Outcome |
+|---|---|---|
+| D1 | Contract topology | **A** — one contract set per market + on-chain `MarketRegistry`; entries immutable once registered (admin may only toggle `active`); MSTR batch-1 set registered as market #1, no redeploy |
+| D2 | InsuranceFund | **Shared** — one fund, `LIQUIDATOR_ROLE` per LiquidationEngine; per-market draws attributed off-chain from USDC transfers fund → CreditMarket |
+| D3 | CLOBSettlement | **Per market** — no contract change; shared CLOB is v2 |
+| D4 | Ops wallets | **One** keeper / settler / liquidator wallet across markets; deployer = attester until Safe |
+| D5 | Discovery | **Registry** holds slug, entity name, entity type, six addresses, `active`; title derived from entity name; long-form copy in a frontend file keyed by slug with generic fallback; one `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` |
+| D6 | Launch markets | `mstr` MicroStrategy (corporate, live 23%); `crwv` CoreWeave (corporate, 10%); `turkey` Turkey / Republic of Türkiye (sovereign, 2%). Corporate events: Bankruptcy, Failure to Pay. Sovereign events: Failure to Pay, Repudiation/Moratorium, Restructuring. Each: depositCap 50,000 USDC, setMark ≤ 5 pts / ≥ 1h, fee 50 bps 50/50. New tokens `YES-<TICKER>`/`NO-<TICKER>` (CRWV, TUR); MSTR keeps `YES`/`NO` |
+
+The original options and rationale follow, kept for context.
 
 ### D1 — Contract topology  ★ the big one
 
