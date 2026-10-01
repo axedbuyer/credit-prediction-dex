@@ -185,5 +185,16 @@ for per-market CLOBs now.
   already handles an approve step.
 - **Public RPC load:** keepers/bot polling N markets on `sepolia.base.org` multiplies
   `eth_call`/`getLogs` volume — batch with multicall; consider a paid RPC before mainnet.
+- **CLOBSettlement does not validate order tokens (pre-existing, found in phase 1).** It
+  classifies a trade only by `tokenIn == yesToken/noToken`; any other token is treated as
+  the NO leg. Two orders signed on market B's domain that name market A's tokens would
+  settle as a B-NO trade the signers never intended. Not exploitable without both parties
+  signing malformed orders (a matcher can't forge signatures), and A's tokens can never
+  move through B's CLOB (no `CLOB_ROLE`). **Phase 2/3 mitigation (required):**
+  order-book-server rejects any order whose tokens aren't exactly {USDC, that market's
+  YES or NO} per the registry; the settler re-checks both orders against the market of
+  the CLOB it submits to; the frontend takes the EIP-712 domain and the token addresses
+  from the SAME registry entry. On-chain fix (`require` tokens ∈ {yes, no, usdc}) rides
+  the next CLOBSettlement redeploy.
 - **Open:** sovereign "credit event" definitions differ from corporate (repudiation/
   moratorium, restructuring) — confirm which event types each launch market covers.

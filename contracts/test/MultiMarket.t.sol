@@ -46,7 +46,7 @@ contract MultiMarketTest is Test {
         B = MarketSetBuilder.build(address(usdc), insuranceFund, "YES-TRY", "NO-TRY", MARK);
 
         _finish(A, "crwv", "CoreWeave", MarketRegistry.EntityType.Corporate);
-        _finish(B, "try", "Republic of Turkey", MarketRegistry.EntityType.Sovereign);
+        _finish(B, "try", "Turkey", MarketRegistry.EntityType.Sovereign);
 
         usdc.mint(address(insuranceFund), IF_SEED);
         address[3] memory users = [alice, bob, liq];
