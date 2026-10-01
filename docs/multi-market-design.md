@@ -48,7 +48,7 @@ Those lines get rewritten as part of phase 0 (§5) once §3 is decided.
 | D3 | CLOBSettlement | **Per market** — no contract change; shared CLOB is v2 |
 | D4 | Ops wallets | **One** keeper / settler / liquidator wallet across markets; deployer = attester until Safe |
 | D5 | Discovery | **Registry** holds slug, entity name, entity type, six addresses, `active`; title derived from entity name; long-form copy in a frontend file keyed by slug with generic fallback; one `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` |
-| D6 | Launch markets | `mstr` MicroStrategy (corporate, live 23%); `crwv` CoreWeave (corporate, 10%); `turkey` Turkey / Republic of Türkiye (sovereign, 2%). Corporate events: Bankruptcy, Failure to Pay. Sovereign events: Failure to Pay, Repudiation/Moratorium, Restructuring. Each: depositCap 50,000 USDC, setMark ≤ 5 pts / ≥ 1h, fee 50 bps 50/50. New tokens `YES-<TICKER>`/`NO-<TICKER>` (CRWV, TUR); MSTR keeps `YES`/`NO` |
+| D6 | Launch markets | `mstr` MicroStrategy (corporate, live 23%); `crwv` CoreWeave (corporate, 10%); `try` Turkey / Republic of Turkey (sovereign, 2%). Corporate events: Bankruptcy, Failure to Pay. Sovereign events: Failure to Pay, Repudiation/Moratorium, Restructuring. Each: depositCap 50,000 USDC, setMark ≤ 5 pts / ≥ 1h, fee 50 bps 50/50. New tokens `YES-<TICKER>`/`NO-<TICKER>` (CRWV, TRY); MSTR keeps `YES`/`NO` |
 
 The original options and rationale follow, kept for context.
 
