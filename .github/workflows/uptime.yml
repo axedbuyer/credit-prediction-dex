@@ -53,7 +53,7 @@ env:
   LIQUIDATION_KEEPER_HEALTH_URL: https://liquidation-keeper-production.up.railway.app/health
   FRONTEND_URL: https://credit-prediction-dex.vercel.app/
   BASE_SEPOLIA_RPC_URL: https://sepolia.base.org
-  CREDIT_MARKET_ADDRESS: "0x26C3d2E6C29e8E414A4424aa9c9AFa5eFF15F51b"
+  CREDIT_MARKET_ADDRESS: "0xe8D0448Fb825875AE2CEFfEdA561Ea98508F8369"
   # Function selectors below are `cast sig` of the public getters on
   # CreditMarket.sol (auto-generated getters for public state vars,
   # uint256, no args) — verified against a live eth_call during authoring:
