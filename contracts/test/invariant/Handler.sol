@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {YESToken} from "../../src/YESToken.sol";
 import {NOToken} from "../../src/NOToken.sol";
@@ -124,6 +125,18 @@ contract Handler is Test {
                                                     // the previous mark update
 
     // ── call tallies (for the report) ────────────────────────────────────────
+    // ── multi-market ghosts (MultiMarketInvariant.t.sol) ─────────────────────────
+    // All inert in the single-market suite (watchedMarket stays zero). `watchedMarket` is
+    // ANOTHER market's CreditMarket sharing this handler's USDC/InsuranceFund: no action on
+    // THIS market may ever change its USDC balance.
+    address public watchedMarket;
+    uint256 public ghost_foreignCollateralDelta;    // watched market's balance moved during an action here
+    uint256 public ghost_insuranceSeeded;           // constructor top-up of the (shared) InsuranceFund
+    uint256 public ghost_insuranceDeposited;        // fundInsurance() deposits
+    uint256 public ghost_insuranceFeesIn;           // Σ FeeCharged.toInsurance emitted by THIS market's CLOB
+    uint256 public ghost_insuranceShortfallOut;     // Σ (owed - m*Q) of tail-case claims on THIS market
+    uint256 public ghost_claimCollateralMismatch;   // a claim moved this market's collateral by != owed(user)
+
     string[] public actionNames;
     mapping(string => bool) internal _seenAction;
     mapping(string => uint256) public callCounts;
@@ -173,6 +186,11 @@ contract Handler is Test {
         // Pre-fund InsuranceFund generously so tail-case claims (owed > tokenValue)
         // can actually be exercised rather than reverting for lack of reserve every time.
         usdc.mint(address(insuranceFund), 10_000_000e18);
+        ghost_insuranceSeeded = 10_000_000e18;
+    }
+
+    function setWatchedMarket(address m) external {
+        watchedMarket = m;
     }
 
     function numActors() external view returns (uint256) {
@@ -245,7 +263,11 @@ contract Handler is Test {
             wasFlagged[i] = market.claimable(actors[i]);
             snap[i] = wasFlagged[i] ? market.owed(actors[i]) : 0;
         }
+        uint256 foreignBefore = watchedMarket == address(0) ? 0 : usdc.balanceOf(watchedMarket);
         _;
+        if (watchedMarket != address(0) && usdc.balanceOf(watchedMarket) != foreignBefore) {
+            ghost_foreignCollateralDelta++;
+        }
         for (uint256 i = 0; i < n; i++) {
             if (wasFlagged[i] && market.claimable(actors[i])) {
                 if (market.owed(actors[i]) < snap[i]) {
@@ -396,11 +418,25 @@ contract Handler is Test {
 
         (CLOBSettlement.Order memory makerOrder, bytes memory makerSig, CLOBSettlement.Order memory takerOrder, bytes memory takerSig) = _buildAndSign(t);
 
+        vm.recordLogs();
         try clob.verifyAndSettle(makerOrder, makerSig, takerOrder, takerSig) {
             if (sellerFlagged || buyerFlagged) ghost_frozenTradeSuccesses++;
+            _trackInsuranceFee();
             _record("clobTrade", true);
         } catch {
             _record("clobTrade", false);
+        }
+    }
+
+    // Sums FeeCharged.toInsurance emitted by this market's CLOB over the trade just settled.
+    function _trackInsuranceFee() internal {
+        bytes32 sig = keccak256("FeeCharged(address,bool,uint256,uint256,uint256)");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(clob) && logs[i].topics[0] == sig) {
+                (, , uint256 toInsurance, ) = abi.decode(logs[i].data, (bool, uint256, uint256, uint256));
+                ghost_insuranceFeesIn += toInsurance;
+            }
         }
     }
 
@@ -860,8 +896,18 @@ contract Handler is Test {
         uint256 tokenValue = Q * m / 1e18;
         bool tailCase = owedTotal > tokenValue;
 
+        uint256 collateralBefore = usdc.balanceOf(address(market));
+        int256 liquidatorDelta = _projectSettleDelta(liquidator);
         vm.prank(liquidator);
         try liquidationEngine.claim(target) {
+            // Normal case: collateral += owed (P). Tail case: collateral += m*Q (P) +
+            // (owed - m*Q) (InsuranceFund top-up) = owed. Either way owed(target), less any
+            // NO credit settleFunding(liquidator) pays out of collateral on the way.
+            if (tailCase) ghost_insuranceShortfallOut += owedTotal - tokenValue;
+            uint256 liquidatorPayout = liquidatorDelta > 0 ? uint256(liquidatorDelta) : 0;
+            if (usdc.balanceOf(address(market)) != collateralBefore + owedTotal - liquidatorPayout) {
+                ghost_claimCollateralMismatch++;
+            }
             if (pendingBefore) ghost_motionPendingClaimSuccesses++;
             if (market.fundingDebt(target) != 0) {
                 ghost_liquidationLedgerNotCleared++;
@@ -872,6 +918,72 @@ contract Handler is Test {
         } catch {
             _record("liquidationClaim", false);
         }
+    }
+
+    // Compound scenario for the multi-market suite (NOT in the single-market selector
+    // list): drives one full tail-case liquidation — mint, run past the seizure trigger,
+    // flag, gap the mark down, claim — so the InsuranceFund shortfall path (and its
+    // ghosts) is exercised at the default fuzz depth instead of relying on the random
+    // action walk to line up warp + flag + mark gap + claim. Every step bails quietly
+    // when its precondition fails.
+    function scenarioTailClaim(uint256 victimSeed, uint256 liqSeed) external trackFlagged {
+        address victim = _actor(victimSeed);
+        address liquidator = _actor(liqSeed);
+        if (
+            victim == liquidator || market.creditEventConfirmed() || market.motionPending() || market.paused()
+                || market.claimable(victim) || market.claimable(liquidator)
+        ) {
+            _record("scenarioTailClaim", false);
+            return;
+        }
+        if (yesToken.balanceOf(victim) == 0) {
+            uint256 amount = 10e18;
+            uint256 supplyBefore = yesToken.totalSupply();
+            vm.prank(victim);
+            try market.mint(amount) {
+                ghost_yesMinted += amount;
+                if (supplyBefore + amount > market.depositCap()) ghost_mintExceededCap++;
+            } catch {
+                _record("scenarioTailClaim", false);
+                return;
+            }
+        }
+        vm.warp(block.timestamp + 400 days);
+        market.accrueFunding();
+        if (!market.isSeizable(victim)) {
+            _record("scenarioTailClaim", false);
+            return;
+        }
+        try market.flagClaimable(victim) {} catch {
+            _record("scenarioTailClaim", false);
+            return;
+        }
+        try market.adminSetMark(0.0001e18) {} catch {}
+        this.liquidationClaim(liqSeed, victimSeed);
+        _record("scenarioTailClaim", true);
+    }
+
+    // Multi-market-suite scenario: mint for the seller, then a YES sale through clobTrade
+    // (the fee-bearing side) so FeeCharged -> InsuranceFund accounting is exercised at the
+    // default fuzz depth. Not in the single-market selector list.
+    function scenarioFeeTrade(uint256 sellerSeed, uint256 buyerSeed, uint256 amountSeed) external trackFlagged {
+        address seller = _actor(sellerSeed);
+        if (market.creditEventConfirmed() || market.paused() || market.claimable(seller)) {
+            _record("scenarioFeeTrade", false);
+            return;
+        }
+        uint256 amount = 100e18;
+        uint256 supplyBefore = yesToken.totalSupply();
+        vm.prank(seller);
+        try market.mint(amount) {
+            ghost_yesMinted += amount;
+            if (supplyBefore + amount > market.depositCap()) ghost_mintExceededCap++;
+        } catch {
+            _record("scenarioFeeTrade", false);
+            return;
+        }
+        this.clobTrade(sellerSeed, buyerSeed, 0, 0, amountSeed, 300e15);
+        _record("scenarioFeeTrade", true);
     }
 
     // Throttled: confirming a credit event permanently pauses CreditMarket for
@@ -917,6 +1029,7 @@ contract Handler is Test {
         usdc.mint(address(this), amount);
         usdc.approve(address(insuranceFund), amount);
         try insuranceFund.deposit(amount) {
+            ghost_insuranceDeposited += amount;
             _record("fundInsurance", true);
         } catch {
             _record("fundInsurance", false);
