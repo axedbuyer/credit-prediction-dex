@@ -1,6 +1,6 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Written 2026-07-07, updated 2026-07-19 and 2026-09-25, at the point of handing the
+*Written 2026-07-07, updated 2026-07-19, 2026-09-25 and 2026-10-01, at the point of handing the
 project to the next engineer. This doc captures state and tribal knowledge that is NOT
 derivable from the code or the other docs. Read it alongside — not instead of — the
 canonical references below.*
@@ -18,16 +18,26 @@ canonical references below.*
 4. **`docs/deploy-followups.md`** — issues hit during the initial Railway deploy + fix
    plan (all resolved; kept as an incident record).
 5. **`docs/hosted-env-vars.md`** — current source of truth for every Railway/Vercel env
-   var, including the post-fee-redeploy contract addresses.
+   var, including the current (batch-1 redeploy, 2026-10-01) contract addresses.
 6. **`docs/production-plan.md`** — the phased path to mainnet (holder discovery, role
    ceremony, invariant suite/audit, dress rehearsal).
 7. Per-directory `CLAUDE.md` in `contracts/`, `backend/`, `frontend/` — stack notes.
 
 ## State at handover
 
-- **Contracts: live on Base Sepolia** (chainId 84532) since 2026-07-06, all 7 deployed
-  and Basescan-verified. Addresses: `contracts/deployments/base-sepolia.json` (tracked;
-  do not hand-edit). Initial mark set to 23%.
+- **Contracts: live on Base Sepolia** (chainId 84532). **Batch-1 full redeploy on
+  2026-10-01** (`docs/redeploy-batch1-runbook.md`, start block 47528136): unified `owed()`
+  fix for F1/F2/F4, `depositCap` (50,000 USDC), bounded keeper `setMark` (≤ 5 points per
+  update, ≥ 1h apart; admin `adminSetMark` bypasses), Slither follow-ups. One
+  `Deploy.s.sol` broadcast granted every role and asserted the config on-chain. Explorer
+  source verification: YES, NO, CreditMarket, CLOBSettlement verified on Blockscout;
+  OracleRouter / InsuranceFund / LiquidationEngine were still being retried through
+  Blockscout's rate limiting ("Too many requests") — re-check on the explorer. The
+  `ETHERSCAN_API_KEY` in `contracts/.env` is rejected by Etherscan v2; use the
+  `forge verify-contract … --verifier blockscout` form in the runbook's Outcome section.
+  Addresses: `contracts/deployments/base-sepolia.json` (tracked; do not hand-edit).
+  Initial mark 23%. The 2026-07 contracts (CreditMarket `0x26C3…F51b`) were redeemed
+  empty and paused. History below about the 2026-07 deploy is kept for context.
 - **Trading fee shipped 2026-07-11** (commit `9f5223e`): 50 bps × min(p, 1−p) × Q,
   charged only on the carry-earning side (YES sells + NO buys), split 50/50 team
   wallet/InsuranceFund, admin-editable via `CLOBSettlement.setFeeConfig`
@@ -38,12 +48,13 @@ canonical references below.*
   the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
   dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
   deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 113 Foundry tests (`cd contracts && forge test`, incl. the invariant suite), 269 Vitest tests
-  across the three backend services, plus a 20/20 anvil fee smoke test. Frontend has no
+- **Tests: green.** 151 Foundry tests (`cd contracts && forge test`, incl. a 21-selector
+  invariant suite that catches 9/9 planted bugs), 319 Vitest tests across the backend
+  (keepers 184, order-book-server 91, matching-engine 44), plus a 20/20 anvil fee smoke test. Frontend has no
   test suite — CI type-checks only.
 - **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
   (ID `01235b60-cb1d-491c-8e60-4ab307ed5a33`, environment "production"), GitHub-connected
-  to `axedbuyer/credit-prediction-dex` — all four services rebuild automatically on push
+  to `axedbuyer/credit-prediction-dex` — all five services rebuild automatically on push
   to `main`. All services Online: `order-book-server` (public,
   https://order-book-server-production-9bb6.up.railway.app, health = `GET /health`),
   `matching-engine` (internal, settler wired), `funding-keeper` (internal,
@@ -87,7 +98,8 @@ canonical references below.*
   the `fundingDebt` ledger, **F1: a collateral leak** (frozen YES funding vs live NO
   credit while flagged), and a minor liquidator NO-credit forfeiture (F2) — all need a
   contract fix + redeploy, and a spec decision first:
-  `docs/security/invariant-findings-2026-09-26.md`.
+  `docs/security/invariant-findings-2026-09-26.md`. **All three fixed (unified `owed()`)
+  and deployed in the 2026-10-01 batch-1 redeploy.**
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
 
 ## Ops wallets and secrets
@@ -97,7 +109,7 @@ Keys live only in gitignored `.env` files (`.gitignore` now ignores all `.env*` 
 
 | Wallet | Address | Key location | Roles |
 |---|---|---|---|
-| Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN, PAUSER |
+| Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN, PAUSER, OracleRouter ORACLE_ROLE (attester), team wallet |
 | Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE |
 | Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | (none needed) |
 | Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only (owner holds it) | (none needed — claim() is permissionless); funded 0.0005 ETH + 10 USDC float 2026-09-29 |
@@ -106,23 +118,25 @@ RPC is public `https://sepolia.base.org`. Each wallet holds only dust ETH (~0.00
 top up before heavy tx activity. Everything runs off raw EOAs — moving admin to a Safe
 is a production-plan phase, not done.
 
-**Gotcha:** `Deploy.s.sol` does NOT grant `KEEPER_ROLE`/`PAUSER_ROLE` — they were
-granted manually post-deploy (commands in the runbook). A fresh deploy needs the same
-manual grants or the keepers revert.
+**Roles:** since batch 1, `Deploy.s.sol` grants `KEEPER_ROLE` (`KEEPER_ADDRESS`),
+`PAUSER_ROLE` (`PAUSER_ADDRESS`) and the OracleRouter attester role
+(`ORACLE_ATTESTER_ADDRESS`) itself, and asserts every grant after broadcast — no manual
+post-deploy grants. (The 2026-07 deploy needed them by hand, and never granted the
+attester role at all.)
 
-**GitHub pushes from this machine:** no stored credentials. The user supplies a PAT used
-inline per-push; the GitHub MCP API is the fallback if that's unavailable.
+**GitHub pushes from this machine:** no stored credentials, and GitHub is intermittently
+unreachable from WSL — the owner pushes from outside WSL.
 
 ## Non-obvious semantics (each of these cost real debugging time)
 
 - **YES/NO tokens report `decimals() == 18` but every amount in the system is raw
   6-decimal USDC scale.** Never add them as MetaMask custom tokens (display is off by
   1e12); never normalize by 1e18 in new code. All order/balance math is 6-dec.
-- **`previewFunding` is NOT freeze-aware and does NOT fold in `fundingDebt`.** The
-  order-book-server's min-sell check computes
-  `fundingDebt(maker) − previewFunding(maker, fullYesBalance, true)` clamped at 0; the
-  frontend's cure-cost estimate is built from `frozenFunding`/`fundingDebt`/`snapNO`
-  directly. Do not "simplify" either back to a bare `previewFunding` call.
+- **`previewFunding` does NOT fold in `fundingDebt`.** The order-book-server's min-sell
+  check computes `fundingDebt(maker) − previewFunding(maker, fullYesBalance, true)`
+  clamped at 0. Do not "simplify" it back to a bare `previewFunding` call. The YES-side
+  obligation everywhere else (trigger, claim price, cure, display) is `owed(user)`;
+  `frozenFunding` no longer exists (removed with the F1 fix).
 - **`CLOBSettlement.verifyAndSettle` takes `(Order, bytes, Order, bytes)` with a
   7-field Order and detached signatures — selector `0x538df8d8`.** The original backend
   encoded 8-field tuples with embedded sigs and every real settlement reverted; this

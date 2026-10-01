@@ -24,11 +24,12 @@ below for the full spec — display layer, seizure trigger, and LiquidationEngin
 formulaic (no Dutch auction) claim price.
 
 **Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 113 contract tests (incl. a stateful invariant suite), 269 off-chain tests, verified end-to-end with a 12/12 anvil
+tested — 151 contract tests (incl. a stateful invariant suite), 319 off-chain tests, verified end-to-end with a 12/12 anvil
 smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
-Base mainnet. The fee-aware CLOBSettlement was redeployed to Base Sepolia on 2026-07-12
-(script/RedeployCLOBSettlement.s.sol): CLOB_ROLE rewired to the new address, revoked from
-the pre-fee contract, fee config live at 50 bps 50/50 — fees are active on testnet.
+Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 2026-10-01
+(batch 1, `docs/redeploy-batch1-runbook.md`): the unified `owed()` fix, a 50,000 USDC
+`depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
+`contracts/deployments/base-sepolia.json`.
 
 ---
 
@@ -407,9 +408,9 @@ on-chain check is the backstop; this filter is pure UX.
     holder's NO-side credit survives a claim untouched.
 ```
 
-**Findings fixed in source 2026-09-26, NOT YET REDEPLOYED** (Base Sepolia still runs the
-old contracts): F4 (trigger ignored the ledger), F1 (flag froze accounting), F2 (liquidator
-NO credit forfeited) — `docs/security/invariant-findings-2026-09-26.md`.
+**Findings fixed and deployed to Base Sepolia 2026-10-01** (batch-1 redeploy): F4 (trigger
+ignored the ledger), F1 (flag froze accounting), F2 (liquidator NO credit forfeited) —
+`docs/security/invariant-findings-2026-09-26.md`.
 
 ### What stays true across model iterations
 

@@ -116,3 +116,35 @@ Rollback of step 1 = `cast send $OLD_CM 'unpause()'`.
 Update `docs/HANDOVER.md` state + `CLAUDE.md` status (findings fixed AND deployed),
 `docs/security/invariant-findings-2026-09-26.md` status, memory. The old contracts stay
 paused and empty.
+
+## Outcome — executed 2026-10-01
+
+Done end to end. Trading downtime (phase 1 pause → re-seed) was about an hour.
+
+- **Phase 1:** deployer redeemed 12 pairs (12 USDC back, old market collateral 0) and
+  paused the old CreditMarket `0x26C3…F51b`.
+- **Phase 2:** broadcast from `4cfd410`, start block **47528136**; post-broadcast
+  assertions passed. Independent on-chain read-back: mark 23%, cap 50,000 USDC, step 5
+  points, interval 3600s, fee 50 bps, KEEPER/CLOB/LIQUIDATOR/attester roles granted.
+  `--verify` failed on Blockscout rate limiting ("Too many requests"); verification was
+  re-submitted afterwards with `forge verify-contract … --verifier blockscout
+  --verifier-url https://base-sepolia.blockscout.com/api` one contract at a time with
+  backoff. The `ETHERSCAN_API_KEY` in `contracts/.env` is rejected by the Etherscan v2 API
+  ("Invalid API Key"), and because foundry auto-loads `.env`, `--verifier sourcify` still
+  routes through the `[etherscan]` config — use the blockscout form.
+- **Phase 3:** Railway vars staged with `--skip-deploys`; owner set Vercel vars in the
+  dashboard (no `NEXT_PUBLIC_INSURANCE_FUND_ADDRESS` exists — skipped); Redis: 10 keys
+  deleted (7 `orders:*`, `orderbook:bids/asks`, 1 `nonces:*`), `holder-index:*` kept;
+  commit `73a2beb`; PR #1 merged as `a25887a` → all five Railway services and Vercel
+  rebuilt. Re-seeded 7 quotes (mint 12); InsuranceFund deposit 2 USDC.
+- **Phase 4:** all checks green — order-book-server `fee.source: chain`, 50 bps;
+  liquidation-keeper backfilled from 47528136, no `lastError`; funding-keeper and
+  liquidator-bot on the new YES token; frontend bundle carries the new CreditMarket and
+  none of the old. Two-party test trade: a throwaway taker bought the 4 YES @ 24¢ ask —
+  matched and settled on-chain (tx `0x604eea20…dcb59`), InsuranceFund 2,000,000 →
+  2,002,400 (half of the 0.0048 USDC seller-side fee), the holder index picked up the
+  taker. Not yet observed: the first funding-keeper tick on the new market (cron
+  `0 */8 * * *`) and a scheduled uptime run.
+- Gotcha: the public RPC's nonce/read lag bit twice — a second `cast send` right after
+  another failed with "replacement transaction underpriced" (or silently didn't send),
+  and a read right after a confirmed tx returned the old balance. Re-check, then retry.
