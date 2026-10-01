@@ -3,9 +3,10 @@
 Second Phase 3 security-gate artifact (`docs/production-plan.md`), after
 `docs/security/slither-2026-09-26.md`.
 
-**Status (2026-09-28): F1, F2, F4 fixed in source** on branch `fix/unified-owed` (the
-recommended unified `owed()` fix, approved by the owner) — **not yet redeployed**; Base
-Sepolia still runs the vulnerable contracts. The invariant suite was rewritten for the
+**Status (2026-10-01): F1, F2, F4 fixed and DEPLOYED** — the recommended unified
+`owed()` fix (approved by the owner, PR #1 `fix/unified-owed`) went live on Base Sepolia
+in the batch-1 redeploy of 2026-10-01 (`docs/redeploy-batch1-runbook.md`); the vulnerable
+2026-07 contracts are redeemed empty and paused. The invariant suite was rewritten for the
 fix: no compensation terms, the trigger check re-derived from the spec, a new
 `invariant_NoMissedSeizureFlags`, the repros flipped to `test_Regression_*`; 7/7 planted
 bugs caught at the default profile, including reverting the F4 and F2 fixes.
