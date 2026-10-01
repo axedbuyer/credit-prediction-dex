@@ -53,14 +53,52 @@ Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 202
 
 ---
 
-## MVP Scope — Single Market
+## MVP Scope — Launch Markets (multi-market, admin-listed)
 
-**Reference entity:** MicroStrategy Incorporated
-**Market name:** "Will MicroStrategy have a credit event in the next 12 months?"
-**Ticker reference:** MSTR
-**Credit events covered (MVP):** Bankruptcy, Failure to Pay
-**Network:** Base Sepolia (testnet), then Base mainnet
-**Initial seed price:** Set manually by team (reference MSTR CDS spread from TradFi sources)
+Several reference entities, each its own independent market — "Will [Entity] have a credit
+event in the next 12 months?" — on one Pari deployment. Every market keeps the economics in
+this doc unchanged, and **all 10 hard invariants hold per market**. Design + phased plan:
+`docs/multi-market-design.md` (decisions D1–D6 locked 2026-10-01). Listing is admin-only
+(forge script + `MarketRegistry`); permissionless listing stays out.
+
+| Slug | Entity (UI name) | Type | Ticker | Credit events covered | Initial mark |
+|---|---|---|---|---|---|
+| `mstr` | MicroStrategy (MicroStrategy Incorporated) | corporate | MSTR | Bankruptcy, Failure to Pay | 23% (live, batch-1 contracts = market #1) |
+| `crwv` | CoreWeave (CoreWeave, Inc.) | corporate | CRWV | Bankruptcy, Failure to Pay | 10% |
+| `turkey` | Turkey (Republic of Türkiye) | sovereign | TUR | Failure to Pay, Repudiation/Moratorium, Restructuring | 2% |
+
+**Per-market config (launch):** `depositCap` 50,000 USDC; keeper `setMark` bounds ≤ 5 points
+per update, ≥ 1h apart; trading fee 50 bps, 50/50 team wallet / shared InsuranceFund.
+**Network:** Base Sepolia (testnet), then Base mainnet.
+**Initial seed price:** set manually by the team per market (reference the entity's CDS
+spread from TradFi sources). Credit-event types are display copy + attestation runbook
+only — nothing on-chain encodes them (OracleRouter has a single `confirmCreditEvent()`).
+
+### Multi-market topology (locked decisions, 2026-10-01)
+
+- **D1 — one contract set per market + on-chain `MarketRegistry`.** Each market = its own
+  CreditMarket, YES, NO, CLOBSettlement, OracleRouter, LiquidationEngine, deployed by
+  `AddMarket.s.sol`. CreditMarket logic is reused unchanged; one market's collateral can
+  never pay another's holders. No on-chain factory (creation-code size). Registry entries
+  are **immutable once registered** — the admin may only toggle `active`. MSTR's batch-1
+  addresses are registered as market #1 with no redeploy.
+- **D2 — one shared InsuranceFund.** Its `LIQUIDATOR_ROLE` is granted to every market's
+  LiquidationEngine and every CLOB routes its fee share to it. Each draw is a USDC transfer
+  fund → that market's CreditMarket, so per-market draws are attributable off-chain.
+- **D3 — one CLOBSettlement per market.** Per-market EIP-712 domain (an order signed for
+  market A can never settle on B) and per-market fee config; users approve USDC per market.
+  A shared registry-aware CLOB is a v2 candidate.
+- **D4 — one keeper, one settler, one liquidator wallet across all markets**; deployer is
+  attester on every OracleRouter until the Safe ceremony. Liquidator float ≥ the largest
+  single claim across markets.
+- **D5 — the registry is the discovery source of truth.** On-chain: slug, entity name,
+  entity type, the six contract addresses, `active`. The frontend reads one
+  `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`; backends read and periodically refresh the
+  registry instead of per-contract address env vars. Long-form copy (description, CDS
+  reference, credit-event wording) lives in a frontend file keyed by slug, with a generic
+  fallback so a new market renders without a rebuild.
+- **Token naming:** new markets' tokens are `YES-<TICKER>` / `NO-<TICKER>`; MSTR's batch-1
+  tokens keep `YES` / `NO` (cosmetic).
 
 ---
 
@@ -83,9 +121,14 @@ InsuranceFund.sol     — USDC reserve, timelock-gated withdrawals, covers liqui
                         tail-case shortfalls
 LiquidationEngine.sol — formulaic claim of seizure-flagged YES positions (no Dutch
                         auction); YES token transfers, never burned
+MarketRegistry.sol    — (multi-market, being built) admin-owned slug → market contract set
+                        + minimal metadata; entries immutable, `active` toggle only
 ```
 
-**Not needed in MVP:** MarketFactory.sol (single market, deploy directly), LiquidityVault.sol
+One full set of the per-market contracts above (all but InsuranceFund, which is shared)
+exists per market — see "Multi-market topology" above.
+
+**Not needed in MVP:** MarketFactory.sol (markets are added by forge script + registry), LiquidityVault.sol
 (team wallet is liquidity), ISDARelayer.sol (multisig oracle only), BondModule.sol (no
 permissionless listing), FundingBuffer.sol (v2 only).
 
@@ -418,8 +461,10 @@ ignored the ledger), F1 (flag froze accounting), F2 (liquidator NO credit forfei
 - Zero recovery. YES settles at full notional on credit event.
 - Off-chain CLOB, on-chain settlement.
 - Linear token mark (price = hazard rate). Funding model changes do not change the mark
-  function. (Known tradeoff: mismarks convexity above ~10% hazard rate. Acceptable for
-  MSTR MVP.)
+  function. (Known tradeoff: the true 12-month default probability is 1 − e^(−h), so a
+  linear mark overstates it by ≈ h²/2 and lacks curvature — ~0.02 pts at 2%, ~0.5 pts at
+  10%, ~2.5 pts at 23%. Acceptable for the launch markets; avoid listing entities far above
+  MSTR's level until the v2 non-linear mark.)
 
 ---
 
@@ -522,7 +567,8 @@ token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
   Downbet = `--color-teal`; positive P&L stays `--color-success`.
 - "X% annual probability"
 - "Daily carry" (not funding rate)
-- Market title: "Will MicroStrategy have a credit event in the next 12 months?"
+- Market title: "Will [Entity] have a credit event in the next 12 months?" (e.g. "Will
+  MicroStrategy have a credit event in the next 12 months?")
 - Price: "23.4% chance"
 - Upbet costs 23.4¢ per $1 / Downbet costs 76.6¢ per $1
 - "Your position: $500 Upbet @ 23.4% entry"
@@ -533,9 +579,10 @@ token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
 
 ```
 ❌ Gnosis CTF / ERC-1155 (custom ERC-20 YES/NO tokens for MVP)
-❌ Multiple markets (MSTR only)
 ❌ LP vault / LPToken (team wallet is liquidity provider)
-❌ MarketFactory (deploy CreditMarket directly)
+❌ MarketFactory / on-chain factory (markets added by AddMarket.s.sol + MarketRegistry)
+❌ Permissionless market listing / cross-market margin or netting
+❌ Shared multi-market CLOBSettlement (per-market CLOBs for MVP; v2 candidate)
 ❌ ISDA oracle relayer (multisig only)
 ❌ USDC bond module for credit event disputes
 ❌ Subgraph / The Graph (direct RPC polling only)

@@ -1,9 +1,13 @@
 # Pari — Tradable Credit For All
 
 A fully-collateralized perpetual prediction market on corporate credit default
-probability, built on Base. The MVP market asks a single question:
+probability, built on Base. Each market asks one question — "Will [Entity] have a credit
+event in the next 12 months?" — starting with:
 
 > **"Will MicroStrategy have a credit event in the next 12 months?"**
+
+(Multi-market — MicroStrategy, CoreWeave, Turkey — is being built; see
+`docs/multi-market-design.md`.)
 
 Users deposit USDC and mint YES/NO ERC-20 "complete sets" 1:1, trade them on a
 Polymarket-style off-chain CLOB with atomic on-chain settlement, and the market price of
@@ -216,8 +220,8 @@ script run.
 
 ## What's explicitly not in MVP
 
-Gnosis CTF/ERC-1155 (custom ERC-20 YES/NO instead), multiple markets, an LP vault,
-`MarketFactory`, an ISDA oracle relayer (multisig only), a USDC bond module for credit
+Gnosis CTF/ERC-1155 (custom ERC-20 YES/NO instead), permissionless market listing, an
+LP vault, `MarketFactory`, an ISDA oracle relayer (multisig only), a USDC bond module for credit
 event disputes, a subgraph, fee distribution, referrals, governance, insurance fund
 withdrawals, a market-listing UI, mobile optimization, and direct wallet-to-wallet
 YES/NO transfers. Full list in the root [`CLAUDE.md`](./CLAUDE.md#what-not-to-build-in-mvp).
