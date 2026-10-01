@@ -16,7 +16,7 @@ contract YESTokenTest is Test {
     address bob = makeAddr("bob");
 
     function setUp() public {
-        token = new YESToken(admin);
+        token = new YESToken(admin, "YES", "YES");
         token.grantRole(token.MINTER_ROLE(), minter);
         token.grantRole(token.BURNER_ROLE(), burner);
         token.grantRole(token.CLOB_ROLE(), clobAddress);

@@ -11,7 +11,7 @@ contract NOToken is ERC20, AccessControl {
 
     error TransferRestricted();
 
-    constructor(address admin) ERC20("NO", "NO") {
+    constructor(address admin, string memory name_, string memory symbol_) ERC20(name_, symbol_) {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
