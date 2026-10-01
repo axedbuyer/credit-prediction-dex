@@ -1,8 +1,14 @@
 # Invariant suite + findings (2026-09-26)
 
 Second Phase 3 security-gate artifact (`docs/production-plan.md`), after
-`docs/security/slither-2026-09-26.md`. Test-only work — **no contract changes were made**;
-the findings below need a spec decision and a contract redeploy.
+`docs/security/slither-2026-09-26.md`.
+
+**Status (2026-09-28): F1, F2, F4 fixed in source** on branch `fix/unified-owed` (the
+recommended unified `owed()` fix, approved by the owner) — **not yet redeployed**; Base
+Sepolia still runs the vulnerable contracts. The invariant suite was rewritten for the
+fix: no compensation terms, the trigger check re-derived from the spec, a new
+`invariant_NoMissedSeizureFlags`, the repros flipped to `test_Regression_*`; 7/7 planted
+bugs caught at the default profile, including reverting the F4 and F2 fixes.
 
 ## The suite
 

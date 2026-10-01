@@ -56,7 +56,7 @@ export const CREDIT_MARKET_ABI = [
     outputs: [],
   },
   {
-    name: 'frozenFunding',
+    name: 'owed',
     type: 'function' as const,
     stateMutability: 'view' as const,
     inputs: [{ name: 'user', type: 'address' }],
@@ -400,21 +400,23 @@ export class FundingKeeper {
         return
       }
 
-      // Log frozen funding after successful flag
+      // Log the live funding obligation after successful flag. There is no freeze —
+      // owed() keeps growing after this point until the position is claimed, cured,
+      // or settled — this log is a snapshot, not a fixed value.
       try {
-        const frozen = await this.publicClient.readContract({
+        const owedAmount = await this.publicClient.readContract({
           address:      this.config.creditMarketAddress,
           abi:          CREDIT_MARKET_ABI,
-          functionName: 'frozenFunding',
+          functionName: 'owed',
           args:         [holder],
         }) as bigint
 
         console.log(
           `[keeper] ${ts} — flagged ${holder}  tx=${flagHash}` +
-          `  frozenFunding=${frozen.toString()}`,
+          `  owed=${owedAmount.toString()}`,
         )
       } catch (err) {
-        console.error(`[keeper] ${ts} — could not read frozenFunding(${holder}):`, err)
+        console.error(`[keeper] ${ts} — could not read owed(${holder}):`, err)
       }
     } catch (err) {
       console.error(`[keeper] ${ts} — unexpected error for holder ${holder}:`, err)

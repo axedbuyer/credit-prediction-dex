@@ -7,37 +7,37 @@ export const metadata: Metadata = {
 const CONTRACTS: { name: string; address: `0x${string}`; note: string }[] = [
   {
     name: 'CreditMarket',
-    address: '0x26C3d2E6C29e8E414A4424aa9c9AFa5eFF15F51b',
+    address: '0xe8D0448Fb825875AE2CEFfEdA561Ea98508F8369',
     note: 'collateral, carry ledger, mint/redeem/settle',
   },
   {
     name: 'CLOBSettlement',
-    address: '0xC31702C1C2c41FcCb57446E0fda5091412bccB8e',
+    address: '0x8048d8CC6A8e4d0101bDD9B9251c39a65E47FA25',
     note: 'on-chain trade settlement (EIP-712 verifying contract)',
   },
   {
     name: 'Upbet (YES) token',
-    address: '0x0228cf2f1BD7F11D07fA3c190F495171D35C85be',
+    address: '0x9ED5A4c6B1B5334645Ec47e7ce087e281fcEC59D',
     note: '',
   },
   {
     name: 'Downbet (NO) token',
-    address: '0xB6Ca19E4590E28214902c18d37351238170E3D76',
+    address: '0xFcFf6488677A852D724B7659649176115D5f296e',
     note: '',
   },
   {
     name: 'LiquidationEngine',
-    address: '0x16Be3ac2f3d76f95a86BE961b2fE5B8EFB53c6B5',
+    address: '0xd041293744b255952d760aF3594714c61697cc9E',
     note: 'claims of flagged positions',
   },
   {
     name: 'InsuranceFund',
-    address: '0xEDbBF8ffF57198bc44897A519088FE5AcD828aB1',
+    address: '0x1a0dB241CE7D0fd3b0C22cd45285a41D185B403b',
     note: 'backstops liquidation shortfalls; receives 50% of trade fees',
   },
   {
     name: 'OracleRouter',
-    address: '0xDB8aD9aBF47870f1117382E22b764E90C862C8Bc',
+    address: '0xb125C4E351134c444d7c142E7bb98Cb4b72d2226',
     note: 'credit-event attestations',
   },
   {

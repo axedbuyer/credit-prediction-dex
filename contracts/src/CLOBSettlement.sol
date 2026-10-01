@@ -97,9 +97,11 @@ contract CLOBSettlement is AccessControl, ReentrancyGuard {
     error SlippageExceeded();
     error FundingShortfall();
     error PositionFrozen();
+    error ZeroAddress();
     error FeeConfigInvalid();
 
     constructor(address _creditMarket, address admin) {
+        if (_creditMarket == address(0) || admin == address(0)) revert ZeroAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         creditMarket = _creditMarket;
         usdc         = ICreditMarket(_creditMarket).usdc();

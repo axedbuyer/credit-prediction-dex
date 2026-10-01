@@ -18,15 +18,20 @@ contract VerifyContracts is Script {
         string memory json     = vm.readFile(DEPLOYMENT_PATH);
         string memory apiKey   = vm.envString("ETHERSCAN_API_KEY");
 
-        address deployer      = json.readAddress(".deployer");
-        address usdc          = json.readAddress(".usdc");
-        address yesToken      = json.readAddress(".yesToken");
-        address noToken       = json.readAddress(".noToken");
-        address market        = json.readAddress(".creditMarket");
-        address clob          = json.readAddress(".clobSettlement");
-        address oracleRouter  = json.readAddress(".oracleRouter");
-        address insuranceFund = json.readAddress(".insuranceFund");
-        uint256 initialMark   = json.readUint(".initialMark");
+        address deployer         = json.readAddress(".deployer");
+        address usdc             = json.readAddress(".usdc");
+        address yesToken         = json.readAddress(".yesToken");
+        address noToken          = json.readAddress(".noToken");
+        address market           = json.readAddress(".creditMarket");
+        address clob             = json.readAddress(".clobSettlement");
+        address oracleRouter     = json.readAddress(".oracleRouter");
+        address insuranceFund    = json.readAddress(".insuranceFund");
+        address liquidationEngine = json.readAddress(".liquidationEngine");
+        uint256 initialMark      = json.readUint(".initialMark");
+        // epochLength was added to the deployments JSON alongside this fix — a fresh
+        // Deploy.s.sol run always writes it; readUint reverts on an older JSON missing
+        // the key, which is the correct failure mode (re-run Deploy first).
+        uint256 epochLength      = json.readUint(".epochLength");
 
         console.log("=== Verifying Credit Prediction DEX on", CHAIN, "===");
 
@@ -45,7 +50,13 @@ contract VerifyContracts is Script {
         _verify(
             market,
             "src/CreditMarket.sol:CreditMarket",
-            abi.encode(deployer, usdc, yesToken, noToken, initialMark),
+            // NOTE: CreditMarket's constructor takes 6 args (admin, usdc, yesToken,
+            // noToken, initialMark, epochLength) — this used to encode only 5, which
+            // silently failed verification (bytecode/constructor-arg mismatch) since
+            // epochLength was added. Fixed here; not a constructor change from
+            // a9476ea, a pre-existing gap this pass caught while checking constructor
+            // args for the fresh redeploy.
+            abi.encode(deployer, usdc, yesToken, noToken, initialMark, epochLength),
             apiKey
         );
         _verify(
@@ -64,6 +75,14 @@ contract VerifyContracts is Script {
             insuranceFund,
             "src/InsuranceFund.sol:InsuranceFund",
             abi.encode(deployer, usdc),
+            apiKey
+        );
+        // Previously a documented gap (docs/deploy-testnet.md §1a): LiquidationEngine
+        // was deployed but never verified by this script, only via a manual command.
+        _verify(
+            liquidationEngine,
+            "src/LiquidationEngine.sol:LiquidationEngine",
+            abi.encode(market, insuranceFund),
             apiKey
         );
 

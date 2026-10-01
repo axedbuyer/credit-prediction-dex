@@ -19,8 +19,10 @@ export default function RisksPage() {
         </li>
         <li>
           <strong>Liquidation risk:</strong> if accrued carry approaches your Upbet&rsquo;s
-          value (within 3%), the position is frozen and can be claimed. You keep none of the
-          residual unless you cure first.
+          value (within 3%), the position is locked and can be claimed. Carry keeps
+          accruing while it waits to be claimed — it is not frozen at the flagged amount —
+          so the longer it sits, the more it costs to cure and the less residual value is
+          left for you. You keep none of the residual unless you cure first.
         </li>
         <li>
           <strong>Downbet wipeout:</strong> a single confirmed credit event takes every

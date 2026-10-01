@@ -432,8 +432,12 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     } catch (e: unknown) {
       setStatus('error')
       const msg = e instanceof Error ? e.message : 'Unknown error'
-      // User rejected signature — friendly message
-      setErrorMsg(msg.includes('User rejected') || msg.includes('4001') ? 'Signature rejected' : msg)
+      // Friendly copy for the reverts a user can actually hit.
+      setErrorMsg(
+        msg.includes('User rejected') || msg.includes('4001') ? 'Signature rejected'
+        : msg.includes('DepositCapExceeded') ? 'The market is at its deposit limit right now — new positions can’t be opened until the limit is raised.'
+        : msg,
+      )
     }
   }, [
     address, isValidAmount, isFrozen, carryShortfall, feeRateUnknownForNoBuy, liveFeeBps,

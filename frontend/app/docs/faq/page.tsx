@@ -37,10 +37,11 @@ export default function FaqPage() {
         both sides. Wallet-to-wallet transfers are disabled at the contract level.
       </p>
 
-      <h3>My position says frozen — what now?</h3>
+      <h3>My position says locked — what now?</h3>
       <p>
-        You crossed the liquidation trigger and were flagged. You can cure (pay the frozen
-        carry bill, keep the position) before someone claims it — see{' '}
+        You crossed the liquidation trigger and were flagged. Carry keeps accruing while
+        it&rsquo;s locked, so the sooner you act the less it costs. You can cure (pay the
+        live carry bill, keep the position) before someone claims it — see{' '}
         <Link href="/docs/liquidations-and-cure">Liquidations &amp; cure</Link>.
       </p>
 

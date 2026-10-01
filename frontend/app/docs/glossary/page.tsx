@@ -44,12 +44,12 @@ const TERMS: { term: string; meaning: string; tradfi: string }[] = [
   },
   {
     term: 'Cure',
-    meaning: "Paying a frozen position's carry bill to unlock it and keep it.",
+    meaning: "Paying a locked position's live carry bill to unlock it and keep it — carry keeps accruing until you do.",
     tradfi: '—',
   },
   {
     term: 'Claim / liquidation',
-    meaning: "A third party paying a flagged position's carry bill and taking over the position.",
+    meaning: "A third party paying a locked position's live carry bill and taking over the position.",
     tradfi: '—',
   },
   {

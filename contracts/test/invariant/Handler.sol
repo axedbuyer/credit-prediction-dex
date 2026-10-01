@@ -31,6 +31,13 @@ contract MockUSDC is ERC20 {
 /// Ghost counters double as ledger/ghost accounting AND as the mechanism for
 /// checking "this action should never succeed" properties (invariants 3, 5, 10)
 /// that can't be phrased as a pure function of on-chain state alone.
+///
+/// Post-fix (docs/security/invariant-findings-2026-09-26.md): `owed(user) =
+/// fundingDebt + live accrual` is now the SINGLE funding obligation everywhere —
+/// there is no more `frozenFunding`/accounting freeze, and a flag is a pure LOCK.
+/// The old F1/F2 compensation ghosts (`ghost_lockedLeak`, `ghost_forfeitedNoCredit`)
+/// are gone: the fixed contract has no leak left to compensate for, so the
+/// collateral-solvency invariant must hold with NO compensation terms at all.
 contract Handler is Test {
     // ── deployed system (owned by the invariant test contract) ──────────────────
     MockUSDC public usdc;
@@ -66,52 +73,36 @@ contract Handler is Test {
     uint256 public ghost_frozenMintSuccesses;
     uint256 public ghost_frozenRedeemSuccesses;
     uint256 public ghost_frozenTradeSuccesses;
-    // Frozen-funding-immutable-while-flagged (part of invariant 10's freeze semantics).
-    uint256 public ghost_frozenFundingChangedWhileFlagged;
+    // owed()-non-decreasing-while-flagged (the new invariant 10 freeze-semantics
+    // check, post-fix: there is no accounting freeze, only a lock — funding keeps
+    // accruing on a flagged position, so owed() must never DECREASE for an actor
+    // who remains flagged/claimable across an action; it can only grow, or stay put
+    // if no time elapsed).
+    uint256 public ghost_owedDecreasedWhileFlagged;
 
     // Invariant 5 — nothing seizes/claims during a pending credit-event motion.
     uint256 public ghost_motionPendingFlagSuccesses;
     uint256 public ghost_motionPendingClaimSuccesses;
 
-    // Liquidation ledger must be fully cleared (fundingDebt==0 && frozenFunding==0)
-    // for the original holder immediately after every successful claim().
+    // F4-type direct probe (docs/security/invariant-findings-2026-09-26.md,
+    // "Recommended fix" + "Next"): whenever an actor's owed() + one epoch of
+    // projected accrual crosses the spec's seizure threshold (value*100 <=
+    // (owed+nextEpoch)*103) and motionPending is false, flagClaimable MUST
+    // succeed for that actor — no actor may be "unflaggable" while insolvent per
+    // the spec. probeMissedSeizureFlag (below) independently recomputes that
+    // condition (NOT by calling market.isSeizable() — that would make this probe
+    // circular and blind to a mutation inside isSeizable itself, e.g. one that
+    // drops the fundingDebt term back out) and attempts the flag; any revert
+    // increments this ghost, which the invariant asserts stays 0.
+    uint256 public ghost_missedSeizureFlag;
+
+    // Liquidation ledger must be fully cleared (fundingDebt==0) for the original
+    // holder immediately after every successful claim(). (frozenFunding no longer
+    // exists post-fix — clearLiquidatedPosition only ever has fundingDebt left to
+    // clear for the original holder.)
     uint256 public ghost_liquidationLedgerNotCleared;
     uint256 public ghost_normalCaseClaims;
     uint256 public ghost_tailCaseClaims;
-
-    // KNOWN-VIOLATION compensation ledger (see CreditMarketInvariant.t.sol's
-    // invariant_CollateralSolvencyPreEvent for the full writeup and derivation).
-    // CreditMarket.settleFunding's claimable-branch prices a flagged holder's
-    // YES-side debt at a value CAPPED at flag time (frozenFunding), while ANY NO
-    // holder who syncs during the freeze window still collects credit off the
-    // LIVE, uncapped cumFundingPerNO -- a real, permanent, uncollateralized
-    // leak. For a position that is CURRENTLY still flagged, the outstanding
-    // leak is a pure function of live state (yesBal(u) * (cumFundingPerNO_now -
-    // frozenFunding(u)) / 1e18) and needs no ghost -- the invariant recomputes
-    // it fresh every check. But once a flagged position RESOLVES (cure,
-    // settleYES, or a liquidation claim), frozenFunding is zeroed and the
-    // position's own live-state terms go back to normal, so the (by-then
-    // already-realized, permanent) leak amount has to be captured HERE, at the
-    // moment of resolution, using the values immediately before that call, or
-    // it would vanish from the aggregate solvency formula even though the cash
-    // never came back.
-    mapping(address => uint256) public ghost_lockedLeak;
-
-    // KNOWN-VIOLATION #2 (distinct from the freeze leak above; see
-    // CreditMarketInvariant.t.sol for the full writeup): CreditMarket's
-    // internal `_syncUserFunding` (CreditMarket.sol ~L87-96) -- invoked on the
-    // LIQUIDATOR inside `clearLiquidatedPosition` to give them a "fresh start"
-    // on the seized YES -- resets `snapNO[user]` to the current index WITHOUT
-    // ever computing or paying out any NO-side credit the liquidator had
-    // accrued (it only ever touches the YES side / fundingDebt). If the
-    // liquidator happens to ALSO hold NO tokens with a stale snapNO at claim
-    // time, that pending NO credit is silently forfeited -- never paid, and
-    // the ledger no longer remembers it (their NEXT sync starts counting from
-    // the reset point, not the old one). This does not threaten solvency (the
-    // cash stays IN collateral -- if anything makes the pool MORE solvent) but
-    // it does shortchange that specific liquidator. Captured here, at the
-    // moment of a successful claim(), from the liquidator's PRE-call state.
-    mapping(address => uint256) public ghost_forfeitedNoCredit;
 
     // Per-action ghost checks (invariant 9, decoupled from the aggregate
     // solvency formula): the USDC a user actually receives from redeem()/
@@ -121,6 +112,16 @@ contract Handler is Test {
     // instead of deducted) increments these and must stay 0.
     uint256 public ghost_redeemPayoutMismatch;
     uint256 public ghost_settleYESPayoutMismatch;
+
+    // a9476ea launch guard-rails (depositCap, bounded setMark/adminSetMark):
+    // these three must stay 0 forever, exactly like the frozen-lock ghosts above.
+    uint256 public ghost_mintExceededCap;          // a mint() succeeded that pushed
+                                                    // YES.totalSupply() past depositCap
+    uint256 public ghost_keeperStepViolation;      // a KEEPER_ROLE setMark() succeeded
+                                                    // with |delta| > maxMarkStep
+    uint256 public ghost_keeperIntervalViolation;  // a KEEPER_ROLE setMark() succeeded
+                                                    // sooner than minMarkInterval after
+                                                    // the previous mark update
 
     // ── call tallies (for the report) ────────────────────────────────────────
     string[] public actionNames;
@@ -169,9 +170,8 @@ contract Handler is Test {
             vm.stopPrank();
         }
 
-        // Pre-fund InsuranceFund generously so tail-case claims (fFrozenTotal >
-        // tokenValue) can actually be exercised rather than reverting for lack of
-        // reserve every time.
+        // Pre-fund InsuranceFund generously so tail-case claims (owed > tokenValue)
+        // can actually be exercised rather than reverting for lack of reserve every time.
         usdc.mint(address(insuranceFund), 10_000_000e18);
     }
 
@@ -203,10 +203,11 @@ contract Handler is Test {
     // would compute RIGHT NOW, from public state only -- mirrors the contract's
     // own math exactly (including folding in any pre-existing fundingDebt[user]
     // ledger entry, and the elapsed-but-not-yet-accrued time projection, since
-    // settleFunding's first action is always _accrueFunding()). `claimableNow`
-    // selects the claimable-branch (frozen, capped) vs the live branch, exactly
-    // as settleFunding itself does.
-    function _projectSettleDelta(address user, bool claimableNow) internal view returns (int256 delta) {
+    // settleFunding's first action is always _accrueFunding()). Post-fix there is
+    // no more claimable/frozen branch -- settleFunding always charges live, for
+    // every user, flagged or not (flagged users just can't reach it except via
+    // cure()/settleYES()).
+    function _projectSettleDelta(address user) internal view returns (int256 delta) {
         uint256 yesBal = yesToken.balanceOf(user);
         uint256 noBal = noToken.balanceOf(user);
 
@@ -214,39 +215,11 @@ contract Handler is Test {
         uint256 elapsed = block.timestamp - market.lastFundingTime();
         uint256 projectedCum = market.cumulativeFundingPerYES() + mark * elapsed / 365 days;
 
-        uint256 yesOwed = claimableNow
-            ? market.frozenFunding(user) * yesBal / 1e18
-            : yesBal * (projectedCum - market.fundingSnapshot(user)) / 1e18;
+        uint256 yesOwed = yesBal * (projectedCum - market.fundingSnapshot(user)) / 1e18;
         uint256 noCredit = noBal * (projectedCum - market.snapNO(user)) / 1e18;
         uint256 debit = market.fundingDebt(user) + yesOwed;
 
         delta = noCredit >= debit ? int256(noCredit - debit) : -int256(debit - noCredit);
-    }
-
-    // The (not-yet-locked) frozen-window leak for a CURRENTLY flagged `user`,
-    // computed from live state. Callers read this BEFORE the resolving call
-    // (cure/settleYES/claim) and only fold it into ghost_lockedLeak[user] if
-    // that call actually succeeds -- see ghost_lockedLeak's own comment and
-    // invariant_CollateralSolvencyPreEvent for the full derivation.
-    //
-    // IMPORTANT: frozenFunding(user) is a DELTA (accrued since the user's OWN
-    // pre-flag fundingSnapshot), not the absolute cumFundingPerYES index value
-    // at flag time -- fundingSnapshot(user) is left untouched while flagged
-    // (CreditMarket.sol's _syncUserFunding/settleFunding both skip advancing it
-    // for a claimable user), so it's still readable here and must be ADDED BACK
-    // to reconstruct the absolute index at flag time: cumYESAtFlag =
-    // frozenFunding(user) + fundingSnapshot(user). Using frozenFunding(user)
-    // alone (as an early draft of this helper did) silently double-subtracts
-    // the user's own pre-flag backlog and overstates the leak by that amount
-    // for any position that sat unsynced for a while before being flagged --
-    // caught via invariant_CollateralSolvencyPreEvent itself failing on a
-    // freshly-flagged position with zero actual elapsed post-flag time (see
-    // scratchpad notes / mutation-testing follow-up).
-    function _pendingLeak(address user) internal view returns (uint256) {
-        uint256 q = yesToken.balanceOf(user);
-        uint256 cumYESAtFlag = market.frozenFunding(user) + market.fundingSnapshot(user);
-        uint256 cumNO = market.cumFundingPerNO();
-        return cumNO > cumYESAtFlag ? q * (cumNO - cumYESAtFlag) / 1e18 : 0;
     }
 
     function _sign(uint256 key, CLOBSettlement.Order memory order) internal view returns (bytes memory) {
@@ -255,29 +228,28 @@ contract Handler is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    // Snapshots frozenFunding for every currently-flagged actor before the wrapped
+    // Snapshots owed() for every currently-flagged actor before the wrapped
     // action, and afterwards asserts (via ghost counter, not a hard revert — the
     // invariant test reads the counter) that any actor STILL flagged after the
-    // action has an UNCHANGED frozenFunding value. Per CreditMarket.sol,
-    // frozenFunding[user] is written only by flagClaimable (set), and consumed
-    // (zeroed) only inside settleFunding when claimable[user] is true — which only
-    // happens via cure()/settleYES() (both also flip claimable=false in the same
-    // call) or clearLiquidatedPosition (claim(), also flips claimable=false). So an
-    // actor that is STILL flagged after some unrelated action ran must have an
-    // untouched frozenFunding.
-    modifier trackFrozen() {
+    // action has a NON-DECREASING owed() value. Post-fix there is no accounting
+    // freeze: a flagged position's YES balance can't change (mint/redeem/trade all
+    // revert PositionFrozen while locked — invariant 10) and its funding keeps
+    // accruing live off the global, monotonic index, so owed() for an actor who
+    // remains flagged across any action can only grow (or hold steady if no time
+    // elapsed) — it must never fall.
+    modifier trackFlagged() {
         uint256 n = actors.length;
         uint256[] memory snap = new uint256[](n);
         bool[] memory wasFlagged = new bool[](n);
         for (uint256 i = 0; i < n; i++) {
             wasFlagged[i] = market.claimable(actors[i]);
-            snap[i] = market.frozenFunding(actors[i]);
+            snap[i] = wasFlagged[i] ? market.owed(actors[i]) : 0;
         }
         _;
         for (uint256 i = 0; i < n; i++) {
             if (wasFlagged[i] && market.claimable(actors[i])) {
-                if (market.frozenFunding(actors[i]) != snap[i]) {
-                    ghost_frozenFundingChangedWhileFlagged++;
+                if (market.owed(actors[i]) < snap[i]) {
+                    ghost_owedDecreasedWhileFlagged++;
                 }
             }
         }
@@ -285,22 +257,25 @@ contract Handler is Test {
 
     // ── actions (invariant targets) ──────────────────────────────────────────
 
-    function mint(uint256 actorSeed, uint256 amountSeed) external trackFrozen {
+    function mint(uint256 actorSeed, uint256 amountSeed) external trackFlagged {
         address a = _actor(actorSeed);
         uint256 amount = bound(amountSeed, 1e15, 2_000e18);
         bool flagged = market.claimable(a);
+        uint256 supplyBefore = yesToken.totalSupply();
+        uint256 capNow = market.depositCap();
 
         vm.prank(a);
         try market.mint(amount) {
             ghost_yesMinted += amount;
             if (flagged) ghost_frozenMintSuccesses++;
+            if (supplyBefore + amount > capNow) ghost_mintExceededCap++;
             _record("mint", true);
         } catch {
             _record("mint", false);
         }
     }
 
-    function redeem(uint256 actorSeed, uint256 amountSeed) external trackFrozen {
+    function redeem(uint256 actorSeed, uint256 amountSeed) external trackFlagged {
         address a = _actor(actorSeed);
         uint256 yesBal = yesToken.balanceOf(a);
         uint256 noBal = noToken.balanceOf(a);
@@ -311,7 +286,7 @@ contract Handler is Test {
         }
         uint256 amount = bound(amountSeed, 1, maxAmt);
         bool flagged = market.claimable(a);
-        int256 expectedDelta = flagged ? int256(0) : _projectSettleDelta(a, false);
+        int256 expectedDelta = flagged ? int256(0) : _projectSettleDelta(a);
         uint256 usdcBefore = usdc.balanceOf(a);
 
         vm.prank(a);
@@ -344,7 +319,7 @@ contract Handler is Test {
         return actualPaidOut != uint256(expectedTotal);
     }
 
-    function settleYES(uint256 actorSeed, uint256 amountSeed) external trackFrozen {
+    function settleYES(uint256 actorSeed, uint256 amountSeed) external trackFlagged {
         address a = _actor(actorSeed);
         uint256 yesBal = yesToken.balanceOf(a);
         if (yesBal == 0) {
@@ -352,18 +327,12 @@ contract Handler is Test {
             return;
         }
         uint256 amount = bound(amountSeed, 1, yesBal);
-        bool wasFlagged = market.claimable(a);
-        int256 expectedDelta = _projectSettleDelta(a, wasFlagged);
+        int256 expectedDelta = _projectSettleDelta(a);
         uint256 usdcBefore = usdc.balanceOf(a);
-        // Pre-compute the leak (if any) BEFORE the call, using pre-call state --
-        // only actually recorded into the ghost if the call succeeds (settleYES
-        // "auto-cures" a flagged position by clearing the flag), never on revert.
-        uint256 preLeak = wasFlagged ? _pendingLeak(a) : 0;
 
         vm.prank(a);
         try market.settleYES(amount) {
             ghost_yesBurnedTotal += amount;
-            if (wasFlagged) ghost_lockedLeak[a] += preLeak;
             if (_payoutMismatch(a, usdcBefore, amount, expectedDelta)) ghost_settleYESPayoutMismatch++;
             _record("settleYES", true);
         } catch {
@@ -391,7 +360,7 @@ contract Handler is Test {
         uint256 sellerIsMakerSeed,
         uint256 amountSeed,
         uint256 priceFracSeed
-    ) external trackFrozen {
+    ) external trackFlagged {
         TradeVars memory t;
         {
             address makerAddr = _actor(makerSeed);
@@ -489,7 +458,64 @@ contract Handler is Test {
         takerSig = _sign(keyOf[takerOrder.maker], takerOrder);
     }
 
-    function warpAndAccrue(uint256 seed) external trackFrozen {
+    // F4-trick exerciser (docs/security/invariant-findings-2026-09-26.md,
+    // required suite change #5): a YES holder approaching the seizure boundary
+    // does a TINY CLOB buy of NO (price == amount, so fee == 0 regardless of
+    // feeBps -- keeps this action fee-agnostic) right before it would cross --
+    // exactly the F4 mechanism, since CLOBSettlement.verifyAndSettle runs
+    // settleFunding(buyer) on the actor, folding its accrued YES debit into
+    // fundingDebt and resetting fundingSnapshot to now. Pre-fix this reset the
+    // trigger's clock to ~0 (isSeizable never saw the ledger debt); post-fix
+    // owed() reads fundingDebt too, so the trigger should see straight through
+    // it. Exercises exactly the snapshot-reset-with-ledger-debt path the fuzzer
+    // otherwise might rarely stumble into on its own.
+    function nearBoundaryTinyBuy(uint256 actorSeed, uint256 sellerSeed, uint256 amountSeed) external trackFlagged {
+        address a = _actor(actorSeed);
+        address seller = _actor(sellerSeed);
+        if (a == seller) seller = _actor(sellerSeed + 1);
+        if (a == seller || market.claimable(a) || market.claimable(seller)) {
+            _record("nearBoundaryTinyBuy", false);
+            return;
+        }
+        uint256 yesBal = yesToken.balanceOf(a);
+        uint256 sellerNoBal = noToken.balanceOf(seller);
+        if (yesBal == 0 || sellerNoBal == 0) {
+            _record("nearBoundaryTinyBuy", false);
+            return;
+        }
+        uint256 cap = sellerNoBal > 1e15 ? 1e15 : sellerNoBal;
+        uint256 amount = bound(amountSeed, 1, cap);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        CLOBSettlement.Order memory sellOrder = CLOBSettlement.Order({
+            maker: seller,
+            tokenIn: address(noToken),
+            tokenOut: address(usdc),
+            amountIn: amount,
+            minAmountOut: 0,
+            expiry: expiry,
+            nonce: nextNonce[seller]++
+        });
+        CLOBSettlement.Order memory buyOrder = CLOBSettlement.Order({
+            maker: a,
+            tokenIn: address(usdc),
+            tokenOut: address(noToken),
+            amountIn: amount, // price == amount -> tradeFee() == 0 regardless of feeBps
+            minAmountOut: amount,
+            expiry: expiry,
+            nonce: nextNonce[a]++
+        });
+        bytes memory sellSig = _sign(keyOf[seller], sellOrder);
+        bytes memory buySig = _sign(keyOf[a], buyOrder);
+
+        try clob.verifyAndSettle(sellOrder, sellSig, buyOrder, buySig) {
+            _record("nearBoundaryTinyBuy", true);
+        } catch {
+            _record("nearBoundaryTinyBuy", false);
+        }
+    }
+
+    function warpAndAccrue(uint256 seed) external trackFlagged {
         uint256 delta = bound(seed, 0, 30 days);
         vm.warp(block.timestamp + delta);
         try market.accrueFunding() {
@@ -507,7 +533,7 @@ contract Handler is Test {
     // the same direction. Without this, flagClaimable/cure/liquidationClaim are
     // starved for eligible positions and the suite under-exercises invariants
     // 1/2/5/10's most interesting paths.
-    function warpLarge(uint256 seed) external trackFrozen {
+    function warpLarge(uint256 seed) external trackFlagged {
         uint256 delta = bound(seed, 0, 400 days);
         vm.warp(block.timestamp + delta);
         try market.accrueFunding() {
@@ -517,16 +543,131 @@ contract Handler is Test {
         }
     }
 
-    function setMark(uint256 seed) external trackFrozen {
-        uint256 newMark = bound(seed, 0.01e18, 0.60e18);
+    // KEEPER_ROLE setMark, now bounded (a9476ea: maxMarkStep/minMarkInterval are
+    // turned ON in the invariant setUp, unlike the unit-test defaults). Branches
+    // between a small step straddling maxMarkStep (so plenty of draws land both
+    // just inside and just outside the bound) and the old broad 0.01-0.60e18
+    // jump (almost always beyond the bound) -- and occasionally skips warping
+    // time first, so back-to-back calls also exercise MarkUpdateTooSoon. Any
+    // call that SUCCEEDS is checked against the bounds actually in force at
+    // that moment; a violation on a successful call means the guard-rail
+    // itself is broken (M9-type regression), not that the fuzzer got unlucky.
+    function setMark(uint256 seed, uint256 warpSeed) external trackFlagged {
+        if (warpSeed % 3 != 0) {
+            // 2-in-3 calls warp a little first (0..2h) -- sometimes enough to
+            // clear minMarkInterval (1h in the invariant setUp), sometimes not.
+            vm.warp(block.timestamp + bound(warpSeed, 0, 2 hours));
+            // setMark() below only calls _accrueFunding() on its OWN success path
+            // (after the step/interval/validity checks) -- and this action's
+            // whole point is to draw plenty of calls that REVERT on those checks.
+            // Without syncing here, a reverting call would leave lastFundingTime
+            // stale relative to the block.timestamp we just warped to, which
+            // desyncs owed()'s live projection (used by isSeizable()) from
+            // invariant_SeizureTriggerConsistency's raw-index reimplementation --
+            // a real bug this suite introduced, not a contract bug (caught by a
+            // deep-profile run). accrueFunding() is unrestricted and can never
+            // revert, so this is always safe to call unconditionally.
+            market.accrueFunding();
+        }
+        // else: no warp at all -- back-to-back setMark calls with zero elapsed
+        // time deterministically test MarkUpdateTooSoon whenever the previous
+        // update was itself recent.
+
+        uint256 oldMark = market.currentMark();
+        uint256 maxStep = market.maxMarkStep();
+        uint256 minInterval = market.minMarkInterval();
+        uint256 lastUpdate = market.lastMarkUpdate();
+
+        uint256 newMark;
+        if (seed % 3 == 0) {
+            // Small step straddling maxMarkStep: [0, maxStep + 0.02e18] --
+            // roughly half the draws land inside the bound, half just beyond it.
+            uint256 step = bound(seed, 0, maxStep + 0.02e18);
+            newMark = (seed / 7) % 2 == 0 ? oldMark + step : (oldMark > step ? oldMark - step : oldMark + step);
+        } else {
+            // Broad jump -- the old unbounded behavior, almost always beyond
+            // maxMarkStep, keeping that failure path well exercised too.
+            newMark = bound(seed, 0.01e18, 0.60e18);
+        }
+        newMark = bound(newMark, 1, 1e18 - 1);
+
         try market.setMark(newMark) {
+            uint256 actualStep = newMark > oldMark ? newMark - oldMark : oldMark - newMark;
+            if (actualStep > maxStep) ghost_keeperStepViolation++;
+            if (block.timestamp < lastUpdate + minInterval) ghost_keeperIntervalViolation++;
             _record("setMark", true);
         } catch {
             _record("setMark", false);
         }
     }
 
-    function flagClaimable(uint256 actorSeed) external trackFrozen {
+    // DEFAULT_ADMIN_ROLE override: bypasses maxMarkStep/minMarkInterval entirely
+    // (validity check only). Provides the big, unbounded mark moves the suite
+    // relies on for tail-case/seizure coverage now that the plain KEEPER setMark
+    // action above is bounded -- mirrors real usage (a sudden repricing on real
+    // news goes through this path, not the throttled keeper one).
+    function adminSetMark(uint256 seed) external trackFlagged {
+        uint256 newMark = bound(seed, 0.001e18, 0.99e18);
+        try market.adminSetMark(newMark) {
+            _record("adminSetMark", true);
+        } catch {
+            _record("adminSetMark", false);
+        }
+    }
+
+    // Direct step-bound probe (mirrors probeMissedSeizureFlag/probeFlaggedActor's
+    // style): jumps to whichever extreme (0.02e18 / 0.9e18) is farther from the
+    // current mark, guaranteeing a step far beyond any realistic maxMarkStep
+    // bound, so MarkStepTooLarge is deterministically exercised on essentially
+    // every call -- rather than relying on setMark()'s own randomized draws to
+    // occasionally land far enough beyond the bound by chance.
+    function probeMarkStepBound() external trackFlagged {
+        uint256 oldMark = market.currentMark();
+        uint256 maxStep = market.maxMarkStep();
+        uint256 minInterval = market.minMarkInterval();
+        uint256 lastUpdate = market.lastMarkUpdate();
+
+        uint256 newMark = oldMark < 0.5e18 ? 0.9e18 : 0.02e18;
+
+        try market.setMark(newMark) {
+            uint256 actualStep = newMark > oldMark ? newMark - oldMark : oldMark - newMark;
+            if (actualStep > maxStep) ghost_keeperStepViolation++;
+            if (block.timestamp < lastUpdate + minInterval) ghost_keeperIntervalViolation++;
+            _record("probeMarkStepBound", true);
+        } catch {
+            _record("probeMarkStepBound", false);
+        }
+    }
+
+    // Direct depositCap probe (mirrors probeMissedSeizureFlag/probeFlaggedActor's
+    // style): sizes a mint to land EXACTLY at the remaining headroom under the
+    // cap, or 1 wei past it, deterministically exercising the cap boundary on
+    // essentially every call (whenever there's headroom) instead of relying on
+    // the broader mint() action's uniform random amount to stumble past the cap
+    // by chance.
+    function probeDepositCap(uint256 actorSeed, uint256 overSeed) external trackFlagged {
+        address a = _actor(actorSeed);
+        uint256 supply = yesToken.totalSupply();
+        uint256 cap = market.depositCap();
+        if (supply >= cap) {
+            _record("probeDepositCap", false);
+            return;
+        }
+        uint256 headroom = cap - supply;
+        uint256 over = bound(overSeed, 0, 1); // 0 -> exactly at cap, 1 -> 1 wei over
+        uint256 amount = headroom + over;
+
+        vm.prank(a);
+        try market.mint(amount) {
+            ghost_yesMinted += amount;
+            if (supply + amount > cap) ghost_mintExceededCap++;
+            _record("probeDepositCap", true);
+        } catch {
+            _record("probeDepositCap", false);
+        }
+    }
+
+    function flagClaimable(uint256 actorSeed) external trackFlagged {
         address a = _actor(actorSeed);
         bool pendingBefore = market.motionPending();
         try market.flagClaimable(a) {
@@ -539,30 +680,33 @@ contract Handler is Test {
 
     // Sets mark to (an approximation of) the EXACT boundary mark at which the
     // given actor's isSeizable() would flip, then nudges it +/-2% either side.
-    // Solving `m <= 1.03*(fNow + m*epochLength/365days)` for m at equality:
-    //   m*(100*365days - 103*epochLength) <= 103*fNow*365days
-    //   boundaryMark = 103*fNow*365days / (100*365days - 103*epochLength)
+    // Solving `m <= 1.03*(fNow + m*epochLength/365days)` for m at equality,
+    // with fNow = owed(a) per unit (fundingDebt + live accrual -- post-fix the
+    // trigger's f_now includes the ledger, so the boundary-seeking math must
+    // too, or it would aim at the wrong mark whenever any debt is outstanding):
+    //   m*(100*365days - 103*epochLength) <= 103*owedPerUnit*365days
+    //   boundaryMark = 103*owedPerUnit*365days / (100*365days - 103*epochLength)
     // Without this, random setMark/warp draws rarely land close enough to the
     // 103%-buffer boundary to distinguish it from a subtly wrong constant (e.g.
     // 104%) -- this action exists purely to make invariant_SeizureTriggerConsistency
     // actually exercise the boundary, and as a side effect makes flagClaimable
     // itself far more reachable (feeding cure/liquidationClaim/frozen-lock
     // coverage too).
-    function seekSeizureBoundary(uint256 actorSeed, uint256 nudgeSeed) external trackFrozen {
+    function seekSeizureBoundary(uint256 actorSeed, uint256 nudgeSeed) external trackFlagged {
         address a = _actor(actorSeed);
         uint256 yesBal = yesToken.balanceOf(a);
         if (yesBal == 0 || market.claimable(a)) {
             _record("seekSeizureBoundary", false);
             return;
         }
-        uint256 fNow = market.cumulativeFundingPerYES() - market.fundingSnapshot(a);
+        uint256 owedPerUnit = market.owed(a) * 1e18 / yesBal;
         uint256 epochLength = market.epochLength();
         uint256 denom = 100 * 365 days - 103 * epochLength;
-        if (denom == 0 || fNow == 0) {
+        if (denom == 0 || owedPerUnit == 0) {
             _record("seekSeizureBoundary", false);
             return;
         }
-        uint256 boundaryMark = (103 * fNow * 365 days) / denom;
+        uint256 boundaryMark = (103 * owedPerUnit * 365 days) / denom;
 
         int256 nudgePct = int256(bound(nudgeSeed, 0, 400)) - 200; // -2.00% .. +2.00%
         uint256 newMark;
@@ -574,7 +718,12 @@ contract Handler is Test {
         }
         newMark = bound(newMark, 0.001e18, 0.65e18);
 
-        try market.setMark(newMark) {
+        // Uses adminSetMark, not the plain keeper setMark: this action needs to
+        // land PRECISELY at the computed boundary mark in one shot regardless of
+        // distance from the current mark, and a9476ea's maxMarkStep/minMarkInterval
+        // bounds (turned on for the keeper path in this suite's setUp) would
+        // otherwise block exactly the large, well-timed jumps this probe depends on.
+        try market.adminSetMark(newMark) {
             _record("seekSeizureBoundary", true);
         } catch {
             _record("seekSeizureBoundary", false);
@@ -592,7 +741,7 @@ contract Handler is Test {
     // whichever actor happens to be flagged, which made invariant 10 coverage
     // (and hence catching a mint()-ignores-freeze mutation) too unreliable at
     // the default profile's smaller runs/depth budget.
-    function probeFlaggedActor(uint256 amountSeed) external trackFrozen {
+    function probeFlaggedActor(uint256 amountSeed) external trackFlagged {
         bool probedAny;
         uint256 n = actors.length;
         for (uint256 i = 0; i < n; i++) {
@@ -600,11 +749,27 @@ contract Handler is Test {
             if (!market.claimable(a)) continue;
             probedAny = true;
             uint256 amount = bound(amountSeed, 1e15, 100e18);
+            uint256 supplyBefore = yesToken.totalSupply();
+            uint256 capNow = market.depositCap();
+
+            // This probe exists specifically to test the FREEZE check (invariant
+            // 10) -- not the depositCap check (that's probeDepositCap's job).
+            // Guarantee headroom so a cap collision can never masquerade as (or
+            // mask) a mint-ignores-freeze regression: without this, depositCap
+            // being nearly full (probeDepositCap deliberately drives it there)
+            // would make this attempt revert DepositCapExceeded regardless of
+            // whether the freeze check itself is intact, silently starving
+            // invariant_FlaggedPositionsLocked's coverage of this exact path.
+            if (supplyBefore + amount > capNow) {
+                capNow = supplyBefore + amount + 1;
+                market.setDepositCap(capNow);
+            }
 
             vm.prank(a);
             try market.mint(amount) {
                 ghost_yesMinted += amount;
                 ghost_frozenMintSuccesses++;
+                if (supplyBefore + amount > capNow) ghost_mintExceededCap++;
             } catch {}
 
             uint256 yesBal = yesToken.balanceOf(a);
@@ -622,66 +787,83 @@ contract Handler is Test {
         _record("probeFlaggedActor", probedAny);
     }
 
-    function cure(uint256 actorSeed) external trackFrozen {
+    // Direct F4-type probe (required suite change #3, second part): whenever an
+    // UNFLAGGED actor's position satisfies the spec's seizure condition --
+    // value*100 <= (owed()+nextEpoch)*103, independently recomputed here from
+    // owed() (NOT by calling market.isSeizable(), which would make this probe
+    // blind to a mutation that breaks isSeizable() itself while leaving owed()
+    // intact -- e.g. M6, reverting the F4 fix inside isSeizable only) -- then
+    // flagClaimable() MUST succeed. Any revert is a direct violation of the
+    // trigger spec and increments ghost_missedSeizureFlag.
+    function probeMissedSeizureFlag() external trackFlagged {
+        if (market.motionPending()) {
+            _record("probeMissedSeizureFlag", false);
+            return;
+        }
+        uint256 m = market.currentMark();
+        uint256 epochLength = market.epochLength();
+        bool probedAny;
+        uint256 n = actors.length;
+        for (uint256 i = 0; i < n; i++) {
+            address a = actors[i];
+            if (market.claimable(a)) continue;
+            uint256 yesBal = yesToken.balanceOf(a);
+            if (yesBal == 0) continue;
+
+            uint256 owedNow = market.owed(a);
+            uint256 value = yesBal * m / 1e18;
+            uint256 nextEpoch = yesBal * (m * epochLength / 365 days) / 1e18;
+            bool shouldBeSeizable = value * 100 <= (owedNow + nextEpoch) * 103;
+            if (!shouldBeSeizable) continue;
+
+            probedAny = true;
+            try market.flagClaimable(a) {
+                // expected -- success
+            } catch {
+                ghost_missedSeizureFlag++;
+            }
+        }
+        _record("probeMissedSeizureFlag", probedAny);
+    }
+
+    function cure(uint256 actorSeed) external trackFlagged {
         address a = _actor(actorSeed);
         if (!market.claimable(a)) {
             _record("cure", false);
             return;
         }
-        uint256 preLeak = _pendingLeak(a);
 
         vm.prank(a);
         try market.cure() {
-            ghost_lockedLeak[a] += preLeak;
             _record("cure", true);
         } catch {
             _record("cure", false);
         }
     }
 
-    function liquidationClaim(uint256 liqSeed, uint256 targetSeed) external trackFrozen {
+    function liquidationClaim(uint256 liqSeed, uint256 targetSeed) external trackFlagged {
         address liquidator = _actor(liqSeed);
         address target = _actor(targetSeed);
         if (!market.claimable(target)) {
             _record("liquidationClaim", false);
             return;
         }
-        // OBSERVATION (not compensated, scoped out): claim() is permissionless
-        // and never checks the CALLER's own claimable status. If the liquidator
-        // is themselves currently flagged, clearLiquidatedPosition's
-        // _syncUserFunding(liquidator) call no-ops (it early-returns whenever
-        // claimable[user] is true), skipping the "fresh start" reset the spec
-        // promises liquidators -- the newly-seized YES then gets retroactively
-        // priced against the liquidator's OWN stale frozen state at their next
-        // resolution. Real keeper/liquidator bots would not practically be
-        // flagged YES holders themselves, and precisely modeling this exotic
-        // double-flagged interaction is out of scope here -- skip it so the
-        // suite stays focused on the realistic (non-flagged liquidator) path.
-        if (market.claimable(liquidator)) {
-            _record("liquidationClaim", false);
-            return;
-        }
+        // Post-fix (F2): clearLiquidatedPosition reverts PositionFrozen if the
+        // liquidator is itself flagged (rather than silently no-op'ing the
+        // liquidator's own fresh-start reset, as the pre-fix _syncUserFunding
+        // did). No special-casing needed here any more -- a flagged liquidator's
+        // claim attempt is just another expected revert, tallied like any other.
         bool pendingBefore = market.motionPending();
-        uint256 prevDebt = market.fundingDebt(target);
-        uint256 frozenPerUnit = market.frozenFunding(target);
         uint256 Q = yesToken.balanceOf(target);
         uint256 m = market.currentMark();
-        uint256 fFrozenTotal = prevDebt + frozenPerUnit * Q / 1e18;
+        uint256 owedTotal = market.owed(target);
         uint256 tokenValue = Q * m / 1e18;
-        bool tailCase = fFrozenTotal > tokenValue;
-        uint256 preLeak = _pendingLeak(target);
-        // See ghost_forfeitedNoCredit's comment: clearLiquidatedPosition's
-        // _syncUserFunding(liquidator) call resets the liquidator's snapNO
-        // without paying out any pending NO credit -- capture it here, from
-        // pre-call state, before that reset silently erases it.
-        uint256 preForfeit = noToken.balanceOf(liquidator) * (market.cumFundingPerNO() - market.snapNO(liquidator)) / 1e18;
+        bool tailCase = owedTotal > tokenValue;
 
         vm.prank(liquidator);
         try liquidationEngine.claim(target) {
-            ghost_lockedLeak[target] += preLeak;
-            ghost_forfeitedNoCredit[liquidator] += preForfeit;
             if (pendingBefore) ghost_motionPendingClaimSuccesses++;
-            if (market.fundingDebt(target) != 0 || market.frozenFunding(target) != 0) {
+            if (market.fundingDebt(target) != 0) {
                 ghost_liquidationLedgerNotCleared++;
             }
             if (tailCase) ghost_tailCaseClaims++;
@@ -700,7 +882,7 @@ contract Handler is Test {
     // probability keeps it reachable (so the credit-event/settleYES path is still
     // exercised every campaign) while leaving most of the depth budget for the
     // richer pre-event state space.
-    function confirmCreditEvent(uint256 seed) external trackFrozen {
+    function confirmCreditEvent(uint256 seed) external trackFlagged {
         if (seed % 25 != 0) {
             _record("confirmCreditEvent", false);
             return;
@@ -712,7 +894,7 @@ contract Handler is Test {
         }
     }
 
-    function setMotionPending(uint256 seed) external trackFrozen {
+    function setMotionPending(uint256 seed) external trackFlagged {
         bool pending = seed % 2 == 0;
         try market.setMotionPending(pending) {
             _record("setMotionPending", true);
@@ -721,7 +903,7 @@ contract Handler is Test {
         }
     }
 
-    function toggleFee(uint256 seed) external trackFrozen {
+    function toggleFee(uint256 seed) external trackFlagged {
         uint256 newFee = seed % 2 == 0 ? 0 : 50;
         try clob.setFeeConfig(newFee, teamWallet, address(insuranceFund), 5_000) {
             _record("toggleFee", true);
@@ -730,7 +912,7 @@ contract Handler is Test {
         }
     }
 
-    function fundInsurance(uint256 seed) external trackFrozen {
+    function fundInsurance(uint256 seed) external trackFlagged {
         uint256 amount = bound(seed, 0, 1_000e18);
         usdc.mint(address(this), amount);
         usdc.approve(address(insuranceFund), amount);

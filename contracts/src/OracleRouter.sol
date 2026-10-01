@@ -14,7 +14,10 @@ contract OracleRouter is AccessControl {
 
     event CreditEventConfirmed(address indexed by);
 
+    error ZeroAddress();
+
     constructor(address admin, address _creditMarket) {
+        if (admin == address(0) || _creditMarket == address(0)) revert ZeroAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         creditMarket = _creditMarket;
     }
