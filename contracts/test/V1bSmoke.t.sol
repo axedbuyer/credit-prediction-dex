@@ -48,8 +48,8 @@ contract V1bSmokeTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        yes  = new YESToken(admin);
-        no   = new NOToken(admin);
+        yes  = new YESToken(admin, "YES", "YES");
+        no   = new NOToken(admin, "NO", "NO");
 
         // 1-day epoch, 5% initial mark
         market = new CreditMarket(

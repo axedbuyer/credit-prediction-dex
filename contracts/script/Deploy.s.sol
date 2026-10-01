@@ -107,8 +107,8 @@ contract Deploy is Script {
         vm.startBroadcast(deployerKey);
 
         // ── 1. token contracts ────────────────────────────────────────────────
-        YESToken yesToken = new YESToken(_deployer);
-        NOToken  noToken  = new NOToken(_deployer);
+        YESToken yesToken = new YESToken(_deployer, "YES", "YES");
+        NOToken  noToken  = new NOToken(_deployer, "NO", "NO");
 
         // ── 2. core market ────────────────────────────────────────────────────
         CreditMarket market = new CreditMarket(

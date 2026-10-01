@@ -52,8 +52,8 @@ contract DeployLocal is Script {
         console.log("Minted", SEED_USDC / 1e6, "USDC to deployer");
 
         // ── 1. token contracts ────────────────────────────────────────────────
-        YESToken yesToken = new YESToken(deployer);
-        NOToken  noToken  = new NOToken(deployer);
+        YESToken yesToken = new YESToken(deployer, "YES", "YES");
+        NOToken  noToken  = new NOToken(deployer, "NO", "NO");
 
         // ── 2. core market ────────────────────────────────────────────────────
         CreditMarket market = new CreditMarket(
