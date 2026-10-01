@@ -37,28 +37,31 @@ export default function LiquidationsAndCurePage() {
         </li>
       </ul>
 
-      <h2>The freeze</h2>
+      <h2>The lock</h2>
       <p>
         When the trigger fires, a keeper flags the position. From that moment it is fully
-        locked: no trading, no minting, no redeeming, and <strong>carry stops
-        accruing</strong> — the bill is frozen at the flagged amount. Three exits only:
-        someone claims it, you cure it, or a credit event is confirmed (settlement
-        auto-collects the frozen bill from your $1.00 payout).
+        locked: no trading, no minting, no redeeming. Daily carry keeps accruing the whole
+        time it&rsquo;s locked &mdash; there is no freeze &mdash; so the bill you&rsquo;d
+        pay to cure, or the price a claimer would pay, keeps growing the longer it waits.
+        Three exits only: someone claims it, you cure it, or a credit event is confirmed
+        (settlement auto-collects the live bill from your $1.00 payout).
       </p>
 
-      <h2>The claim (permissionless, fixed price — no auction)</h2>
-      <p>Anyone may claim a flagged position by paying:</p>
-      <div className="docs-formula">{'P = min(f, m)     (f = frozen carry owed, m = price at flag time)'}</div>
+      <h2>The claim (permissionless, formulaic price — no auction)</h2>
+      <p>Anyone may claim a locked position by paying, priced at the moment they claim:</p>
+      <div className="docs-formula">{'P = min(f, m)     (f = carry owed right now, m = price right now)'}</div>
       <p>
-        <strong>Normal case (f ≤ m):</strong> the claimer pays exactly the carry owed. That
-        payment makes the Downbet side whole. The Upbet <strong>transfers</strong> to the
-        claimer (it is never destroyed) with a fresh carry clock; their profit is the ~3%
-        sliver (m − f) when they resell.
+        <strong>Normal case (f ≤ m):</strong> the claimer pays exactly the carry owed at
+        that instant. That payment makes the Downbet side whole. The Upbet{' '}
+        <strong>transfers</strong> to the claimer (it is never destroyed) with a fresh
+        carry clock; their profit is the sliver (m − f) when they resell &mdash; it
+        shrinks the longer the position sits unclaimed, which is exactly the incentive to
+        claim promptly rather than let it wait.
       </p>
       <p>
-        <strong>Tail case (f &gt; m,</strong> e.g. after downtime): the claimer pays the full
-        price m and the <strong>insurance fund</strong> tops up the difference — Downbet
-        holders are always made whole, in every case, with no haircut.
+        <strong>Tail case (f &gt; m,</strong> e.g. after a long stall): the claimer pays the
+        full price m and the <strong>insurance fund</strong> tops up the difference &mdash;
+        Downbet holders are always made whole, in every case, with no haircut.
       </p>
       <p>
         The claimed holder&rsquo;s Downbets (if any) are untouched — earned carry on the
@@ -67,18 +70,21 @@ export default function LiquidationsAndCurePage() {
 
       <h2>Cure — the self-rescue</h2>
       <p>
-        Before anyone claims, the holder can <strong>cure</strong>: pay the frozen carry
-        bill in USDC, keep the Upbet (and the ~3% sliver a claimer would have taken), and
-        carry resumes from now. The Portfolio page shows the cure cost and an approve → cure
-        flow when your position is frozen.
+        Before anyone claims, the holder can <strong>cure</strong>: pay the live carry bill
+        in USDC and keep the Upbet. Carry has been accruing the entire time the position
+        was locked, so the sooner you cure, the less you pay &mdash; and you keep the
+        sliver a claimer would otherwise have taken. The Portfolio page shows a live
+        cure-cost estimate and an approve → cure flow whenever your position is locked.
       </p>
 
       <h2>For liquidators</h2>
       <p>
-        The <Link href="/liquidate">Liquidate</Link> page lists flagged positions and the
-        fixed claim price P. First valid transaction wins — no auction, no discount ramp, no
-        special role required. Your edge is the 3% buffer. Note honestly: claims are open
-        first-come-first-served on a public chain, so competition is possible.
+        The <Link href="/liquidate">Liquidate</Link> page lists locked positions and the
+        current claim price P &mdash; it rises with every passing day, so refresh before you
+        submit. First valid transaction wins — no auction, no discount ramp, no special role
+        required. Your edge is the sliver between price and carry owed. Note honestly:
+        claims are open first-come-first-served on a public chain, so competition is
+        possible.
       </p>
 
       <div className="docs-callout docs-callout--warning">

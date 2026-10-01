@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {YESToken} from "../src/YESToken.sol";
 import {NOToken} from "../src/NOToken.sol";
@@ -375,6 +376,12 @@ contract CreditMarketTest is Test {
     // ─── v1b: seizure trigger tests ───────────────────────────────────────────
 
     // Fuzz: isSeizable must return the same value as the manually computed formula.
+    // UPDATED for the owed()-based trigger (F4 fix): the manual formula now keys on
+    // owed(bob) (ledger debt + live accrual), evaluated in totals (value vs 1.03x
+    // (owed + one epoch of accrual)) exactly as CreditMarket.isSeizable does — bob
+    // never trades here so fundingDebt(bob) == 0 and owed() reduces to the same
+    // live-accrual number the old per-unit formula used, but the comparison shape
+    // (totals, not per-unit) must match the contract's new implementation.
     function test_IsSeizable_FiresAtBoundary(uint256 markPct, uint256 warpSecs) public {
         markPct  = bound(markPct,  1,  99);
         warpSecs = bound(warpSecs, 1,  180 days);
@@ -392,12 +399,12 @@ contract CreditMarketTest is Test {
         vm.warp(block.timestamp + warpSecs);
         mkt.accrueFunding();
 
-        uint256 fNow   = mkt.cumulativeFundingPerYES() - mkt.fundingSnapshot(bob);
-        uint256 deltaF = m * 1 days / 365 days; // epochLength == 1 days
-        uint256 fNext  = fNow + deltaF;
-        bool expected  = m <= (fNext * 103) / 100;
+        uint256 yesBal    = yesToken.balanceOf(bob);
+        uint256 value     = yesBal * m / 1e18;
+        uint256 nextEpoch = yesBal * (m * 1 days / 365 days) / 1e18; // epochLength == 1 days
+        bool expected     = value * 100 <= (mkt.owed(bob) + nextEpoch) * 103;
 
-        assertEq(mkt.isSeizable(bob), expected, "isSeizable matches manual boundary formula");
+        assertEq(mkt.isSeizable(bob), expected, "isSeizable matches manual owed()-based boundary formula");
     }
 
     // Two holders with identical fNow and mark but different costBasis must yield
@@ -460,9 +467,12 @@ contract CreditMarketTest is Test {
         assertTrue(mkt.pnl(bob) < 0, "position is underwater (sanity check)");
     }
 
-    // After flagClaimable, frozenFunding must stay constant even as the global
-    // cumulativeFundingPerYES index keeps rising.
-    function test_FlagClaimable_FreezesFunding() public {
+    // UPDATED (F1 fix, docs/security/invariant-findings-2026-09-26.md): flagClaimable
+    // is a LOCK, not an accounting freeze. There is no frozenFunding anymore — owed()
+    // must keep rising with the global index after a flag, exactly like an unflagged
+    // holder's. A freeze here would let the paired NO keep earning credit that nobody
+    // pays for during the flagged window (the F1 leak).
+    function test_FlagClaimable_OwedKeepsAccruingAfterFlag() public {
         CreditMarket mkt = _marketAt(0.05e18);
 
         address bob = makeAddr("bob-freeze");
@@ -481,13 +491,14 @@ contract CreditMarketTest is Test {
         mkt.flagClaimable(bob);
 
         assertTrue(mkt.claimable(bob), "claimable flag is set");
-        uint256 frozen = mkt.frozenFunding(bob);
+        uint256 owedAtFlag = mkt.owed(bob);
 
-        // continue accruing — frozenFunding must not change
+        // continue accruing — owed() MUST keep rising (no freeze); the flagged
+        // window's carry is no longer silently uncollected.
         vm.warp(block.timestamp + 30 days);
         mkt.accrueFunding();
 
-        assertEq(mkt.frozenFunding(bob), frozen, "frozenFunding must not change after flagging");
+        assertGt(mkt.owed(bob), owedAtFlag, "owed() must keep accruing on a flagged position (no freeze)");
     }
 
     // flagClaimable must revert when the position is not yet seizable.
@@ -740,12 +751,13 @@ contract CreditMarketTest is Test {
 
     // ─── v1b1-2c: freeze-aware settleFunding, lockout, and cure ────────────────
 
-    // settleFunding must charge the FROZEN funding value, not live accrual since
-    // flagging — this is the bug the freeze-aware branch fixes. After settleYES,
-    // the flag must auto-clear (the frozen obligation was fully folded into the
-    // payout deduction, so leaving the flag set would let a later claim() seize
-    // the remaining YES — but there's no YES left here, it's fully burned).
-    function test_SettleYES_FreezeRespected_AutoCures() public {
+    // UPDATED (F1 fix): there is no accounting freeze while flagged — settleFunding
+    // always charges LIVE accrual, including the window between flag and settlement.
+    // After settleYES, the flag must still auto-clear (the live obligation was fully
+    // folded into the payout deduction, so leaving the flag set would let a later
+    // claim() seize the remaining YES — but there's no YES left here, it's fully
+    // burned).
+    function test_SettleYES_ChargesFullLiveAccrual_NoFreeze() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
 
@@ -768,24 +780,25 @@ contract CreditMarketTest is Test {
 
         mkt.flagClaimable(bob);
         assertTrue(mkt.claimable(bob), "flagged");
-        uint256 frozen = mkt.frozenFunding(bob);
+        uint256 owedAtFlag = mkt.owed(bob);
 
-        // 30 MORE days of live accrual pass while flagged — must NOT count against bob.
+        // 30 MORE days of live accrual pass while flagged — this MUST count against
+        // bob now (no freeze): the flagged window's carry is not a free option.
         vm.warp(block.timestamp + 30 days);
         mkt.accrueFunding();
-        assertEq(mkt.frozenFunding(bob), frozen, "frozen value unaffected by further accrual");
+        uint256 owedBeforeSettle = mkt.owed(bob);
+        assertGt(owedBeforeSettle, owedAtFlag, "owed() grew during the flagged window (no freeze)");
 
         vm.prank(oracle);
         mkt.confirmCreditEvent();
 
-        uint256 expectedOwed  = 100e18 * frozen / 1e18; // FROZEN debt only, not 356+30 days worth
         uint256 bobUsdcBefore = mockUsdc.balanceOf(bob);
 
         vm.prank(bob);
         mkt.settleYES(100e18);
 
-        assertEq(mockUsdc.balanceOf(bob), bobUsdcBefore + 100e18 - expectedOwed,
-            "payout deducts the FROZEN debt, not frozen + 30 days of live accrual");
+        assertEq(mockUsdc.balanceOf(bob), bobUsdcBefore + 100e18 - owedBeforeSettle,
+            "payout deducts the FULL live-accrued debt (356+30 days), not a frozen 356-day snapshot");
         assertFalse(mkt.claimable(bob), "claimable auto-cleared after settleYES");
     }
 
@@ -820,10 +833,12 @@ contract CreditMarketTest is Test {
         mkt.redeem(1e18);
     }
 
-    // Flagged holder voluntarily cures: pays exactly the frozen YES debit net of
-    // any NO credit, the flag clears, frozenFunding zeroes out, and accrual
-    // resumes fresh from the cure time (not from the original flag time).
-    function test_Cure_PaysNetDebtAndResumesAccrual() public {
+    // UPDATED (F1 fix): cure() pays the LIVE owed() at cure time (net of NO credit),
+    // not a frozen flag-time snapshot. This test flags, then lets 30 MORE days pass
+    // (still flagged, still accruing — no freeze) before curing, so the payment
+    // must include that post-flag window. Under the old freeze semantics bob would
+    // have paid only the 356-day frozen amount; here he must pay the full 386 days.
+    function test_Cure_PaysLiveOwedIncludingPostFlagAccrual() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
 
@@ -835,7 +850,7 @@ contract CreditMarketTest is Test {
         mkt.mint(100e18); // 100 YES + 100 NO
 
         // Strip down to an asymmetric 100 YES / 40 NO holding so cure's net
-        // (frozen YES debit minus NO credit) is a real, nonzero number.
+        // (live YES debit minus NO credit) is a real, nonzero number.
         address sink = makeAddr("no-sink-cure");
         noToken.grantRole(noToken.CLOB_ROLE(), bob);
         vm.prank(bob);
@@ -847,11 +862,19 @@ contract CreditMarketTest is Test {
         mkt.flagClaimable(bob);
         assertTrue(mkt.claimable(bob), "flagged");
 
-        uint256 frozen = mkt.frozenFunding(bob);
-        uint256 cumNo  = mkt.cumFundingPerNO(); // no time elapsed since flag -> == frozen
-        uint256 expectedYesOwed  = 100e18 * frozen / 1e18;
+        // 30 MORE days of live accrual while flagged — no freeze, so this MUST
+        // count toward the cure payment.
+        vm.warp(block.timestamp + 30 days);
+        mkt.accrueFunding();
+
+        uint256 cumNo  = mkt.cumFundingPerNO(); // == cumulativeFundingPerYES (mirrored index)
+        // fundingSnapshot(bob) was 0 at mint (no intermediate sync before the flag).
+        uint256 expectedYesOwed  = 100e18 * mkt.cumulativeFundingPerYES() / 1e18;
         uint256 expectedNoCredit = 40e18  * cumNo  / 1e18;
         uint256 expectedNet      = expectedYesOwed - expectedNoCredit;
+
+        assertEq(mkt.owed(bob), expectedYesOwed,
+            "owed() == full live accrual over 386 days (356 pre-flag + 30 flagged, no freeze)");
 
         uint256 bobUsdcBefore    = mockUsdc.balanceOf(bob);
         uint256 marketUsdcBefore = mockUsdc.balanceOf(address(mkt));
@@ -860,11 +883,10 @@ contract CreditMarketTest is Test {
         mkt.cure();
 
         assertEq(bobUsdcBefore - mockUsdc.balanceOf(bob), expectedNet,
-            "bob pays exactly fundingDebt + frozen x Q, net of NO credit");
+            "bob pays the FULL live owed (386 days), net of NO credit -- no freeze discount");
         assertEq(mockUsdc.balanceOf(address(mkt)), marketUsdcBefore + expectedNet,
             "USDC conservation: bob's payment lands in market collateral");
         assertFalse(mkt.claimable(bob), "flag cleared");
-        assertEq(mkt.frozenFunding(bob), 0, "frozenFunding zeroed");
         assertEq(mkt.fundingDebt(bob), 0, "fundingDebt cleared");
         assertEq(mkt.fundingSnapshot(bob), mkt.cumulativeFundingPerYES(), "snapshot reset to now");
 
@@ -884,5 +906,373 @@ contract CreditMarketTest is Test {
         vm.prank(alice);
         vm.expectRevert(CreditMarket.PositionNotFlagged.selector);
         market.cure();
+    }
+
+    // ─── F4 regression + owed()/display-layer coverage (2026-09-26 fix) ───────
+
+    // F4 (docs/security/invariant-findings-2026-09-26.md): a settleFunding
+    // touchpoint (any trade, or here a second mint) resets fundingSnapshot to now
+    // and folds the accrued debit into fundingDebt. Under the OLD isSeizable
+    // (cumulativeFundingPerYES - fundingSnapshot only), that reset made the
+    // position look perpetually healthy even as real, uncollected debt piled up.
+    // owed() folds fundingDebt back in, so the trigger still fires and
+    // flagClaimable still succeeds.
+    function test_F4_TradeResetsSnapshot_ButOwedStillTriggersSeizure() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+        mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+
+        address bob = makeAddr("bob-f4");
+        mockUsdc.mint(bob, 10_000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(1000e18); // 1000 YES + 1000 NO
+
+        // Strip to pure YES so the debit is a clean, unnetted number.
+        address sink = makeAddr("no-sink-f4");
+        noToken.grantRole(noToken.CLOB_ROLE(), bob);
+        vm.prank(bob);
+        noToken.transfer(sink, 1000e18);
+
+        // 300 days: not yet seizable at 5% mark (~354-day runway).
+        vm.warp(block.timestamp + 300 days);
+        mkt.accrueFunding();
+        assertFalse(mkt.isSeizable(bob), "not seizable yet at 300 days");
+
+        // A settleFunding touchpoint (any trade calls this on the trader; a second
+        // mint is the simplest reproduction available without wiring the CLOB)
+        // folds bob's accrued debit into fundingDebt and resets his YES snapshot.
+        vm.prank(bob);
+        mkt.mint(1e18);
+
+        assertGt(mkt.fundingDebt(bob), 0, "the mint's settleFunding folded the debit into fundingDebt");
+        assertEq(mkt.fundingSnapshot(bob), mkt.cumulativeFundingPerYES(),
+            "the mint's settleFunding reset bob's YES snapshot to now");
+
+        // 300 MORE days pass. The OLD (cum - snapshot)-only formula would see
+        // ~0 elapsed-since-reset accrual and never trigger again.
+        vm.warp(block.timestamp + 300 days);
+        mkt.accrueFunding();
+
+        assertTrue(mkt.isSeizable(bob),
+            "F4 fix: owed() includes fundingDebt, so the reset snapshot cannot hide the debt");
+
+        mkt.flagClaimable(bob); // must NOT revert PositionNotSeizable
+        assertTrue(mkt.claimable(bob), "flagClaimable succeeds once owed() crosses the trigger");
+    }
+
+    // owed() = fundingDebt[user] + live accrual on the current YES balance since
+    // the snapshot. Right after a settleFunding touchpoint resets the snapshot,
+    // owed() must equal fundingDebt exactly (zero fresh accrual yet); once more
+    // time passes, it must equal fundingDebt plus the newly accrued amount.
+    function test_Owed_EqualsFundingDebtPlusLiveAccrual() public {
+        vm.prank(alice);
+        market.mint(1000e18); // 1000 YES + 1000 NO
+
+        // Strip to pure YES so settleFunding always records a clean debit.
+        address sink = makeAddr("no-sink-owed");
+        noToken.grantRole(noToken.CLOB_ROLE(), alice);
+        vm.prank(alice);
+        noToken.transfer(sink, 1000e18);
+
+        vm.warp(block.timestamp + 30 days);
+
+        // settleFunding folds the 30-day debit into fundingDebt and resets the snapshot.
+        market.settleFunding(alice);
+        uint256 debt = market.fundingDebt(alice);
+        assertGt(debt, 0, "settleFunding recorded a ledger debit");
+        assertEq(market.owed(alice), debt,
+            "owed() == fundingDebt right after settlement (zero live accrual yet)");
+
+        vm.warp(block.timestamp + 10 days);
+        market.accrueFunding();
+
+        uint256 yesBal = yesToken.balanceOf(alice);
+        uint256 liveAccrual = yesBal * (market.cumulativeFundingPerYES() - market.fundingSnapshot(alice)) / 1e18;
+        assertEq(market.owed(alice), debt + liveAccrual,
+            "owed() == fundingDebt + live accrual on the current YES balance since the reset snapshot");
+    }
+
+    // equity()/epochsToExpire()/breakevenMark() must fold in ledger debt
+    // (fundingDebt), not just the live cum-snapshot delta -- otherwise a trade
+    // that resets the snapshot would make a thin position look artificially
+    // healthy on the display layer too (F4's root cause, applied to the UI views).
+    function test_EpochsToExpire_And_Equity_IncludeLedgerDebt() public {
+        CreditMarket mkt = _marketAt(0.05e18);
+
+        address bob = makeAddr("bob-ledger-display");
+        mockUsdc.mint(bob, 1_000e18);
+        vm.prank(bob);
+        mockUsdc.approve(address(mkt), type(uint256).max);
+        vm.prank(bob);
+        mkt.mint(100e18); // 100 YES + 100 NO
+
+        address sink = makeAddr("no-sink-ledger-display");
+        noToken.grantRole(noToken.CLOB_ROLE(), bob);
+        vm.prank(bob);
+        noToken.transfer(sink, 100e18); // bob: pure YES holder
+
+        // Accrue a large chunk of funding, then settle it into the ledger
+        // (simulating a trade): fundingSnapshot resets to "now" (cum - snapshot
+        // == 0) while fundingDebt carries the accrued amount forward.
+        vm.warp(block.timestamp + 300 days);
+        mkt.settleFunding(bob);
+
+        uint256 debt = mkt.fundingDebt(bob);
+        assertGt(debt, 0, "setup: bob carries a real ledger debit");
+        assertEq(mkt.cumulativeFundingPerYES() - mkt.fundingSnapshot(bob), 0,
+            "sanity: snapshot just reset -- the OLD cum-snapshot-only formula would see zero owed");
+
+        assertLt(mkt.equity(bob), mkt.currentMark(),
+            "equity must be reduced by the ledger debt, not equal to the full mark");
+        assertLt(mkt.epochsToExpire(bob), type(uint256).max,
+            "epochsToExpire must be finite -- the ledger debt already eats into runway");
+        assertEq(mkt.breakevenMark(bob), mkt.costBasis(bob) + debt * 1e18 / 100e18,
+            "breakevenMark == costBasis + owed()-per-unit (ledger debt included)");
+    }
+
+    // ─── a9476ea: constructor guard-rails (ZeroAddress, InvalidMark) ──────────
+
+    function test_Constructor_ZeroAddress_Reverts() public {
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(address(0), address(mockUsdc), address(yesToken), address(noToken), 0.23e18, 1 days);
+
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(admin, address(0), address(yesToken), address(noToken), 0.23e18, 1 days);
+
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(admin, address(mockUsdc), address(0), address(noToken), 0.23e18, 1 days);
+
+        vm.expectRevert(CreditMarket.ZeroAddress.selector);
+        new CreditMarket(admin, address(mockUsdc), address(yesToken), address(0), 0.23e18, 1 days);
+    }
+
+    function test_Constructor_InvalidMark_Reverts() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        new CreditMarket(admin, address(mockUsdc), address(yesToken), address(noToken), 0, 1 days);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        new CreditMarket(admin, address(mockUsdc), address(yesToken), address(noToken), 1e18, 1 days);
+    }
+
+    // ─── a9476ea: depositCap ────────────────────────────────────────────────
+
+    function test_DepositCap_DefaultUncapped() public {
+        assertEq(market.depositCap(), type(uint256).max, "depositCap starts uncapped");
+    }
+
+    function test_DepositCap_AdminCanSetRaiseLower_EmitsEvent() public {
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.DepositCapUpdated(5_000e18);
+        market.setDepositCap(5_000e18);
+        assertEq(market.depositCap(), 5_000e18, "cap set");
+
+        market.setDepositCap(9_000e18); // raise
+        assertEq(market.depositCap(), 9_000e18, "cap raised");
+
+        market.setDepositCap(500e18); // lower
+        assertEq(market.depositCap(), 500e18, "cap lowered");
+    }
+
+    function test_DepositCap_NonAdmin_Reverts() public {
+        bytes32 adminRole = market.DEFAULT_ADMIN_ROLE(); // cache before prank -- external call
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        market.setDepositCap(1_000e18);
+    }
+
+    function test_Mint_ExactlyAtCap_Succeeds_OneWeiOver_Reverts() public {
+        market.setDepositCap(1_000e18);
+
+        vm.prank(alice);
+        market.mint(1_000e18); // exactly at cap
+        assertEq(yesToken.totalSupply(), 1_000e18, "minted exactly to the cap");
+
+        address bob = makeAddr("bob-cap-over");
+        mockUsdc.mint(bob, 10);
+        vm.prank(bob);
+        mockUsdc.approve(address(market), type(uint256).max);
+
+        vm.prank(bob);
+        vm.expectRevert(CreditMarket.DepositCapExceeded.selector);
+        market.mint(1); // 1 wei over the cap
+    }
+
+    function test_DepositCap_LoweringBelowSupply_BlocksMint_ButRedeemStillWorks() public {
+        vm.prank(alice);
+        market.mint(1_000e18); // supply now 1000e18
+
+        market.setDepositCap(500e18); // below current supply -- only blocks NEW mints
+
+        vm.prank(alice);
+        vm.expectRevert(CreditMarket.DepositCapExceeded.selector);
+        market.mint(1e18);
+
+        vm.prank(alice);
+        market.redeem(200e18); // must still work despite supply sitting above the cap
+        assertEq(yesToken.totalSupply(), 800e18, "redeem unaffected by a cap set below current supply");
+    }
+
+    // ─── a9476ea: bounded setMark / adminSetMark / setMarkBounds ──────────────
+
+    function test_SetMark_KeeperWithinBound_Succeeds_AccruesAtOldMarkFirst() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 2 hours); // clear the constructor-set interval
+
+        uint256 oldMark = market.currentMark(); // 0.23e18
+        uint256 newMark = oldMark + 0.03e18;     // within the 0.05e18 step bound
+        uint256 expectedCum = oldMark * 2 hours / 365 days; // accrual at the OLD mark, over the 2h just warped
+
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.MarkUpdated(oldMark, newMark, false);
+        market.setMark(newMark);
+
+        assertEq(market.cumulativeFundingPerYES(), expectedCum,
+            "funding accrued at the OLD mark before the mark changed");
+        assertEq(market.currentMark(), newMark, "mark updated");
+        assertEq(market.lastMarkUpdate(), block.timestamp, "lastMarkUpdate advanced");
+    }
+
+    function test_SetMark_StepTooLarge_Reverts() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 2 hours);
+
+        uint256 newMark = market.currentMark() + 0.06e18; // exceeds the 0.05e18 step bound
+        vm.expectRevert(CreditMarket.MarkStepTooLarge.selector);
+        market.setMark(newMark);
+    }
+
+    function test_SetMark_TooSoon_Reverts_ThenSucceedsAfterInterval() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 2 hours);
+
+        uint256 mark1 = market.currentMark() + 0.02e18;
+        market.setMark(mark1); // succeeds; lastMarkUpdate reset to now
+
+        uint256 mark2 = mark1 + 0.01e18;
+        vm.expectRevert(CreditMarket.MarkUpdateTooSoon.selector);
+        market.setMark(mark2); // same block -- immediately too soon
+
+        vm.warp(block.timestamp + 30 minutes); // still short of the 1h interval
+        vm.expectRevert(CreditMarket.MarkUpdateTooSoon.selector);
+        market.setMark(mark2);
+
+        vm.warp(block.timestamp + 31 minutes); // now 61 min since mark1 -- interval cleared
+        market.setMark(mark2);
+        assertEq(market.currentMark(), mark2, "second update succeeds once minMarkInterval has elapsed");
+    }
+
+    // 23% -> 43% at a 5%/1h bound is a 20-point move over a 5-point step: exactly
+    // 4 updates, needing at least 3 intervening 1h intervals (>= 3h total elapsed
+    // from the first update to the last).
+    function test_SetMark_WalkingFarRequiresMultipleIntervals() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.05e18, 1 hours);
+        vm.warp(block.timestamp + 1 hours); // clear the constructor-set interval
+
+        assertEq(market.currentMark(), 0.23e18, "sanity: starting mark");
+        uint256 startTime = block.timestamp;
+
+        market.setMark(0.28e18);
+        vm.warp(block.timestamp + 1 hours);
+        market.setMark(0.33e18);
+        vm.warp(block.timestamp + 1 hours);
+        market.setMark(0.38e18);
+        vm.warp(block.timestamp + 1 hours);
+        market.setMark(0.43e18);
+
+        assertEq(market.currentMark(), 0.43e18, "reached the 43% target after 4 bounded 5%-steps");
+        assertGe(block.timestamp - startTime, 3 hours,
+            "walking 20 points at a 5%/1h bound takes at least 3 intervals (>=3h)");
+    }
+
+    function test_SetMark_ZeroOrOneE18_Reverts() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMark(0);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMark(1e18);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMark(2e18);
+    }
+
+    // Both guard-rails default OFF (maxMarkStep = 1e18, minMarkInterval = 0), so
+    // a big jump works immediately, with no warp needed between calls.
+    function test_SetMark_BoundsOffByDefault_BigJumpWorks() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.setMark(0.05e18); // big jump down from 0.23e18
+        assertEq(market.currentMark(), 0.05e18);
+
+        market.setMark(0.95e18); // big jump up, immediately again -- no interval wait
+        assertEq(market.currentMark(), 0.95e18);
+    }
+
+    function test_AdminSetMark_BypassesStepAndInterval_ResetsIntervalClock() public {
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMarkBounds(0.01e18, 1 hours); // tight bound
+
+        uint256 oldMark = market.currentMark(); // 0.23e18
+        uint256 newMark = 0.90e18;              // far beyond the 0.01e18 step bound
+
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.MarkUpdated(oldMark, newMark, true);
+        market.adminSetMark(newMark);
+
+        assertEq(market.currentMark(), newMark, "admin override bypasses the step bound");
+        assertEq(market.lastMarkUpdate(), block.timestamp, "adminSetMark also resets the interval clock");
+
+        // Proof the clock was actually reset (not left at its pre-override value):
+        // the KEEPER path is immediately blocked by the still-configured interval,
+        // measured from THIS update, not some earlier one.
+        vm.expectRevert(CreditMarket.MarkUpdateTooSoon.selector);
+        market.setMark(newMark + 0.005e18);
+    }
+
+    function test_AdminSetMark_Validity_NotBypassed() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.adminSetMark(0);
+
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.adminSetMark(1e18);
+    }
+
+    function test_AdminSetMark_NonAdmin_Reverts() public {
+        bytes32 adminRole = market.DEFAULT_ADMIN_ROLE(); // cache before prank -- external call
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        market.adminSetMark(0.5e18);
+    }
+
+    function test_SetMarkBounds_NonAdmin_Reverts() public {
+        bytes32 adminRole = market.DEFAULT_ADMIN_ROLE(); // cache before prank -- external call
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, adminRole)
+        );
+        market.setMarkBounds(0.05e18, 1 hours);
+    }
+
+    function test_SetMarkBounds_ZeroStep_Reverts() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.setMarkBounds(0, 1 hours);
+    }
+
+    function test_SetMarkBounds_EmitsEvent() public {
+        vm.expectEmit(true, true, true, true, address(market));
+        emit CreditMarket.MarkBoundsUpdated(0.05e18, 1 hours);
+        market.setMarkBounds(0.05e18, 1 hours);
+        assertEq(market.maxMarkStep(), 0.05e18);
+        assertEq(market.minMarkInterval(), 1 hours);
     }
 }

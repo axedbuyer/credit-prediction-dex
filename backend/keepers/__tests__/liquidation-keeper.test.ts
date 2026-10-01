@@ -78,9 +78,8 @@ function makeHolderSource(opts: {
 // `overrides` let individual tests override specific return values.
 function makeReadContract(overrides: {
   claimable?: boolean
-  frozenFundingPerUnit?: bigint  // per-unit, 1e18-scaled (maps to frozenFunding)
-  fundingDebt?: bigint           // total accumulated debt (maps to fundingDebt)
-  yesBalance?: bigint            // maps to balanceOf on YES token
+  owed?: bigint          // owed(user) — ledger debt + live YES accrual, 6-decimal total
+  yesBalance?: bigint    // maps to balanceOf on YES token
   currentMark?: bigint
   motionPending?: boolean
 } = {}): IPublicClient['readContract'] {
@@ -89,8 +88,7 @@ function makeReadContract(overrides: {
       case 'currentMark':  return Promise.resolve(overrides.currentMark  ?? DEFAULT_MARK)
       case 'motionPending':return Promise.resolve(overrides.motionPending ?? false)
       case 'claimable':    return Promise.resolve(overrides.claimable     ?? false)
-      case 'frozenFunding':return Promise.resolve(overrides.frozenFundingPerUnit ?? 0n)
-      case 'fundingDebt':  return Promise.resolve(overrides.fundingDebt   ?? 0n)
+      case 'owed':         return Promise.resolve(overrides.owed          ?? 0n)
       case 'balanceOf':    return Promise.resolve(overrides.yesBalance    ?? DEFAULT_Q)
       default:             return Promise.resolve(0n)
     }
@@ -105,78 +103,54 @@ function makePublicClient(
 
 // ─── computePosition — pure formula ───────────────────────────────────────────
 
-describe('computePosition — normal case (fFrozenTotal ≤ tokenValue)', () => {
-  it('sets claimPrice = fFrozenTotal and tailCase = false', () => {
-    // frozenFundingPerUnit = 0.04 (1e18), Q = 1_000_000, prevDebt = 0
-    // fFrozenTotal = 0 + 40_000_000_000_000_000 * 1_000_000 / 1e18 = 40_000
-    // tokenValue   = 1_000_000 * 50_000_000_000_000_000 / 1e18 = 50_000
+describe('computePosition — normal case (owed ≤ tokenValue)', () => {
+  it('sets claimPrice = owed and tailCase = false', () => {
+    // tokenValue = 1_000_000 * 50_000_000_000_000_000 / 1e18 = 50_000
     const pos = computePosition(
       HOLDER_A,
-      DEFAULT_Q,                       // Q
-      DEFAULT_MARK,                    // currentMark = 0.05e18
-      40_000_000_000_000_000n,         // frozenFundingPerUnit = 0.04e18
-      0n,                              // prevDebt
+      DEFAULT_Q,       // Q
+      DEFAULT_MARK,    // currentMark = 0.05e18
+      40_000n,         // owed
       false,
     )
     expect(pos.claimPrice).toBe('40000')
-    expect(pos.frozenFunding).toBe('40000')
+    expect(pos.owed).toBe('40000')
     expect(pos.tokenValue).toBe('50000')
     expect(pos.tailCase).toBe(false)
     expect(pos.frozen).toBe(false)
     expect(pos.frozenReason).toBeUndefined()
   })
 
-  it('includes prevDebt in fFrozenTotal', () => {
-    // frozenFundingPerUnit = 0.03e18, Q = 1_000_000, prevDebt = 15_000
-    // perUnitPart = 30_000_000_000_000_000 * 1_000_000 / 1e18 = 30_000
-    // fFrozenTotal = 15_000 + 30_000 = 45_000 < 50_000
+  it('reflects owed exactly, including any ledger debt folded in by the contract', () => {
+    // owed() already folds fundingDebt + live accrual server-side — the keeper
+    // just relays the single total.
     const pos = computePosition(
       HOLDER_A,
       DEFAULT_Q,
       DEFAULT_MARK,
-      30_000_000_000_000_000n,
-      15_000n,
+      45_000n,
       false,
     )
-    expect(pos.frozenFunding).toBe('45000')
+    expect(pos.owed).toBe('45000')
     expect(pos.claimPrice).toBe('45000')
     expect(pos.tailCase).toBe(false)
   })
 })
 
-describe('computePosition — tail case (fFrozenTotal > tokenValue)', () => {
+describe('computePosition — tail case (owed > tokenValue)', () => {
   it('sets claimPrice = tokenValue and tailCase = true', () => {
-    // frozenFundingPerUnit = 0.06e18 > mark 0.05e18 (keeper downtime / mark gap)
-    // fFrozenTotal = 60_000_000_000_000_000 * 1_000_000 / 1e18 = 60_000
-    // tokenValue   = 50_000
+    // owed = 60_000 > tokenValue 50_000 (keeper downtime / mark gap / long stall)
     const pos = computePosition(
       HOLDER_A,
       DEFAULT_Q,
       DEFAULT_MARK,
-      60_000_000_000_000_000n,
-      0n,
+      60_000n,
       false,
     )
     expect(pos.claimPrice).toBe('50000')
-    expect(pos.frozenFunding).toBe('60000')
+    expect(pos.owed).toBe('60000')
     expect(pos.tokenValue).toBe('50000')
     expect(pos.tailCase).toBe(true)
-  })
-
-  it('tail case triggered by prevDebt pushing fFrozenTotal above tokenValue', () => {
-    // frozenFundingPerUnit = 0.04e18, but prevDebt = 20_000 pushes total to 60_000
-    // fFrozenTotal = 20_000 + 40_000 = 60_000 > 50_000
-    const pos = computePosition(
-      HOLDER_A,
-      DEFAULT_Q,
-      DEFAULT_MARK,
-      40_000_000_000_000_000n,
-      20_000n,
-      false,
-    )
-    expect(pos.tailCase).toBe(true)
-    expect(pos.claimPrice).toBe('50000')   // capped at tokenValue
-    expect(pos.frozenFunding).toBe('60000')
   })
 })
 
@@ -186,8 +160,7 @@ describe('computePosition — motionPending freeze', () => {
       HOLDER_A,
       DEFAULT_Q,
       DEFAULT_MARK,
-      40_000_000_000_000_000n,
-      0n,
+      40_000n,
       true,
     )
     expect(pos.frozen).toBe(true)
@@ -198,7 +171,7 @@ describe('computePosition — motionPending freeze', () => {
   })
 
   it('frozen=false and no frozenReason when motionPending=false', () => {
-    const pos = computePosition(HOLDER_A, DEFAULT_Q, DEFAULT_MARK, 0n, 0n, false)
+    const pos = computePosition(HOLDER_A, DEFAULT_Q, DEFAULT_MARK, 0n, false)
     expect(pos.frozen).toBe(false)
     expect(pos.frozenReason).toBeUndefined()
   })
@@ -210,8 +183,7 @@ describe('LiquidationKeeper — poll normal case', () => {
   it('includes claimable position with correct claimPrice', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 40_000_000_000_000_000n,
-      fundingDebt:          0n,
+      owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
     }))
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
@@ -246,11 +218,10 @@ describe('LiquidationKeeper — poll normal case', () => {
 })
 
 describe('LiquidationKeeper — poll tail case', () => {
-  it('sets tailCase=true when fFrozenTotal > tokenValue', async () => {
+  it('sets tailCase=true when owed > tokenValue', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 60_000_000_000_000_000n,  // above mark
-      fundingDebt:          0n,
+      owed:                 60_000n,  // above mark
       yesBalance:           DEFAULT_Q,
     }))
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
@@ -268,8 +239,7 @@ describe('LiquidationKeeper — motionPending', () => {
   it('lists claimable positions with frozen=true when motionPending', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 40_000_000_000_000_000n,
-      fundingDebt:          0n,
+      owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
       motionPending:        true,
     }))
@@ -309,8 +279,7 @@ describe('LiquidationKeeper — multiple holders', () => {
       if (functionName === 'claimable') {
         return Promise.resolve(args?.[0] === HOLDER_A)
       }
-      if (functionName === 'frozenFunding') return Promise.resolve(40_000_000_000_000_000n)
-      if (functionName === 'fundingDebt')   return Promise.resolve(0n)
+      if (functionName === 'owed')         return Promise.resolve(40_000n)
       if (functionName === 'balanceOf')     return Promise.resolve(DEFAULT_Q)
       return Promise.resolve(0n)
     }
@@ -360,8 +329,7 @@ describe('LiquidationKeeper — holder source', () => {
       if (functionName === 'currentMark')   return Promise.resolve(DEFAULT_MARK)
       if (functionName === 'motionPending') return Promise.resolve(false)
       if (functionName === 'claimable')     return Promise.resolve(true)  // both holders claimable
-      if (functionName === 'frozenFunding') return Promise.resolve(40_000_000_000_000_000n)
-      if (functionName === 'fundingDebt')   return Promise.resolve(0n)
+      if (functionName === 'owed')         return Promise.resolve(40_000n)
       if (functionName === 'balanceOf')     return Promise.resolve(DEFAULT_Q)
       return Promise.resolve(0n)
     }
@@ -404,8 +372,7 @@ describe('LiquidationKeeper — error resilience', () => {
         if (args?.[0] === HOLDER_A) return Promise.reject(new Error('node error'))
         return Promise.resolve(true)
       }
-      if (functionName === 'frozenFunding') return Promise.resolve(40_000_000_000_000_000n)
-      if (functionName === 'fundingDebt')   return Promise.resolve(0n)
+      if (functionName === 'owed')         return Promise.resolve(40_000n)
       if (functionName === 'balanceOf')     return Promise.resolve(DEFAULT_Q)
       return Promise.resolve(0n)
     }
@@ -683,8 +650,7 @@ describe('GET /claimable', () => {
   it('returns the correct position for a normal-case claimable holder', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 40_000_000_000_000_000n,
-      fundingDebt:          0n,
+      owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
     }))
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
@@ -708,8 +674,7 @@ describe('GET /claimable', () => {
   it('reflects motionPending freeze state in /claimable response', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 40_000_000_000_000_000n,
-      fundingDebt:          0n,
+      owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
       motionPending:        true,
     }))
@@ -732,8 +697,7 @@ describe('GET /claimable', () => {
   it('returns a tail-case position with tailCase=true', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 60_000_000_000_000_000n,
-      fundingDebt:          0n,
+      owed:                 60_000n,
       yesBalance:           DEFAULT_Q,
     }))
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
@@ -754,8 +718,7 @@ describe('GET /claimable', () => {
   it('response shape is unchanged by the holder-index wiring (frontend contract)', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
-      frozenFundingPerUnit: 40_000_000_000_000_000n,
-      fundingDebt:          0n,
+      owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
     }))
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
@@ -768,7 +731,7 @@ describe('GET /claimable', () => {
       const body = await res.json() as Array<Record<string, unknown>>
       expect(body).toHaveLength(1)
       expect(Object.keys(body[0]).sort()).toEqual(
-        ['claimPrice', 'frozen', 'frozenFunding', 'notional', 'tailCase', 'tokenValue', 'user'].sort(),
+        ['claimPrice', 'frozen', 'owed', 'notional', 'tailCase', 'tokenValue', 'user'].sort(),
       )
     } finally {
       await new Promise<void>(r => server.close(() => r()))

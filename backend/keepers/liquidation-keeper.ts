@@ -23,14 +23,7 @@ export const CREDIT_MARKET_ABI = [
     outputs: [{ name: '', type: 'bool' }],
   },
   {
-    name: 'frozenFunding',
-    type: 'function' as const,
-    stateMutability: 'view' as const,
-    inputs: [{ name: 'user', type: 'address' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    name: 'fundingDebt',
+    name: 'owed',
     type: 'function' as const,
     stateMutability: 'view' as const,
     inputs: [{ name: 'user', type: 'address' }],
@@ -66,10 +59,12 @@ export const ERC20_ABI = [
 
 export interface ClaimablePosition {
   user: string
-  notional: string       // YES balance (bigint as string)
-  frozenFunding: string  // fFrozenTotal = prevDebt + frozenFundingPerUnit * Q / WAD
-  tokenValue: string     // Q * currentMark / WAD
-  claimPrice: string     // min(fFrozenTotal, tokenValue)
+  notional: string  // YES balance (bigint as string)
+  owed: string      // owed(user) — ledger debt + live YES accrual projected to now;
+                     // NOT frozen — this changes every poll while the position waits
+                     // to be claimed (see CreditMarket.owed / LiquidationEngine.claim)
+  tokenValue: string // Q * currentMark / WAD
+  claimPrice: string  // min(owed, tokenValue) — priced fresh each poll, not fixed at flag time
   tailCase: boolean
   frozen: boolean        // true while motionPending — claim() will revert
   frozenReason?: string  // only set when frozen === true
@@ -100,28 +95,28 @@ export interface KeeperConfig {
 
 // ─── computePosition ─────────────────────────────────────────────────────────
 // Pure formula — mirrors LiquidationEngine.sol claim() math exactly.
+// `owed` is read straight from CreditMarket.owed(user) — no freeze, so this is
+// priced at whatever block the caller read it in (the poll interval, here).
 
 export function computePosition(
   user: string,
   Q: bigint,
   currentMark: bigint,
-  frozenFundingPerUnit: bigint,
-  prevDebt: bigint,
+  owed: bigint,
   motionPending: boolean,
 ): ClaimablePosition {
-  const fFrozenTotal = prevDebt + (frozenFundingPerUnit * Q) / WAD
-  const tokenValue   = (Q * currentMark) / WAD
-  const tailCase     = fFrozenTotal > tokenValue
-  const claimPrice   = tailCase ? tokenValue : fFrozenTotal
+  const tokenValue = (Q * currentMark) / WAD
+  const tailCase   = owed > tokenValue
+  const claimPrice = tailCase ? tokenValue : owed
 
   const position: ClaimablePosition = {
     user,
-    notional:      Q.toString(),
-    frozenFunding: fFrozenTotal.toString(),
-    tokenValue:    tokenValue.toString(),
-    claimPrice:    claimPrice.toString(),
+    notional:   Q.toString(),
+    owed:       owed.toString(),
+    tokenValue: tokenValue.toString(),
+    claimPrice: claimPrice.toString(),
     tailCase,
-    frozen:        motionPending,
+    frozen:     motionPending,
   }
   if (motionPending) position.frozenReason = 'credit event under review'
   return position
@@ -222,17 +217,11 @@ export class LiquidationKeeper {
 
         if (!isClaimable) continue
 
-        const [frozenFundingPerUnit, prevDebt, Q] = await Promise.all([
+        const [owed, Q] = await Promise.all([
           this.publicClient.readContract({
             address:      this.config.creditMarketAddress,
             abi:          CREDIT_MARKET_ABI,
-            functionName: 'frozenFunding',
-            args:         [holder],
-          }) as Promise<bigint>,
-          this.publicClient.readContract({
-            address:      this.config.creditMarketAddress,
-            abi:          CREDIT_MARKET_ABI,
-            functionName: 'fundingDebt',
+            functionName: 'owed',
             args:         [holder],
           }) as Promise<bigint>,
           this.publicClient.readContract({
@@ -247,8 +236,7 @@ export class LiquidationKeeper {
           holder,
           Q,
           currentMark,
-          frozenFundingPerUnit,
-          prevDebt,
+          owed,
           motionPending,
         )
 
