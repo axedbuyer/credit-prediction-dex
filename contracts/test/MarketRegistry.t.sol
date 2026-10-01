@@ -105,7 +105,7 @@ contract MarketRegistryTest is Test {
 
     function test_Register_TwoMarkets_IdsAndLookups() public {
         assertEq(_registerA(), 0);
-        assertEq(registry.register("try", "Republic of Turkey", MarketRegistry.EntityType.Sovereign, _c(b), 1), 1);
+        assertEq(registry.register("try", "Turkey", MarketRegistry.EntityType.Sovereign, _c(b), 1), 1);
         assertEq(registry.marketCount(), 2);
 
         assertEq(registry.marketIdBySlug("crwv"), 0);

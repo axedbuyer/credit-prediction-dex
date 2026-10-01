@@ -34,7 +34,7 @@ LEGACY_DEPLOYMENT=$OUT/legacy.json DEPLOYMENTS_DIR=$OUT/net \
 
 # 4. add markets (INITIAL_MARK is a 1e18-scaled integer: 0.10e18 = 100000000000000000)
 for M in "crwv|CoreWeave|corporate|CRWV|100000000000000000" \
-         "try|Republic of Turkey|sovereign|TRY|20000000000000000"; do
+         "try|Turkey|sovereign|TRY|20000000000000000"; do
   IFS='|' read SLUG NAME TYPE TICKER MARK <<< "$M"
   export MARKET_SLUG=$SLUG ENTITY_NAME="$NAME" ENTITY_TYPE=$TYPE TOKEN_TICKER=$TICKER \
          INITIAL_MARK=$MARK DEPLOYMENTS_DIR=$OUT/net

@@ -222,6 +222,18 @@ abstract contract MarketScriptBase is Script {
         require(market.epochLength() == _epochLength, "assert: epochLength");
         if (checkMark) require(market.currentMark() == _initialMark, "assert: currentMark");
 
+        // Token naming — new markets only (MSTR's batch-1 tokens keep "YES"/"NO").
+        if (checkMark) {
+            require(
+                keccak256(bytes(yesToken.symbol())) == keccak256(bytes(string.concat("YES-", _ticker))),
+                "assert: YES symbol"
+            );
+            require(
+                keccak256(bytes(noToken.symbol())) == keccak256(bytes(string.concat("NO-", _ticker))),
+                "assert: NO symbol"
+            );
+        }
+
         // Registry entry correctness
         require(registry.usdc() == _usdc, "assert: registry usdc");
         require(registry.insuranceFund() == _insuranceFund, "assert: registry insuranceFund");
