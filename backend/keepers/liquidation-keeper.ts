@@ -4,9 +4,11 @@ import fs from 'fs'
 import { createPublicClient, defineChain, http as viemHttp } from 'viem'
 import { baseSepolia } from 'viem/chains'
 import type { Address } from 'viem'
-import { createHolderIndex } from './holder-index'
+import { createMarketHolderIndex, HolderIndexManager, aggregateHolderStatus } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
 import { installShutdownHandlers, closeHttpServer } from './shutdown'
+import { buildDirectory } from './markets'
+import type { IRegistryClient, MarketInfo, MarketDirectoryStatus } from './registry'
 
 // ─── WAD constant (1e18, for fixed-point arithmetic) ──────────────────────────
 
@@ -68,6 +70,13 @@ export interface ClaimablePosition {
   tailCase: boolean
   frozen: boolean        // true while motionPending — claim() will revert
   frozenReason?: string  // only set when frozen === true
+}
+
+/** A claimable position tagged with the market it lives in (what GET /claimable serves). */
+export interface MarketClaimablePosition extends ClaimablePosition {
+  market: string             // registry slug (`mstr` in legacy mode)
+  creditMarket: string
+  liquidationEngine: string  // claim() goes to THIS engine
 }
 
 export interface IPublicClient {
@@ -270,6 +279,152 @@ export class LiquidationKeeper {
   }
 }
 
+// ─── LiquidationKeeperService — all markets ──────────────────────────────────
+//
+// One LiquidationKeeper (per-market poller above) per market in the directory.
+// Unlike the funding-keeper this covers INACTIVE markets too: claiming a flagged
+// position is always desirable (stalls cost the InsuranceFund), and a market flipped
+// inactive can still hold flagged positions. Markets poll independently — one
+// market's RPC failure leaves the others' positions fresh.
+
+export interface IMarketDirectory {
+  list(opts?: { activeOnly?: boolean }): MarketInfo[]
+  bySlug(slug: string): MarketInfo | undefined
+  status(): MarketDirectoryStatus
+  mode: 'registry' | 'legacy'
+}
+
+export interface IMarketPoller {
+  poll(): Promise<void>
+  getPositions(): ClaimablePosition[]
+  getLastPolledAt(): Date | null
+  getHolderIndexStatus(): HolderIndexStatus
+}
+
+export interface LiquidationMarketHealth {
+  /** Lets external monitors (uptime.yml) check each market's CreditMarket on-chain without the registry. */
+  creditMarket: string
+  active: boolean
+  lastPolledAt: string | null
+  claimable: number
+  holderIndex: HolderIndexStatus
+}
+
+export class LiquidationKeeperService {
+  private pollers = new Map<string, IMarketPoller>()
+  private intervalHandle: ReturnType<typeof setInterval> | null = null
+  private stopped = false
+  private inFlightPoll: Promise<void> | null = null
+
+  constructor(
+    private readonly directory: IMarketDirectory,
+    private readonly makePoller: (market: MarketInfo) => IMarketPoller,
+    private readonly pollIntervalMs: number = 30_000,
+  ) {}
+
+  start(): void {
+    console.log(`[liq-keeper] polling every ${this.pollIntervalMs / 1000}s`)
+    this.trackPoll(this.poll().catch(err => console.error('[liq-keeper] initial poll error:', err)))
+    this.intervalHandle = setInterval(() => {
+      if (this.stopped) return
+      this.trackPoll(this.poll().catch(err => console.error('[liq-keeper] poll error:', err)))
+    }, this.pollIntervalMs)
+  }
+
+  private trackPoll(p: Promise<void>): void {
+    this.inFlightPoll = p
+    void p.finally(() => {
+      if (this.inFlightPoll === p) this.inFlightPoll = null
+    })
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+    if (this.intervalHandle !== null) {
+      clearInterval(this.intervalHandle)
+      this.intervalHandle = null
+    }
+    if (this.inFlightPoll) await this.inFlightPoll
+  }
+
+  /** Poll every market concurrently; a market's failure is contained to that market. */
+  async poll(): Promise<void> {
+    const markets = this.directory.list()
+    for (const m of markets) {
+      if (!this.pollers.has(m.slug)) this.pollers.set(m.slug, this.makePoller(m))
+    }
+    await Promise.all(markets.map(async m => {
+      try {
+        await this.pollers.get(m.slug)!.poll()
+      } catch (err) {
+        console.error(`[liq-keeper:${m.slug}] poll failed:`, err)
+      }
+    }))
+  }
+
+  hasMarket(slug: string): boolean {
+    return this.directory.bySlug(slug) !== undefined
+  }
+
+  /** All markets' positions (each tagged), or just one market's. */
+  getPositions(slug?: string): MarketClaimablePosition[] {
+    const out: MarketClaimablePosition[] = []
+    for (const m of this.directory.list()) {
+      if (slug !== undefined && m.slug !== slug) continue
+      for (const p of this.pollers.get(m.slug)?.getPositions() ?? []) {
+        out.push({
+          ...p,
+          market:            m.slug,
+          creditMarket:      m.creditMarket,
+          liquidationEngine: m.liquidationEngine,
+        })
+      }
+    }
+    return out
+  }
+
+  /** Oldest per-market poll — null if any market has not completed a poll yet. */
+  getLastPolledAt(): Date | null {
+    const markets = this.directory.list()
+    if (markets.length === 0) return null
+    let oldest: Date | null = null
+    for (const m of markets) {
+      const t = this.pollers.get(m.slug)?.getLastPolledAt() ?? null
+      if (t === null) return null
+      if (oldest === null || t < oldest) oldest = t
+    }
+    return oldest
+  }
+
+  private statusBySlug(): Record<string, HolderIndexStatus> {
+    const by: Record<string, HolderIndexStatus> = {}
+    for (const m of this.directory.list()) {
+      const p = this.pollers.get(m.slug)
+      if (p) by[m.slug] = p.getHolderIndexStatus()
+    }
+    return by
+  }
+
+  getHolderIndexStatus(): HolderIndexStatus {
+    return aggregateHolderStatus(this.statusBySlug(), { prefixErrors: this.directory.mode === 'registry' })
+  }
+
+  getHealthExtras(): { registry: MarketDirectoryStatus; markets: Record<string, LiquidationMarketHealth> } {
+    const markets: Record<string, LiquidationMarketHealth> = {}
+    for (const m of this.directory.list()) {
+      const p = this.pollers.get(m.slug)
+      markets[m.slug] = {
+        creditMarket: m.creditMarket,
+        active:       m.active,
+        lastPolledAt: p?.getLastPolledAt()?.toISOString() ?? null,
+        claimable:    p?.getPositions().length ?? 0,
+        holderIndex:  p?.getHolderIndexStatus() ?? { holders: 0, syncedToBlock: null, backfillComplete: false, lastSyncAt: null, lastError: null },
+      }
+    }
+    return { registry: this.directory.status(), markets }
+  }
+}
+
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 //
 // CORS — same rationale as order-book-server: this is a read-only API with no
@@ -285,7 +440,18 @@ export class LiquidationKeeper {
 // echoed back (with Vary: Origin) and a non-matching/missing Origin gets no
 // ACAO header at all.
 
-export function startServer(keeper: LiquidationKeeper, port: number, corsOrigins?: string[]): http.Server {
+/** What the HTTP server needs — LiquidationKeeper (single market) and LiquidationKeeperService both satisfy it. */
+export interface IKeeperApi {
+  getPositions(slug?: string): ClaimablePosition[]
+  getLastPolledAt(): Date | null
+  getHolderIndexStatus(): HolderIndexStatus
+  /** Multi-market: false => GET /claimable?market=<slug> answers 404 UnknownMarket. */
+  hasMarket?(slug: string): boolean
+  /** Multi-market additions (`registry`, `markets`) merged into /health. */
+  getHealthExtras?(): object
+}
+
+export function startServer(keeper: IKeeperApi, port: number, corsOrigins?: string[]): http.Server {
   const server = http.createServer((req, res) => {
     if (!corsOrigins || corsOrigins.length === 0) {
       res.setHeader('Access-Control-Allow-Origin', '*')
@@ -302,15 +468,25 @@ export function startServer(keeper: LiquidationKeeper, port: number, corsOrigins
       res.end()
       return
     }
-    if (req.method === 'GET' && req.url === '/claimable') {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    if (req.method === 'GET' && url.pathname === '/claimable') {
+      // GET /claimable[?market=<slug>] — every entry carries market/creditMarket/
+      // liquidationEngine; an unknown slug is a 404 {error:'UnknownMarket'}.
+      const slug = url.searchParams.get('market')
+      if (slug !== null && keeper.hasMarket && !keeper.hasMarket(slug)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'UnknownMarket' }))
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(keeper.getPositions()))
-    } else if (req.method === 'GET' && req.url === '/health') {
+      res.end(JSON.stringify(slug !== null ? keeper.getPositions(slug) : keeper.getPositions()))
+    } else if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
         status:       'ok',
         lastPolledAt: keeper.getLastPolledAt()?.toISOString() ?? null,
         holderIndex:  keeper.getHolderIndexStatus(),
+        ...(keeper.getHealthExtras?.() ?? {}),
       }))
     } else {
       res.writeHead(404)
@@ -388,11 +564,13 @@ export function parseCorsOrigins(raw: string | undefined): string[] | undefined 
 
 // ─── Production entry point ───────────────────────────────────────────────────
 
-function main(): void {
+async function main(): Promise<void> {
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
-  const { creditMarketAddress, yesTokenAddress } = resolveAddresses()
+  // Legacy mode (no MARKET_REGISTRY_ADDRESS) keeps today's requirement: the single
+  // market's addresses must resolve (env, or the local deployments file).
+  if (!process.env.MARKET_REGISTRY_ADDRESS?.trim()) resolveAddresses()
 
   const pollIntervalMs = parseInt(process.env.POLL_INTERVAL_MS ?? '30000')
 
@@ -409,38 +587,48 @@ function main(): void {
 
   const publicClient = createPublicClient({ chain, transport })
 
-  const holderSource = createHolderIndex(
-    publicClient as unknown as ILogClient,
-    yesTokenAddress as Address,
-    chainId,
+  const directory = buildDirectory({ client: publicClient as unknown as IRegistryClient })
+  await directory.start()
+
+  const indexes = new HolderIndexManager(market =>
+    createMarketHolderIndex(publicClient as unknown as ILogClient, market, chainId, directory.mode),
   )
 
-  const keeper = new LiquidationKeeper(
-    publicClient as unknown as IPublicClient,
-    holderSource,
-    {
-      creditMarketAddress: creditMarketAddress as Address,
-      yesTokenAddress:     yesTokenAddress as Address,
-      pollIntervalMs,
-    },
+  const keeper = new LiquidationKeeperService(
+    directory,
+    market => new LiquidationKeeper(
+      publicClient as unknown as IPublicClient,
+      indexes.get(market),
+      {
+        creditMarketAddress: market.creditMarket as Address,
+        yesTokenAddress:     market.yesToken as Address,
+        pollIntervalMs,
+      },
+    ),
+    pollIntervalMs,
   )
 
   keeper.start()
   const server = startServer(keeper, parseInt(process.env.PORT ?? '3003'), parseCorsOrigins(process.env.CORS_ORIGINS))
 
-  console.log('[liq-keeper] started')
+  console.log(`[liq-keeper] started (${directory.mode} mode, ${directory.list().length} market(s))`)
 
   // Graceful shutdown: every Railway redeploy sends SIGTERM to this process
   // (it's PID 1 under the exec-form CMD `node -r ts-node/register`). Order:
   // stop polling and let an in-flight poll finish (keeper.stop()), THEN
-  // close the HTTP server and release the holder index's Redis connection.
+  // close the HTTP server, stop the registry refresh and release the holder
+  // indexes' Redis connections.
   installShutdownHandlers('liquidation-keeper', [
     { name: 'liquidation-keeper', run: () => keeper.stop() },
     { name: 'http-server', run: () => closeHttpServer(server) },
-    { name: 'holder-index', run: () => holderSource.close() },
+    { name: 'registry', run: async () => directory.stop() },
+    { name: 'holder-index', run: () => indexes.close() },
   ])
 }
 
 if (require.main === module) {
-  main()
+  main().catch(err => {
+    console.error('[liq-keeper] fatal:', err)
+    process.exit(1)
+  })
 }
