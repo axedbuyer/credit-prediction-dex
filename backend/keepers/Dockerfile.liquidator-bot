@@ -22,7 +22,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --include=dev
 
 COPY tsconfig.json ./
-COPY liquidator-bot.ts holder-index.ts shutdown.ts seller.ts clob-seller.ts ./
+COPY liquidator-bot.ts holder-index.ts shutdown.ts seller.ts clob-seller.ts registry.ts markets.ts ./
 
 RUN groupadd --system --gid 1001 nodejs \
  && useradd --system --uid 1001 --gid nodejs appuser \

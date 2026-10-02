@@ -1,6 +1,7 @@
 import Redis from 'ioredis'
 import { parseAbiItem } from 'viem'
 import type { Address } from 'viem'
+import type { MarketInfo } from './registry'
 
 // ─── Holder discovery from YES Transfer events ────────────────────────────────
 //
@@ -317,13 +318,24 @@ export class HolderIndex {
  *   REDIS_URL                 optional — persist progress so a restart doesn't re-backfill
  *   TRACKED_HOLDERS           optional — comma-separated seed addresses
  */
+export interface CreateHolderIndexOptions {
+  /**
+   * Explicit first block to scan (registry mode: the market's registry `startBlock`).
+   * When set, HOLDER_INDEX_FROM_BLOCK is NOT consulted — it only applies in legacy mode.
+   */
+  fromBlock?: bigint
+  /** Include TRACKED_HOLDERS as seeds (default true; registry mode turns it off — the list isn't per-market). */
+  seedFromEnv?: boolean
+}
+
 export function createHolderIndex(
   client: ILogClient,
   tokenAddress: Address,
   chainId: number,
   env: NodeJS.ProcessEnv = process.env,
+  opts: CreateHolderIndexOptions = {},
 ): HolderIndex {
-  const rawFrom = env.HOLDER_INDEX_FROM_BLOCK?.trim()
+  const rawFrom = opts.fromBlock !== undefined ? opts.fromBlock.toString() : env.HOLDER_INDEX_FROM_BLOCK?.trim()
   if (!rawFrom) {
     throw new Error(
       'HOLDER_INDEX_FROM_BLOCK is not set. Set it to the YES token deploy block ' +
@@ -336,7 +348,7 @@ export function createHolderIndex(
   const chunkSize   = BigInt(env.HOLDER_INDEX_CHUNK_SIZE ?? '1000')
   const concurrency = parseInt(env.HOLDER_INDEX_CONCURRENCY ?? '4')
 
-  const seedHolders = (env.TRACKED_HOLDERS ?? '')
+  const seedHolders = (opts.seedFromEnv === false ? '' : env.TRACKED_HOLDERS ?? '')
     .split(',')
     .map(s => s.trim())
     .filter(s => s.length > 0)
@@ -359,4 +371,112 @@ export function createHolderIndex(
     seedHolders,
     backfillRetryMs: 30_000,
   })
+}
+
+// ─── Multi-market: one HolderIndex per market's YES token ─────────────────────
+//
+// Redis keys are already namespaced per YES token (`holder-index:<chain>:<yes>:*`), so
+// every market simply gets its own index. Indexes are created lazily the first time a
+// market is seen (so a market added to the registry later gets one on the next cycle)
+// and are NEVER dropped — the holder set only grows (see header), even for a market
+// that later goes inactive.
+
+export interface IManagedHolderIndex {
+  refresh(): Promise<void>
+  holders(): Address[]
+  status(): HolderIndexStatus
+  close(): Promise<void>
+}
+
+/**
+ * Production factory. Registry mode scans from the market's registry `startBlock`
+ * (a safe lower bound — NOT `registeredAt`); legacy mode keeps today's behaviour
+ * (HOLDER_INDEX_FROM_BLOCK required, TRACKED_HOLDERS seeds honoured).
+ */
+export function createMarketHolderIndex(
+  client: ILogClient,
+  market: MarketInfo,
+  chainId: number,
+  mode: 'registry' | 'legacy',
+  env: NodeJS.ProcessEnv = process.env,
+): HolderIndex {
+  return mode === 'registry'
+    ? createHolderIndex(client, market.yesToken, chainId, env, { fromBlock: market.startBlock, seedFromEnv: false })
+    : createHolderIndex(client, market.yesToken, chainId, env)
+}
+
+export class HolderIndexManager {
+  private readonly indexes = new Map<string, IManagedHolderIndex>()
+
+  constructor(private readonly factory: (market: MarketInfo) => IManagedHolderIndex) {}
+
+  /** The market's index, created on first use. */
+  get(market: MarketInfo): IManagedHolderIndex {
+    let idx = this.indexes.get(market.slug)
+    if (!idx) {
+      idx = this.factory(market)
+      this.indexes.set(market.slug, idx)
+    }
+    return idx
+  }
+
+  has(slug: string): boolean {
+    return this.indexes.has(slug)
+  }
+
+  statuses(slugs?: string[]): Record<string, HolderIndexStatus> {
+    const out: Record<string, HolderIndexStatus> = {}
+    for (const [slug, idx] of this.indexes) {
+      if (!slugs || slugs.includes(slug)) out[slug] = idx.status()
+    }
+    return out
+  }
+
+  async close(): Promise<void> {
+    await Promise.all([...this.indexes.values()].map(i => i.close().catch(err => {
+      console.error('[holder-index] close failed:', err)
+    })))
+  }
+}
+
+/**
+ * Collapses per-market statuses into the single top-level `holderIndex` object the
+ * uptime monitor reads — worst case wins: holders = total, syncedToBlock = the
+ * LOWEST (null if any market has none yet), backfillComplete = ALL complete,
+ * lastSyncAt = the OLDEST (null if any never synced), lastError = the first
+ * non-null, prefixed with its slug when `prefixErrors` (registry mode).
+ */
+export function aggregateHolderStatus(
+  byMarket: Record<string, HolderIndexStatus>,
+  opts: { prefixErrors?: boolean } = {},
+): HolderIndexStatus {
+  const entries = Object.entries(byMarket)
+  let synced: bigint | null = null
+  let anyNullSynced = false
+  let oldestSync: string | null = null
+  let anyNullSync = false
+  let lastError: string | null = null
+  let holders = 0
+  let backfillComplete = true
+  for (const [slug, st] of entries) {
+    holders += st.holders
+    if (!st.backfillComplete) backfillComplete = false
+    if (st.syncedToBlock === null) anyNullSynced = true
+    else {
+      const b = BigInt(st.syncedToBlock)
+      if (synced === null || b < synced) synced = b
+    }
+    if (st.lastSyncAt === null) anyNullSync = true
+    else if (oldestSync === null || st.lastSyncAt < oldestSync) oldestSync = st.lastSyncAt
+    if (lastError === null && st.lastError !== null) {
+      lastError = opts.prefixErrors ? `${slug}: ${st.lastError}` : st.lastError
+    }
+  }
+  return {
+    holders,
+    syncedToBlock:    anyNullSynced || synced === null ? null : synced.toString(),
+    backfillComplete,
+    lastSyncAt:       anyNullSync ? null : oldestSync,
+    lastError,
+  }
 }
