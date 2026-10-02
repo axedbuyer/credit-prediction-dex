@@ -124,6 +124,13 @@ export interface ClobYesSellerConfig {
   clobSettlementAddress: Address
   yesTokenAddress: Address
   usdcAddress: Address
+  /**
+   * Multi-market: the market slug. When set, the book is read with
+   * `GET /orderbook?market=<slug>`; orders are signed for THIS config's
+   * clobSettlementAddress domain and YES token, and the order-book server derives
+   * the market from the token. Unset (legacy mode) => no `market` param (= mstr).
+   */
+  marketSlug?: string
   /** viem LocalAccount, e.g. from privateKeyToAccount() */
   account: LocalAccount
   /** bps below mark the floor sits at. Default 300 (3%). */
@@ -158,6 +165,7 @@ export class ClobYesSeller implements IYesSeller {
   private readonly clobSettlementAddress: Address
   private readonly yesTokenAddress: Address
   private readonly usdcAddress: Address
+  private readonly marketSlug: string | undefined
   private readonly account: LocalAccount
   private readonly maxDiscountBps: number
   private readonly orderTtlSec: number
@@ -174,6 +182,7 @@ export class ClobYesSeller implements IYesSeller {
     this.clobSettlementAddress = cfg.clobSettlementAddress
     this.yesTokenAddress = cfg.yesTokenAddress
     this.usdcAddress = cfg.usdcAddress
+    this.marketSlug = cfg.marketSlug
     this.account = cfg.account
     this.maxDiscountBps = cfg.maxDiscountBps ?? DEFAULT_MAX_DISCOUNT_BPS
     this.orderTtlSec = cfg.orderTtlSec ?? DEFAULT_ORDER_TTL_SEC
@@ -302,7 +311,8 @@ export class ClobYesSeller implements IYesSeller {
 
   private async fetchOrderBook(): Promise<OrderBookResponse | null> {
     try {
-      const res = await this.fetchImpl(`${this.orderBookUrl}/orderbook`)
+      const q = this.marketSlug ? `?market=${encodeURIComponent(this.marketSlug)}` : ''
+      const res = await this.fetchImpl(`${this.orderBookUrl}/orderbook${q}`)
       if (!res.ok) return null
       const body = await res.json().catch(() => null)
       if (!body || !Array.isArray((body as OrderBookResponse).bids) || !Array.isArray((body as OrderBookResponse).asks)) {
