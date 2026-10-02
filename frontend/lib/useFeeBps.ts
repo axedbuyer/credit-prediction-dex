@@ -1,7 +1,6 @@
 'use client'
 
-import { useChainId, useReadContract } from 'wagmi'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import { useReadContract } from 'wagmi'
 import { FEE_BPS as FEE_BPS_FALLBACK } from '@/lib/feeMath'
 
 // Minimal ABI fragment — feeBps is a public uint256 state var on CLOBSettlement
@@ -35,12 +34,10 @@ export interface UseFeeBpsResult {
 // falls back to the env-based FEE_BPS so previews still render a number —
 // callers that need certainty (e.g. signing a Downbet buy) must check
 // `source === 'chain'` themselves rather than trusting the returned feeBps.
-export function useFeeBps(): UseFeeBpsResult {
-  const chainId = useChainId()
-  const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
-
+// Per market: pass THAT market's CLOBSettlement address (fee config is per CLOB).
+export function useFeeBps(clobSettlement: `0x${string}`): UseFeeBpsResult {
   const { data, isLoading, isError } = useReadContract({
-    address: contracts.clobSettlement,
+    address: clobSettlement,
     abi: CLOB_SETTLEMENT_FEE_ABI,
     functionName: 'feeBps',
     query: { refetchInterval: 60_000 },
