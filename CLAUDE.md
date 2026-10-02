@@ -31,6 +31,8 @@ Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 202
 `depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
 `contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built
 and tested on branch `feat/multi-market-contracts` (2026-10-02) but NOT yet deployed** —
+201 contract tests (incl. a 2-market invariant suite), 397 off-chain tests, 11/11
+multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min) —
 contracts, backends and frontend all run in a legacy single-market (`mstr`) mode until
 `MARKET_REGISTRY_ADDRESS` / `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` are set; rollout runbook
 `docs/multi-market-cutover.md`.
