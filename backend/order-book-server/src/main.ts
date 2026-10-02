@@ -103,8 +103,25 @@ async function main() {
 
   await Promise.all([redis.connect(), feeSource.start()])
 
-  // One-time key migration (single-market -> per-slug keys); idempotent, flag-guarded.
-  await migrateLegacyKeys(redis as unknown as MigrationRedis)
+  // Recurring sweep of legacy single-market keys into the `mstr` namespace: on boot
+  // and every LEGACY_SWEEP_MS, because Railway overlaps the old deployment (still
+  // writing legacy keys) with this one. Idempotent; a no-op sweep is one EXISTS.
+  const sweepRedis = redis as unknown as MigrationRedis
+  await migrateLegacyKeys(sweepRedis)
+  const sweepMs = parseInt(process.env.LEGACY_SWEEP_MS ?? '30000')
+  let sweepTick = 0
+  let sweeping = false
+  const sweepTimer = sweepMs > 0
+    ? setInterval(() => {
+        if (sweeping) return
+        sweeping = true
+        // nonce SCAN is throttled to every 10th tick
+        migrateLegacyKeys(sweepRedis, undefined, { scanNonces: ++sweepTick % 10 === 0 })
+          .catch(err => console.error('[order-book-server] legacy sweep failed:', err))
+          .finally(() => { sweeping = false })
+      }, sweepMs)
+    : undefined
+  sweepTimer?.unref?.()
 
   const store = new RedisOrderStore(redis)
 
@@ -184,6 +201,7 @@ async function main() {
       name: 'registry',
       run: async () => {
         if (syncTimer) clearInterval(syncTimer)
+        if (sweepTimer) clearInterval(sweepTimer)
         directory?.stop()
         marketServices?.stop()
       },
