@@ -3,25 +3,52 @@
 import Link from 'next/link'
 import { useReadContract } from 'wagmi'
 import { formatUnits } from 'viem'
-import { CONTRACT_ADDRESSES } from '@/lib/contracts'
 import { CREDIT_MARKET_ABI } from '@/lib/creditMarketAbi'
-import { MSTR_MARKET } from '@/lib/constants'
+import { useMarkets, type Market } from '@/lib/markets'
+import { entityTypeLabel } from '@/lib/marketCopy'
 
-const addrs = CONTRACT_ADDRESSES[84532]
+function pctNumber(mark: bigint): number {
+  return parseFloat(formatUnits(mark, 18)) * 100
+}
 
-function pctDisplay(mark: bigint | undefined): string {
-  if (mark === undefined) return '—'
-  return `${(parseFloat(formatUnits(mark, 18)) * 100).toFixed(1)}%`
+function MarketCard({ market }: { market: Market }) {
+  const { data: currentMark, isLoading, isError } = useReadContract({
+    address: market.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'currentMark',
+    query: { refetchInterval: 15_000 },
+  })
+
+  const mark = isLoading || isError ? undefined : (currentMark as bigint | undefined)
+  const pct = mark !== undefined ? pctNumber(mark) : undefined
+  const chance = pct !== undefined ? `${pct.toFixed(1)}% chance` : '—'
+  const daily = pct !== undefined ? `${(pct / 365).toFixed(3)}%/day` : '—'
+
+  return (
+    <Link href={`/market/${market.slug}`} className="block">
+      <div className="pari-a-card h-full transition-colors hover:border-brand-em cursor-pointer">
+        <div className="flex items-center justify-between gap-2">
+          <p className="pari-a-card__eyebrow">
+            {market.entityType === 'sovereign' ? 'Sovereign Debt' : 'Senior Unsecured'} · Perpetual
+          </p>
+          <span className="pari-badge pari-badge--neutral">{entityTypeLabel(market.entityType)}</span>
+        </div>
+        <h2 className="pari-a-card__title">{market.entityName}</h2>
+        <p className="pari-a-card__value tabular">{chance}</p>
+        <p className="pari-a-card__meta">{market.title}</p>
+        <p className="pari-a-card__meta">Daily carry {daily}</p>
+        {!market.active && <p className="pari-a-card__meta text-warning">Closed to new orders</p>}
+        {market.active && pct !== undefined && (
+          <p className="pari-a-card__meta text-teal">Downbet earns ≈{pct.toFixed(1)}% annualized</p>
+        )}
+      </div>
+    </Link>
+  )
 }
 
 export default function Home() {
-  const { data: currentMark, isLoading, isError } = useReadContract({
-    address: addrs.creditMarket,
-    abi: CREDIT_MARKET_ABI,
-    functionName: 'currentMark',
-  })
-
-  const markDisplay = isLoading || isError ? '—' : pctDisplay(currentMark as bigint | undefined)
+  const { markets, isLoading, isError } = useMarkets()
+  const active = markets.filter((m) => m.active)
 
   return (
     <div className="mx-auto max-w-[1280px] px-6 py-20 sm:py-28 space-y-24">
@@ -36,25 +63,32 @@ export default function Home() {
           Real Credit · Real Yield · Real Marketplace
         </p>
         <div className="mt-10">
-          <Link href="/market/mstr" className="pari-a-btn pari-a-btn--primary pari-a-btn--lg">
+          <a href="#markets" className="pari-a-btn pari-a-btn--primary pari-a-btn--lg">
             Trade Now
-          </Link>
+          </a>
         </div>
       </section>
 
-      {/* ── Live market card ─────────────────────────────────────────────── */}
-      <section>
-        <Link href="/market/mstr" className="block">
-          <div className="pari-a-card transition-colors hover:border-brand-em cursor-pointer">
-            <p className="pari-a-card__eyebrow">Senior Unsecured · Perpetual</p>
-            <h2 className="pari-a-card__title">Microstrategy</h2>
-            <p className="pari-a-card__value tabular">{markDisplay}</p>
-            <p className="pari-a-card__meta">{MSTR_MARKET.name}</p>
-            <p className="pari-a-card__meta text-teal">
-              Downbet earns ≈{markDisplay} annualized
-            </p>
+      {/* ── Live markets ─────────────────────────────────────────────────── */}
+      <section id="markets">
+        <p className="pari-eyebrow mb-5">Markets</p>
+        {isLoading ? (
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-44 animate-pulse rounded border border-subtle bg-surface-1" />
+            ))}
           </div>
-        </Link>
+        ) : isError ? (
+          <p className="text-sm text-text-2">Couldn’t load markets right now. Please refresh in a moment.</p>
+        ) : active.length === 0 ? (
+          <p className="text-sm text-text-2">No markets are open right now.</p>
+        ) : (
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {active.map((m) => (
+              <MarketCard key={m.slug} market={m} />
+            ))}
+          </div>
+        )}
       </section>
 
       {/* ── Trade / Hedge / Earn ─────────────────────────────────────────── */}
