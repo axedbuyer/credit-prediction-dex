@@ -1,7 +1,7 @@
 'use client'
 
-import { useChainId, useReadContract } from 'wagmi'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import { useReadContract } from 'wagmi'
+import type { Market } from '@/lib/markets'
 import { CREDIT_MARKET_ABI } from '@/lib/creditMarketAbi'
 
 // wad (1e18-scaled fraction, 1e18 == 100%) -> percent, as a float.
@@ -14,9 +14,7 @@ function wadToPercent(wad: bigint | undefined): number | undefined {
   return Number(wad / 10n ** 10n) / 1e6
 }
 
-export function FundingTicker() {
-  const chainId = useChainId()
-  const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
+export function FundingTicker({ market }: { market: Market }) {
 
   // Two individual reads rather than a single batched useReadContracts —
   // batching goes through a multicall3 contract, which real Base Sepolia/
@@ -26,13 +24,13 @@ export function FundingTicker() {
   // back silently undefined ("—" placeholders in the ticker) even though
   // the underlying contract reads are perfectly healthy individually.
   const { data: currentMark } = useReadContract({
-    address: contracts.creditMarket,
+    address: market.creditMarket,
     abi: CREDIT_MARKET_ABI,
     functionName: 'currentMark',
     query: { refetchInterval: 10_000 },
   })
   const { data: cumFunding } = useReadContract({
-    address: contracts.creditMarket,
+    address: market.creditMarket,
     abi: CREDIT_MARKET_ABI,
     functionName: 'cumulativeFundingPerYES',
     query: { refetchInterval: 10_000 },
