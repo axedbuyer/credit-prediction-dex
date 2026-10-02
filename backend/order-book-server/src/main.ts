@@ -2,7 +2,11 @@ import path from 'path'
 import fs from 'fs'
 import { buildApp } from './server'
 import { RedisOrderStore, createRedisClient } from './orderbook'
-import { createChainReader } from './chain'
+import { createPublicClient, http } from 'viem'
+import { createChainReader, resolveViemChain } from './chain'
+import { MarketDirectory, type IRegistryClient, type Hex } from './registry'
+import { MarketServicesRegistry } from './marketServices'
+import { migrateLegacyKeys, type MigrationRedis } from './migration'
 import { createFeeSource, parseEnvFeeBps, envFeeBpsWasSet, parseFeeRefreshMs } from './feeSource'
 import type { AppConfig } from './types'
 import type { IChainReader } from './chain'
@@ -99,6 +103,9 @@ async function main() {
 
   await Promise.all([redis.connect(), feeSource.start()])
 
+  // One-time key migration (single-market -> per-slug keys); idempotent, flag-guarded.
+  await migrateLegacyKeys(redis as unknown as MigrationRedis)
+
   const store = new RedisOrderStore(redis)
 
   // Chain reader is optional — the freeze/funding pre-filter is UX guidance only
@@ -119,7 +126,48 @@ async function main() {
     )
   }
 
-  const app = await buildApp(store, config, chainReader)
+  // Registry mode (MARKET_REGISTRY_ADDRESS set): the market list, per-market chain
+  // readers and per-market fee sources come from the on-chain MarketRegistry.
+  // Legacy mode (unset): buildApp builds a one-market (`mstr`) directory from
+  // `config` and keeps using the single-set chainReader/feeSource above — exactly
+  // the pre-multi-market behaviour.
+  const registryAddress = process.env.MARKET_REGISTRY_ADDRESS as Hex | undefined
+  let directory: MarketDirectory | undefined
+  let marketServices: MarketServicesRegistry | undefined
+  let syncTimer: ReturnType<typeof setInterval> | undefined
+  if (registryAddress) {
+    if (!config.rpcUrl) throw new Error('MARKET_REGISTRY_ADDRESS requires BASE_SEPOLIA_RPC_URL')
+    const registryClient = createPublicClient({
+      chain: resolveViemChain(config.chainId, config.rpcUrl),
+      transport: http(config.rpcUrl),
+    })
+    const refreshMs = parseInt(process.env.REGISTRY_REFRESH_MS ?? '60000')
+    directory = new MarketDirectory({
+      client: registryClient as unknown as IRegistryClient,
+      registryAddress,
+      refreshMs,
+    })
+    await directory.start()
+    marketServices = new MarketServicesRegistry({
+      rpcUrl: config.rpcUrl,
+      chainId: config.chainId,
+      envFeeBps: config.feeBps ?? 50,
+      envFeeBpsWasSet: envFeeBpsWasSet(process.env.FEE_BPS),
+      feeRefreshMs: parseFeeRefreshMs(process.env.FEE_REFRESH_MS),
+    })
+    await marketServices.sync(directory.list())
+    // Pick up markets added to the registry at runtime (fee source + reader).
+    syncTimer = setInterval(() => { void marketServices!.sync(directory!.list()) }, refreshMs)
+    syncTimer.unref?.()
+    console.log(`[order-book-server] registry mode: ${directory.list().map(m => m.slug).join(', ') || '(no markets yet)'}`)
+  }
+
+  const app = await buildApp(
+    store, config, chainReader,
+    directory && marketServices
+      ? { directory, services: (m) => marketServices!.get(m) }
+      : {},
+  )
 
   const address = await app.listen({ port: config.port ?? 3001, host: '0.0.0.0' })
   console.log(`Order book server listening at ${address}`)
@@ -132,6 +180,14 @@ async function main() {
   // using (feeSource's refresh timer, the Redis connection).
   installShutdownHandlers('order-book-server', [
     { name: 'fastify', run: () => app.close() },
+    {
+      name: 'registry',
+      run: async () => {
+        if (syncTimer) clearInterval(syncTimer)
+        directory?.stop()
+        marketServices?.stop()
+      },
+    },
     { name: 'fee-source', run: async () => { feeSource.stop() } },
     {
       name: 'redis',
