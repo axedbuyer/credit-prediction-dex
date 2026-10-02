@@ -41,9 +41,16 @@ CI fails on drift).
 - Rate limit stays per client IP across all markets.
 - Redis keys: `orderbook:<slug>:bids|asks`, `nonces:<slug>:<maker>` (on-chain `usedNonces` is per
   CLOBSettlement), `orders:<id>` global. Readers treat a missing `market` as `mstr`.
-- Startup migration (`src/migration.ts`, flag `migrations:multimarket-v1`): moves the legacy
-  `orderbook:bids|asks` + `nonces:<maker>` keys into the `mstr` namespace and stamps `market:'mstr'`
-  on stored orders. Idempotent; safe with a concurrently running matching-engine.
+- Legacy-key SWEEP (`src/migration.ts`): on boot and every `LEGACY_SWEEP_MS` (default 30000; 0
+  disables) moves legacy `orderbook:bids|asks` ids into `orderbook:mstr:*`, stamps `market:'mstr'`
+  on the order JSON, and UNIONs `nonces:<maker>` into `nonces:mstr:<maker>`. It is recurring because
+  Railway overlaps old and new deployments: the old instance keeps writing legacy keys for a while
+  after the new one starts, and a one-shot migration would strand those orders. Idempotent and
+  crash-safe, `SET NX EX` lock for replicas, safe with a running matching-engine. A no-op sweep is
+  a single EXISTS (nonce SCAN only on boot and every 10th tick) and writes nothing; a sweep that
+  moves anything logs `swept legacy keys: N order(s)...`. `migrations:multimarket-v1` is only an
+  informational marker now. Cutover rollout: just deploy; watch Railway logs for the sweep lines
+  during the overlap window, and they stop once the old instance is gone.
 
 ### matching-engine
 - Each poll fetches `GET /orderbook?market=<slug>` for every ACTIVE market and matches each book
@@ -58,7 +65,8 @@ CI fails on drift).
 - Optional `CHAIN_ID` (default 84532) for a local anvil node.
 
 ### Env vars added
-`MARKET_REGISTRY_ADDRESS`, `REGISTRY_REFRESH_MS` (both services); `CHAIN_ID` (matching-engine).
+`MARKET_REGISTRY_ADDRESS`, `REGISTRY_REFRESH_MS` (both services); `CHAIN_ID` (matching-engine);
+`LEGACY_SWEEP_MS` (order-book-server).
 
 ## Do not build
 Subgraph, The Graph integration, fee distributor
