@@ -48,6 +48,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: registry.ts copies in sync with backend/shared
+        run: backend/shared/sync-registry.sh --check
       - name: npm ci
         working-directory: backend/order-book-server
         run: npm ci
