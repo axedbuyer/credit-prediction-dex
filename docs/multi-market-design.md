@@ -1,7 +1,8 @@
 # Multi-market — design doc (decisions LOCKED 2026-10-01)
 
 *Written 2026-10-01, right after the batch-1 redeploy. Status: **D1–D6 decided 2026-10-01
-(see §3 "Decision record"); phase 0 (spec) done, phases 1–4 not started.** Read with root `CLAUDE.md` (canonical spec) and
+(see §3 "Decision record"); phases 0–3 built on branch `feat/multi-market-contracts`
+(2026-10-02); phase 4 (Sepolia rollout) = `docs/multi-market-cutover.md`, not started.** Read with root `CLAUDE.md` (canonical spec) and
 `docs/HANDOVER.md` (live state).*
 
 ## 1. Goal and non-goals
