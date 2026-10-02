@@ -1,22 +1,30 @@
 import Redis from 'ioredis'
 import type { StoredOrder } from './types'
 
+// ─── Redis key layout ─────────────────────────────────────────────────────────
+// Kept in lockstep with backend/matching-engine's RedisOrderRemover.
+// `orders:<id>` stays global — the order JSON itself carries `market`.
+// Nonces are per market: on-chain `usedNonces` lives on each CLOBSettlement.
+export const bidsKey = (market: string) => `orderbook:${market}:bids`
+export const asksKey = (market: string) => `orderbook:${market}:asks`
+export const nonceKey = (market: string, maker: string) => `nonces:${market}:${maker.toLowerCase()}`
+
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface OrderStore {
   saveOrder(id: string, order: StoredOrder): Promise<void>
   getOrder(id: string): Promise<StoredOrder | null>
   deleteOrder(id: string): Promise<boolean>
-  addBid(id: string, price: number): Promise<void>
-  addAsk(id: string, price: number): Promise<void>
-  removeBid(id: string): Promise<void>
-  removeAsk(id: string): Promise<void>
+  addBid(market: string, id: string, price: number): Promise<void>
+  addAsk(market: string, id: string, price: number): Promise<void>
+  removeBid(market: string, id: string): Promise<void>
+  removeAsk(market: string, id: string): Promise<void>
   /** Returns order IDs sorted by price descending (highest bid first). */
-  getBidIds(): Promise<string[]>
+  getBidIds(market: string): Promise<string[]>
   /** Returns order IDs sorted by price ascending (lowest ask first). */
-  getAskIds(): Promise<string[]>
-  isNonceUsed(maker: string, nonce: string): Promise<boolean>
-  markNonceUsed(maker: string, nonce: string): Promise<void>
+  getAskIds(market: string): Promise<string[]>
+  isNonceUsed(market: string, maker: string, nonce: string): Promise<boolean>
+  markNonceUsed(market: string, maker: string, nonce: string): Promise<void>
   /** Cheap reachability check for GET /health. Must never throw — swallow errors and return false. */
   ping(): Promise<boolean>
 }
@@ -32,7 +40,11 @@ export class RedisOrderStore implements OrderStore {
 
   async getOrder(id: string): Promise<StoredOrder | null> {
     const raw = await this.redis.get(`orders:${id}`)
-    return raw ? (JSON.parse(raw) as StoredOrder) : null
+    if (!raw) return null
+    const order = JSON.parse(raw) as StoredOrder
+    // Pre-migration orders have no `market` — they all belong to mstr.
+    if (!order.market) order.market = 'mstr'
+    return order
   }
 
   async deleteOrder(id: string): Promise<boolean> {
@@ -40,39 +52,39 @@ export class RedisOrderStore implements OrderStore {
     return deleted > 0
   }
 
-  async addBid(id: string, price: number): Promise<void> {
-    await this.redis.zadd('orderbook:bids', price, id)
+  async addBid(market: string, id: string, price: number): Promise<void> {
+    await this.redis.zadd(bidsKey(market), price, id)
   }
 
-  async addAsk(id: string, price: number): Promise<void> {
-    await this.redis.zadd('orderbook:asks', price, id)
+  async addAsk(market: string, id: string, price: number): Promise<void> {
+    await this.redis.zadd(asksKey(market), price, id)
   }
 
-  async removeBid(id: string): Promise<void> {
-    await this.redis.zrem('orderbook:bids', id)
+  async removeBid(market: string, id: string): Promise<void> {
+    await this.redis.zrem(bidsKey(market), id)
   }
 
-  async removeAsk(id: string): Promise<void> {
-    await this.redis.zrem('orderbook:asks', id)
+  async removeAsk(market: string, id: string): Promise<void> {
+    await this.redis.zrem(asksKey(market), id)
   }
 
-  async getBidIds(): Promise<string[]> {
+  async getBidIds(market: string): Promise<string[]> {
     // ZREVRANGE returns members sorted by score descending
-    return this.redis.zrevrange('orderbook:bids', 0, -1)
+    return this.redis.zrevrange(bidsKey(market), 0, -1)
   }
 
-  async getAskIds(): Promise<string[]> {
+  async getAskIds(market: string): Promise<string[]> {
     // ZRANGE returns members sorted by score ascending
-    return this.redis.zrange('orderbook:asks', 0, -1)
+    return this.redis.zrange(asksKey(market), 0, -1)
   }
 
-  async isNonceUsed(maker: string, nonce: string): Promise<boolean> {
-    const result = await this.redis.sismember(`nonces:${maker.toLowerCase()}`, nonce)
+  async isNonceUsed(market: string, maker: string, nonce: string): Promise<boolean> {
+    const result = await this.redis.sismember(nonceKey(market, maker), nonce)
     return result === 1
   }
 
-  async markNonceUsed(maker: string, nonce: string): Promise<void> {
-    await this.redis.sadd(`nonces:${maker.toLowerCase()}`, nonce)
+  async markNonceUsed(market: string, maker: string, nonce: string): Promise<void> {
+    await this.redis.sadd(nonceKey(market, maker), nonce)
   }
 
   async ping(): Promise<boolean> {
@@ -88,9 +100,15 @@ export class RedisOrderStore implements OrderStore {
 
 export class MemoryOrderStore implements OrderStore {
   private orders = new Map<string, StoredOrder>()
-  private bidPrices = new Map<string, number>()
-  private askPrices = new Map<string, number>()
+  private bidPrices = new Map<string, Map<string, number>>()
+  private askPrices = new Map<string, Map<string, number>>()
   private usedNonces = new Map<string, Set<string>>()
+
+  private static book(m: Map<string, Map<string, number>>, market: string): Map<string, number> {
+    let b = m.get(market)
+    if (!b) { b = new Map(); m.set(market, b) }
+    return b
+  }
 
   async saveOrder(id: string, order: StoredOrder): Promise<void> {
     this.orders.set(id, order)
@@ -104,40 +122,40 @@ export class MemoryOrderStore implements OrderStore {
     return this.orders.delete(id)
   }
 
-  async addBid(id: string, price: number): Promise<void> {
-    this.bidPrices.set(id, price)
+  async addBid(market: string, id: string, price: number): Promise<void> {
+    MemoryOrderStore.book(this.bidPrices, market).set(id, price)
   }
 
-  async addAsk(id: string, price: number): Promise<void> {
-    this.askPrices.set(id, price)
+  async addAsk(market: string, id: string, price: number): Promise<void> {
+    MemoryOrderStore.book(this.askPrices, market).set(id, price)
   }
 
-  async removeBid(id: string): Promise<void> {
-    this.bidPrices.delete(id)
+  async removeBid(market: string, id: string): Promise<void> {
+    MemoryOrderStore.book(this.bidPrices, market).delete(id)
   }
 
-  async removeAsk(id: string): Promise<void> {
-    this.askPrices.delete(id)
+  async removeAsk(market: string, id: string): Promise<void> {
+    MemoryOrderStore.book(this.askPrices, market).delete(id)
   }
 
-  async getBidIds(): Promise<string[]> {
-    return [...this.bidPrices.entries()]
+  async getBidIds(market: string): Promise<string[]> {
+    return [...MemoryOrderStore.book(this.bidPrices, market).entries()]
       .sort(([, a], [, b]) => b - a)
       .map(([id]) => id)
   }
 
-  async getAskIds(): Promise<string[]> {
-    return [...this.askPrices.entries()]
+  async getAskIds(market: string): Promise<string[]> {
+    return [...MemoryOrderStore.book(this.askPrices, market).entries()]
       .sort(([, a], [, b]) => a - b)
       .map(([id]) => id)
   }
 
-  async isNonceUsed(maker: string, nonce: string): Promise<boolean> {
-    return this.usedNonces.get(maker.toLowerCase())?.has(nonce) ?? false
+  async isNonceUsed(market: string, maker: string, nonce: string): Promise<boolean> {
+    return this.usedNonces.get(nonceKey(market, maker))?.has(nonce) ?? false
   }
 
-  async markNonceUsed(maker: string, nonce: string): Promise<void> {
-    const key = maker.toLowerCase()
+  async markNonceUsed(market: string, maker: string, nonce: string): Promise<void> {
+    const key = nonceKey(market, maker)
     if (!this.usedNonces.has(key)) this.usedNonces.set(key, new Set())
     this.usedNonces.get(key)!.add(nonce)
   }

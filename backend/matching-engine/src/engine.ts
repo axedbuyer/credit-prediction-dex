@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import type { StoredOrder, OrderBook, MatchingEngineConfig } from './types'
+import { LEGACY_MARKET_SLUG, orderMarketSlug } from './types'
 import type { OrderBookClient } from './client'
 
 // Declaration merging gives MatchingEngine typed event signatures without
@@ -95,13 +96,38 @@ class MatchingEngine extends EventEmitter {
    * without relying on real timers.
    */
   async runOnce(): Promise<void> {
-    const book = await this.client.fetchOrderBook()
-    this.matchBook(book)
+    // Each active market's book is fetched and matched independently — orders
+    // from different markets are never crossed. One market's fetch failure must
+    // not starve the others; the first error is rethrown after the sweep.
+    let firstErr: unknown
+    for (const m of this.activeMarkets()) {
+      try {
+        const book = await this.client.fetchOrderBook(m.slug)
+        this.matchBook(m, book)
+      } catch (err) {
+        firstErr ??= err
+      }
+    }
+    if (firstErr !== undefined) throw firstErr
   }
 
-  private matchBook(book: OrderBook): void {
-    const yes = this.config.yesTokenAddress.toLowerCase()
-    const no  = this.config.noTokenAddress.toLowerCase()
+  private activeMarkets(): Array<{ slug: string; yes: string; no: string }> {
+    const dir = this.config.directory
+    if (dir) {
+      return dir.list({ activeOnly: true }).map(m => ({ slug: m.slug, yes: m.yesToken, no: m.noToken }))
+    }
+    // Legacy: exactly one market from the single-set config.
+    return [{ slug: LEGACY_MARKET_SLUG, yes: this.config.yesTokenAddress, no: this.config.noTokenAddress }]
+  }
+
+  private matchBook(market: { slug: string; yes: string; no: string }, rawBook: OrderBook): void {
+    const yes = market.yes.toLowerCase()
+    const no  = market.no.toLowerCase()
+    // Belt-and-braces: an order stamped with a different market never enters
+    // this market's matching (an old server that ignores ?market= would
+    // otherwise hand every market the same book).
+    const mine = (o: StoredOrder) => orderMarketSlug(o) === market.slug
+    const book: OrderBook = { bids: rawBook.bids.filter(mine), asks: rawBook.asks.filter(mine) }
 
     // Separate YES and NO markets by inspecting tokenIn/tokenOut on each order.
     // bids: tokenIn=USDC, tokenOut=<token>

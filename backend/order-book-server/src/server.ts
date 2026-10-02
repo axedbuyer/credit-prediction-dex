@@ -8,22 +8,39 @@ import type { IChainReader } from './chain'
 import { verifyOrderSignature, verifyCancelSignature } from './validation'
 import { tradeFee, netNoBidProceeds, minGrossForNet } from './fee'
 import { DEFAULT_ORDER_RATE_LIMIT_MAX, DEFAULT_ORDER_RATE_LIMIT_WINDOW_MS } from './rateLimit'
-import type { FeeSourceSnapshot } from './feeSource'
+import type { FeeSourceSnapshot, FeeSourceReader } from './feeSource'
+import { MarketDirectory, legacyMarket, type MarketInfo } from './registry'
+
+// Per-market live dependencies. In registry mode main.ts supplies these for
+// every market (see marketServices.ts); in legacy mode / tests buildApp falls
+// back to the single-set `chainReader` argument + `config.feeSource` for mstr.
+export interface MarketServices {
+  chainReader?: IChainReader
+  feeSource?: FeeSourceReader
+}
+
+export interface BuildAppOptions {
+  /** Absent ⇒ a legacy one-market (`mstr`) directory built from `config`. */
+  directory?: MarketDirectory
+  services?: (market: MarketInfo) => MarketServices
+}
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+const LEGACY_SLUG = 'mstr'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// The CURRENT fee rate for this request. `config.feeSource` (live,
-// on-chain-backed — see src/feeSource.ts) takes precedence when present;
-// tests/callers that only set the static `config.feeBps` keep working
-// unchanged. Read fresh on every call — never cached — so an admin
-// `setFeeConfig` change (picked up by feeSource's periodic refresh) is
-// reflected on the very next request without a restart.
-function currentFeeBps(config: AppConfig): number {
-  return config.feeSource ? config.feeSource.getFeeBps() : (config.feeBps ?? 0)
+// The CURRENT fee rate for a market: its live feeSource (on-chain-backed — see
+// src/feeSource.ts) when present, else the static `config.feeBps` (tests /
+// legacy callers). Read fresh on every call — never cached — so an admin
+// `setFeeConfig` change (picked up by the periodic refresh) is reflected on the
+// very next request without a restart.
+function feeBpsOf(svc: MarketServices, config: AppConfig): number {
+  return svc.feeSource ? svc.feeSource.getFeeBps() : (config.feeBps ?? 0)
 }
 
-function currentFeeSnapshot(config: AppConfig): FeeSourceSnapshot {
-  if (config.feeSource) return config.feeSource.getSnapshot()
+function feeSnapshotOf(svc: MarketServices, config: AppConfig): FeeSourceSnapshot {
+  if (svc.feeSource) return svc.feeSource.getSnapshot()
   return { feeBps: config.feeBps ?? 0, source: 'env-fallback', lastRefreshAt: null }
 }
 
@@ -56,15 +73,15 @@ function wireToOrder(wire: OrderWire): Order {
  * price uses net proceeds. YES bids are fee-free; on asks the fee (YES side)
  * is the seller's own burden and never moves the crossing price.
  */
-function derivePrice(wire: OrderWire, config: AppConfig): number {
-  const isUsdcIn = wire.tokenIn.toLowerCase() === config.usdcAddress.toLowerCase()
+function derivePrice(wire: OrderWire, usdcAddress: string, market: MarketInfo, feeBps: number): number {
+  const isUsdcIn = wire.tokenIn.toLowerCase() === usdcAddress.toLowerCase()
   const amtIn = BigInt(wire.amountIn)
   const minOut = BigInt(wire.minAmountOut)
   if (isUsdcIn) {
     if (minOut === 0n) return 0
-    const isNoBid = wire.tokenOut.toLowerCase() === config.noTokenAddress.toLowerCase()
+    const isNoBid = wire.tokenOut.toLowerCase() === market.noToken.toLowerCase()
     const usdcLeg = isNoBid
-      ? netNoBidProceeds(minOut, amtIn, BigInt(currentFeeBps(config)))
+      ? netNoBidProceeds(minOut, amtIn, BigInt(feeBps))
       : amtIn
     return Number(usdcLeg) / Number(minOut)
   }
@@ -88,7 +105,8 @@ type PreFilterResult =
 
 async function runChainPreFilter(
   order: Order,
-  config: AppConfig,
+  market: MarketInfo,
+  feeBpsNow: number,
   chainReader: IChainReader,
 ): Promise<PreFilterResult> {
   try {
@@ -96,7 +114,7 @@ async function runChainPreFilter(
       return { rejected: true, status: 400, body: { error: 'PositionFrozen' } }
     }
 
-    const isYesSell = order.tokenIn.toLowerCase() === config.yesTokenAddress.toLowerCase()
+    const isYesSell = order.tokenIn.toLowerCase() === market.yesToken.toLowerCase()
     if (isYesSell) {
       const yesBal = await chainReader.yesBalanceOf(order.maker)
       const [previewDelta, debt] = await Promise.all([
@@ -110,7 +128,7 @@ async function runChainPreFilter(
       // tradePrice ≥ debit + fee, so the trading fee on this YES sell joins the
       // required proceeds; minSellProceeds inverts net(G) = G − fee(G) exactly.
       const netDebit = debt - previewDelta
-      const feeBps = BigInt(currentFeeBps(config))
+      const feeBps = BigInt(feeBpsNow)
       const fee = tradeFee(order.amountIn, order.minAmountOut, feeBps)
       if (netDebit > 0n && order.minAmountOut < netDebit + fee) {
         return {
@@ -133,7 +151,26 @@ async function runChainPreFilter(
 
 // ─── App factory ──────────────────────────────────────────────────────────────
 
-export async function buildApp(store: OrderStore, config: AppConfig, chainReader?: IChainReader): Promise<FastifyInstance> {
+export async function buildApp(
+  store: OrderStore,
+  config: AppConfig,
+  chainReader?: IChainReader,
+  opts: BuildAppOptions = {},
+): Promise<FastifyInstance> {
+  const directory = opts.directory ?? new MarketDirectory({
+    legacy: legacyMarket({
+      creditMarket: config.creditMarketAddress ?? ZERO_ADDRESS,
+      yesToken: config.yesTokenAddress,
+      noToken: config.noTokenAddress,
+      clobSettlement: config.clobSettlementAddress,
+    }),
+  })
+  const servicesFor = (m: MarketInfo): MarketServices => {
+    if (opts.services) return opts.services(m)
+    return m.slug === LEGACY_SLUG ? { chainReader, feeSource: config.feeSource } : {}
+  }
+  const usdc = config.usdcAddress.toLowerCase()
+
   // trustProxy governs request.ip (X-Forwarded-For handling) — see
   // src/rateLimit.ts#parseTrustProxy. false (default) is correct for local
   // dev / anvil demo stack with no reverse proxy in front.
@@ -232,19 +269,47 @@ export async function buildApp(store: OrderStore, config: AppConfig, chainReader
   // touches the chain/RPC — chain reads are best-effort and the public RPC is
   // flaky, so health must not depend on it (see runChainPreFilter's fail-open).
   app.get('/health', noRateLimit, async (_request, reply) => {
-    // Fee snapshot is an in-memory read (no RPC) — safe to include unconditionally.
-    const fee = currentFeeSnapshot(config)
+    // Fee snapshots are in-memory reads (no RPC) — safe to include unconditionally.
+    // Top-level `fee` is mstr's (back-compat: uptime.yml + older readers); the
+    // per-market view is under `markets`.
+    const all = directory.list()
+    const primary = directory.bySlug(LEGACY_SLUG) ?? all[0]
+    const fee = feeSnapshotOf(primary ? servicesFor(primary) : {}, config)
+    const markets: Record<string, { fee: { bps: number; source: string } }> = {}
+    for (const m of all) {
+      const snap = feeSnapshotOf(servicesFor(m), config)
+      markets[m.slug] = { fee: { bps: snap.feeBps, source: snap.source } }
+    }
+    const registry = directory.status()
     try {
       const reachable = await store.ping()
       if (!reachable) {
-        return reply.status(503).send({ status: 'error', error: 'Store unreachable', fee })
+        return reply.status(503).send({ status: 'error', error: 'Store unreachable', fee, registry, markets })
       }
-      return reply.status(200).send({ status: 'ok', fee })
+      return reply.status(200).send({ status: 'ok', fee, registry, markets })
     } catch (err) {
       console.error('[order-book-server] /health store check failed:', err)
-      return reply.status(503).send({ status: 'error', error: 'Store unreachable', fee })
+      return reply.status(503).send({ status: 'error', error: 'Store unreachable', fee, registry, markets })
     }
   })
+
+  // GET /markets — the directory (registry or legacy). Never rate-limited.
+  app.get('/markets', noRateLimit, async () => ({
+    mode: directory.mode,
+    markets: directory.list().map(m => ({
+      slug: m.slug,
+      entityName: m.entityName,
+      entityType: m.entityType,
+      active: m.active,
+      creditMarket: m.creditMarket,
+      yesToken: m.yesToken,
+      noToken: m.noToken,
+      clobSettlement: m.clobSettlement,
+      oracleRouter: m.oracleRouter,
+      liquidationEngine: m.liquidationEngine,
+      startBlock: m.startBlock.toString(),
+    })),
+  }))
 
   // POST /order — validate EIP-712 sig, add to order book
   app.post<{ Body: OrderWire }>('/order', async (request, reply) => {
@@ -265,26 +330,49 @@ export async function buildApp(store: OrderStore, config: AppConfig, chainReader
       return reply.status(400).send({ error: 'Invalid numeric fields' })
     }
 
+    // ── Market routing + token validation (before any signature/chain work) ──
+    // Exactly one leg must be USDC; the other must be a YES/NO token of a known
+    // market. The market (and with it the EIP-712 domain, fee rate and chain
+    // pre-filter) is derived from that token — never trusted from the body.
+    const inIsUsdc = order.tokenIn.toLowerCase() === usdc
+    const outIsUsdc = order.tokenOut.toLowerCase() === usdc
+    if (inIsUsdc === outIsUsdc) {
+      return reply.status(400).send({ error: 'InvalidTokenPair' })
+    }
+    const outcomeToken = (inIsUsdc ? order.tokenOut : order.tokenIn).toLowerCase()
+    const market = directory.byAddress(outcomeToken)
+    if (!market) {
+      return reply.status(400).send({ error: 'UnknownMarket' })
+    }
+    if (outcomeToken !== market.yesToken.toLowerCase() && outcomeToken !== market.noToken.toLowerCase()) {
+      return reply.status(400).send({ error: 'InvalidTokenPair' })
+    }
+    if (!market.active) {
+      return reply.status(400).send({ error: 'MarketInactive' })
+    }
+    const svc = servicesFor(market)
+
     const nowSecs = BigInt(Math.floor(Date.now() / 1000))
     if (order.expiry <= nowSecs) {
       return reply.status(400).send({ error: 'Order expired' })
     }
 
-    if (await store.isNonceUsed(order.maker, order.nonce.toString())) {
+    if (await store.isNonceUsed(market.slug, order.maker, order.nonce.toString())) {
       return reply.status(400).send({ error: 'Nonce already used' })
     }
 
     const valid = await verifyOrderSignature(
       order,
       config.chainId,
-      config.clobSettlementAddress as Address,
+      market.clobSettlement as Address,
     )
     if (!valid) {
       return reply.status(400).send({ error: 'Invalid signature' })
     }
 
-    if (chainReader) {
-      const preFilter = await runChainPreFilter(order, config, chainReader)
+    const feeNow = feeBpsOf(svc, config)
+    if (svc.chainReader) {
+      const preFilter = await runChainPreFilter(order, market, feeNow, svc.chainReader)
       if (preFilter.rejected) {
         return reply.status(preFilter.status).send(preFilter.body)
       }
@@ -292,18 +380,18 @@ export async function buildApp(store: OrderStore, config: AppConfig, chainReader
 
     const orderId = uuidv4()
     const side = deriveSide(body, config.usdcAddress)
-    const price = derivePrice(body, config)
+    const price = derivePrice(body, config.usdcAddress, market, feeNow)
 
-    const stored: StoredOrder = { ...body, id: orderId, side, price, timestamp: Date.now() }
+    const stored: StoredOrder = { ...body, id: orderId, market: market.slug, side, price, timestamp: Date.now() }
     await store.saveOrder(orderId, stored)
-    await store.markNonceUsed(order.maker, order.nonce.toString())
+    await store.markNonceUsed(market.slug, order.maker, order.nonce.toString())
     if (side === 'bid') {
-      await store.addBid(orderId, price)
+      await store.addBid(market.slug, orderId, price)
     } else {
-      await store.addAsk(orderId, price)
+      await store.addAsk(market.slug, orderId, price)
     }
 
-    return reply.status(201).send({ orderId })
+    return reply.status(201).send({ orderId, market: market.slug })
   })
 
   // DELETE /order/:id — cancel order; maker + signature passed in headers
@@ -326,28 +414,39 @@ export async function buildApp(store: OrderStore, config: AppConfig, chainReader
       return reply.status(403).send({ error: 'Not the order maker' })
     }
 
+    // Pre-migration orders carry no `market` — they are mstr's.
+    const orderMarket = directory.bySlug(order.market ?? LEGACY_SLUG)
+    if (!orderMarket) {
+      return reply.status(400).send({ error: 'UnknownMarket' })
+    }
+
     const valid = await verifyCancelSignature(
       maker as Address,
       id,
       signature as Hex,
       config.chainId,
-      config.clobSettlementAddress as Address,
+      orderMarket.clobSettlement as Address,
     )
     if (!valid) {
       return reply.status(400).send({ error: 'Invalid cancellation signature' })
     }
 
     await store.deleteOrder(id)
-    if (order.side === 'bid') await store.removeBid(id)
-    else await store.removeAsk(id)
+    if (order.side === 'bid') await store.removeBid(orderMarket.slug, id)
+    else await store.removeAsk(orderMarket.slug, id)
 
     return reply.status(200).send({ cancelled: true })
   })
 
   // GET /orderbook — sorted bids (high→low) and asks (low→high). Polled
   // continuously (frontend + matching-engine) — never rate-limited.
-  app.get('/orderbook', noRateLimit, async () => {
-    const [bidIds, askIds] = await Promise.all([store.getBidIds(), store.getAskIds()])
+  app.get<{ Querystring: { market?: string } }>('/orderbook', noRateLimit, async (request, reply) => {
+    // No `market` param => mstr (back-compat alias for pre-multi-market callers).
+    const slug = request.query.market ?? LEGACY_SLUG
+    if (!directory.bySlug(slug)) {
+      return reply.status(404).send({ error: 'UnknownMarket' })
+    }
+    const [bidIds, askIds] = await Promise.all([store.getBidIds(slug), store.getAskIds(slug)])
 
     const [bidResults, askResults] = await Promise.all([
       Promise.all(bidIds.map(id => store.getOrder(id))),
