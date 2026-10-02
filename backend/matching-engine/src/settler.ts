@@ -1,12 +1,12 @@
 import { EventEmitter } from 'events'
-import path from 'path'
-import fs from 'fs'
-import { createPublicClient, createWalletClient, http, BaseError, ContractFunctionRevertedError } from 'viem'
+import { createPublicClient, createWalletClient, defineChain, http, BaseError, ContractFunctionRevertedError } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
 import type { Address, Hash } from 'viem'
 import type { StoredOrder } from './types'
 import type { MatchingEngine } from './engine'
+import type { MarketDirectory, MarketInfo } from './registry'
+import { orderMarketSlug } from './types'
 
 // ─── CLOBSettlement ABI (minimal — verifyAndSettle only) ─────────────────────
 
@@ -124,15 +124,19 @@ export interface IWalletClient {
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
 export interface SettlerConfig {
-  clobSettlementAddress: Address
-  creditMarketAddress: Address
   // Used to identify the seller-side order in a matched pair (the leg whose
-  // tokenIn is YES/NO, not USDC) when a FundingShortfall revert needs pruning.
+  // tokenIn is YES/NO, not USDC) when a FundingShortfall revert needs pruning,
+  // and by the pre-submit token validation.
   usdcAddress: Address
+  // Source of per-market CLOBSettlement / CreditMarket / YES / NO addresses.
+  // One settler wallet serves every market; each pair is submitted to the CLOB
+  // of the market both of its orders belong to.
+  directory: MarketDirectory
 }
 
 export interface OrderRemover {
-  removeOrder(orderId: string, side: 'bid' | 'ask'): Promise<void>
+  // `market` = slug of the book the order rests in (namespaced Redis keys).
+  removeOrder(orderId: string, side: 'bid' | 'ask', market: string): Promise<void>
 }
 
 // ─── NonceQueue: serialises concurrent settlements to prevent nonce conflicts ─
@@ -229,13 +233,52 @@ class Settler extends EventEmitter {
   private async settle(maker: StoredOrder, taker: StoredOrder): Promise<void> {
     this.currentSettlement = { makerId: maker.id, takerId: taker.id }
     try {
-      await this.settleInner(maker, taker)
+      const market = await this.validatePair(maker, taker)
+      if (market) await this.settleInner(maker, taker, market)
     } finally {
       this.currentSettlement = null
     }
   }
 
-  private async settleInner(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+  // ── Defense in depth for the CLOBSettlement token-validation gap ──────────
+  // CLOBSettlement does not itself check that an order's tokens belong to its
+  // market, so before spending gas we re-verify that BOTH orders are exactly
+  // {USDC, this market's YES or NO}, are on opposite sides of the SAME outcome
+  // token, and that both belong to the same market. Anything else is pruned
+  // WITHOUT submitting (loud log). Returns the market to settle on, or null if
+  // the pair was dropped/released here.
+  private async validatePair(maker: StoredOrder, taker: StoredOrder): Promise<MarketInfo | null> {
+    const makerSlug = orderMarketSlug(maker)
+    const takerSlug = orderMarketSlug(taker)
+    const market = this.config.directory.bySlug(makerSlug)
+    if (!market) {
+      // Our directory doesn't know this market (stale registry read). Don't
+      // prune — the orders are fine, we just can't route them yet.
+      console.error(
+        `[settler] unknown market "${makerSlug}" for maker=${maker.id} — not submitting, releasing both`,
+      )
+      this.engine.releasePendingSettlement(maker.id, taker.id)
+      return null
+    }
+    const problem = pairProblem(maker, taker, makerSlug, takerSlug, market, this.config.usdcAddress)
+    if (problem) {
+      console.error(
+        `[settler] REFUSING to submit mismatched pair (${problem}) maker=${maker.id}[${makerSlug}] ` +
+        `taker=${taker.id}[${takerSlug}] market=${market.slug} — pruning both orders`,
+      )
+      await this.removeBoth(maker, taker)
+      return null
+    }
+    if (!market.active) {
+      // Market was deactivated after the orders matched — keep them resting.
+      console.error(`[settler] market ${market.slug} inactive — not submitting maker=${maker.id} taker=${taker.id}`)
+      this.engine.releasePendingSettlement(maker.id, taker.id)
+      return null
+    }
+    return market
+  }
+
+  private async settleInner(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
     const makerArg = toContractOrder(maker)
     const takerArg = toContractOrder(taker)
     const makerSig = maker.signature as `0x${string}`
@@ -248,7 +291,7 @@ class Settler extends EventEmitter {
     try {
       gasEstimate = await withRetry(() =>
         this.publicClient.estimateContractGas({
-          address:      this.config.clobSettlementAddress,
+          address:      market.clobSettlement,
           abi:          CLOB_SETTLEMENT_ABI,
           functionName: 'verifyAndSettle',
           args:         [makerArg, makerSig, takerArg, takerSig],
@@ -267,7 +310,7 @@ class Settler extends EventEmitter {
         return
       }
       if (revertName === 'PositionFrozen') {
-        await this.handlePositionFrozen(maker, taker)
+        await this.handlePositionFrozen(maker, taker, market)
         return
       }
       if (revertName === 'SlippageExceeded') {
@@ -283,7 +326,7 @@ class Settler extends EventEmitter {
         return
       }
       if (revertName === 'NonceUsed') {
-        await this.handleNonceUsed(maker, taker)
+        await this.handleNonceUsed(maker, taker, market)
         return
       }
 
@@ -302,7 +345,7 @@ class Settler extends EventEmitter {
     let txHash: Hash
     try {
       txHash = await this.walletClient.writeContract({
-        address:      this.config.clobSettlementAddress,
+        address:      market.clobSettlement,
         abi:          CLOB_SETTLEMENT_ABI,
         functionName: 'verifyAndSettle',
         args:         [makerArg, makerSig, takerArg, takerSig],
@@ -356,10 +399,7 @@ class Settler extends EventEmitter {
     }
 
     // ── 4. Remove both orders from the order book store ───────────────────────
-    await Promise.all([
-      this.orderRemover.removeOrder(maker.id, maker.side),
-      this.orderRemover.removeOrder(taker.id, taker.side),
-    ])
+    await this.removeBoth(maker, taker)
 
     console.log(`[settler] settled ${txHash}`)
     this.emit('settled', txHash)
@@ -384,7 +424,7 @@ class Settler extends EventEmitter {
       `[settler] FundingShortfall — removing seller order ${sellerOrder.id} ` +
       `(maker=${maker.id} taker=${taker.id})`,
     )
-    await this.orderRemover.removeOrder(sellerOrder.id, sellerOrder.side)
+    await this.orderRemover.removeOrder(sellerOrder.id, sellerOrder.side, orderMarketSlug(sellerOrder))
     // The other (buyer-side) order was untouched — it's still in the book,
     // so release it back into pendingSettlement or it can never match again.
     const otherOrder = sellerOrder.id === maker.id ? taker : maker
@@ -394,13 +434,13 @@ class Settler extends EventEmitter {
   // ── PositionFrozen: one (or both) makers are flagged claimable — prune the
   // flagged party's order(s). If we can't determine who's flagged, remove both:
   // makers can always resubmit, so over-pruning here is safe.
-  private async handlePositionFrozen(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+  private async handlePositionFrozen(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
     let makerFlagged: boolean
     let takerFlagged: boolean
     try {
       ;[makerFlagged, takerFlagged] = await Promise.all([
-        this.readClaimable(maker.maker as Address),
-        this.readClaimable(taker.maker as Address),
+        this.readClaimable(market, maker.maker as Address),
+        this.readClaimable(market, taker.maker as Address),
       ])
     } catch (err) {
       console.error(
@@ -427,8 +467,8 @@ class Settler extends EventEmitter {
       `taker=${taker.id}(flagged=${takerFlagged})`,
     )
     const removals: Array<Promise<void>> = []
-    if (makerFlagged) removals.push(this.orderRemover.removeOrder(maker.id, maker.side))
-    if (takerFlagged) removals.push(this.orderRemover.removeOrder(taker.id, taker.side))
+    if (makerFlagged) removals.push(this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)))
+    if (takerFlagged) removals.push(this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)))
     await Promise.all(removals)
     // Exactly one side flagged (the !makerFlagged && !takerFlagged case
     // already returned above): the other order is untouched and still in
@@ -447,13 +487,13 @@ class Settler extends EventEmitter {
   // innocent counterparty's valid resting order would let anyone knock orders
   // off the book by crossing them with a spent-nonce order. If the read fails
   // or shows neither spent, fall back to removing both (over-pruning is safe).
-  private async handleNonceUsed(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+  private async handleNonceUsed(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
     let makerSpent: boolean
     let takerSpent: boolean
     try {
       ;[makerSpent, takerSpent] = await Promise.all([
-        this.readUsedNonce(maker),
-        this.readUsedNonce(taker),
+        this.readUsedNonce(market, maker),
+        this.readUsedNonce(market, taker),
       ])
     } catch (err) {
       console.error(
@@ -478,25 +518,25 @@ class Settler extends EventEmitter {
       `taker=${taker.id}(spent=${takerSpent})`,
     )
     const removals: Array<Promise<void>> = []
-    if (makerSpent) removals.push(this.orderRemover.removeOrder(maker.id, maker.side))
-    if (takerSpent) removals.push(this.orderRemover.removeOrder(taker.id, taker.side))
+    if (makerSpent) removals.push(this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)))
+    if (takerSpent) removals.push(this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)))
     await Promise.all(removals)
     if (!makerSpent) this.engine.releasePendingSettlement(maker.id)
     if (!takerSpent) this.engine.releasePendingSettlement(taker.id)
   }
 
-  private async readUsedNonce(order: StoredOrder): Promise<boolean> {
+  private async readUsedNonce(market: MarketInfo, order: StoredOrder): Promise<boolean> {
     return this.publicClient.readContract({
-      address:      this.config.clobSettlementAddress,
+      address:      market.clobSettlement,
       abi:          CLOB_SETTLEMENT_ABI,
       functionName: 'usedNonces',
       args:         [order.maker as Address, BigInt(order.nonce)],
     }) as Promise<boolean>
   }
 
-  private async readClaimable(user: Address): Promise<boolean> {
+  private async readClaimable(market: MarketInfo, user: Address): Promise<boolean> {
     return this.publicClient.readContract({
-      address:      this.config.creditMarketAddress,
+      address:      market.creditMarket,
       abi:          CREDIT_MARKET_ABI,
       functionName: 'claimable',
       args:         [user],
@@ -525,8 +565,8 @@ class Settler extends EventEmitter {
 
   private async removeBoth(maker: StoredOrder, taker: StoredOrder): Promise<void> {
     await Promise.all([
-      this.orderRemover.removeOrder(maker.id, maker.side),
-      this.orderRemover.removeOrder(taker.id, taker.side),
+      this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)),
+      this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)),
     ])
   }
 }
@@ -555,6 +595,39 @@ function decodeSettlementError(err: unknown): DeterministicRevert | undefined {
     errorName === 'NonceUsed'
   ) return errorName
   return undefined
+}
+
+// Returns a human-readable reason if the pair must NOT be submitted, else null.
+// Valid = same market slug on both orders, each order is exactly one USDC leg +
+// that market's YES or NO, both on the SAME outcome token, opposite directions.
+function pairProblem(
+  maker: StoredOrder,
+  taker: StoredOrder,
+  makerSlug: string,
+  takerSlug: string,
+  market: MarketInfo,
+  usdcAddress: string,
+): string | null {
+  if (makerSlug !== takerSlug) return `orders belong to different markets`
+  const usdc = usdcAddress.toLowerCase()
+  const yes = market.yesToken.toLowerCase()
+  const no = market.noToken.toLowerCase()
+  const outcomeOf = (o: StoredOrder): string | null => {
+    const tin = o.tokenIn.toLowerCase()
+    const tout = o.tokenOut.toLowerCase()
+    const tok = tin === usdc ? tout : tout === usdc ? tin : null
+    if (tok === null || tok === usdc) return null
+    return tok === yes || tok === no ? tok : null
+  }
+  const mo = outcomeOf(maker)
+  const to = outcomeOf(taker)
+  if (mo === null) return `maker order tokens are not {USDC, ${market.slug} YES/NO}`
+  if (to === null) return `taker order tokens are not {USDC, ${market.slug} YES/NO}`
+  if (mo !== to) return `orders trade different outcome tokens`
+  const makerBuys = maker.tokenIn.toLowerCase() === usdc
+  const takerBuys = taker.tokenIn.toLowerCase() === usdc
+  if (makerBuys === takerBuys) return `orders are on the same side`
+  return null
 }
 
 // The seller-side order is whichever leg sends YES/NO tokens in for USDC
@@ -614,8 +687,9 @@ interface MinimalRedis {
 export class RedisOrderRemover implements OrderRemover {
   constructor(private readonly redis: MinimalRedis) {}
 
-  async removeOrder(orderId: string, side: 'bid' | 'ask'): Promise<void> {
-    const sortedSet = side === 'bid' ? 'orderbook:bids' : 'orderbook:asks'
+  async removeOrder(orderId: string, side: 'bid' | 'ask', market: string): Promise<void> {
+    // Namespaced per market; keys mirror order-book-server's bidsKey/asksKey.
+    const sortedSet = `orderbook:${market}:${side === 'bid' ? 'bids' : 'asks'}`
     await Promise.all([
       this.redis.del(`orders:${orderId}`),
       this.redis.zrem(sortedSet, orderId),
@@ -634,47 +708,28 @@ export interface CreatedSettler {
   redis: { quit(): Promise<unknown> }
 }
 
-export function createSettler(engine: MatchingEngine): CreatedSettler {
+export function createSettler(engine: MatchingEngine, directory: MarketDirectory, usdcAddress: Address): CreatedSettler {
   const privateKey = process.env.SETTLER_PRIVATE_KEY
   if (!privateKey) throw new Error('SETTLER_PRIVATE_KEY env var is required')
 
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
-  // Contract addresses: env vars take precedence; the checked-in deployments
-  // JSON is a local-dev fallback only (it does not exist inside containers).
-  const deployments = {
-    clobSettlement: process.env.CLOB_SETTLEMENT_ADDRESS,
-    creditMarket:   process.env.CREDIT_MARKET_ADDRESS,
-    usdc:           process.env.USDC_ADDRESS,
-  }
-  if (!deployments.clobSettlement || !deployments.creditMarket || !deployments.usdc) {
-    // Path: src/ → matching-engine/ → backend/ → project root → contracts/deployments/
-    const deploymentsPath = path.join(
-      __dirname, '..', '..', '..', 'contracts', 'deployments', 'base-sepolia.json',
-    )
-    let file: { clobSettlement?: string; creditMarket?: string; usdc?: string }
-    try {
-      file = JSON.parse(fs.readFileSync(deploymentsPath, 'utf8'))
-    } catch (err) {
-      throw new Error(
-        'settler: CLOB_SETTLEMENT_ADDRESS, CREDIT_MARKET_ADDRESS, and USDC_ADDRESS ' +
-        `are not all set, and the deployments fallback could not be read at ${deploymentsPath}: ${err}`,
-      )
-    }
-    deployments.clobSettlement ??= file.clobSettlement
-    deployments.creditMarket   ??= file.creditMarket
-    deployments.usdc           ??= file.usdc
-    if (!deployments.clobSettlement || !deployments.creditMarket || !deployments.usdc) {
-      throw new Error(`settler: missing contract address(es) in env and ${deploymentsPath}`)
-    }
-  }
-
   const account = privateKeyToAccount(privateKey as `0x${string}`)
   const transport = http(rpcUrl)
 
-  const publicClient = createPublicClient({ chain: baseSepolia, transport })
-  const walletClient = createWalletClient({ account, chain: baseSepolia, transport })
+  // CHAIN_ID env override lets a local anvil node (31337) work; default Base Sepolia.
+  const chainId = parseInt(process.env.CHAIN_ID ?? String(baseSepolia.id))
+  const chain = chainId === baseSepolia.id
+    ? baseSepolia
+    : defineChain({
+        id: chainId,
+        name: 'Local',
+        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+        rpcUrls: { default: { http: [rpcUrl] } },
+      })
+  const publicClient = createPublicClient({ chain, transport })
+  const walletClient = createWalletClient({ account, chain, transport })
 
   const Redis = require('ioredis') as typeof import('ioredis').default
   // REDIS_URL (redis://:password@host:port) takes precedence — managed Redis
@@ -688,11 +743,7 @@ export function createSettler(engine: MatchingEngine): CreatedSettler {
 
   const settler = new Settler(
     engine,
-    {
-      clobSettlementAddress: deployments.clobSettlement as Address,
-      creditMarketAddress:   deployments.creditMarket   as Address,
-      usdcAddress:           deployments.usdc            as Address,
-    },
+    { usdcAddress, directory },
     publicClient as IPublicClient,
     walletClient as unknown as IWalletClient,
     new RedisOrderRemover(redis),
