@@ -5,8 +5,8 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { PariLogo } from '@/components/PariLogo'
 
-const navLinks = [
-  { href: '/market/mstr', label: 'Market' },
+const navLinks: { href: string; label: string; also?: string }[] = [
+  { href: '/', label: 'Markets', also: '/market' },
   { href: '/portfolio', label: 'Portfolio' },
   { href: '/liquidate', label: 'Liquidate' },
   { href: '/docs', label: 'Docs' },
@@ -24,7 +24,10 @@ export function Header() {
 
       <nav className="flex items-center gap-6">
         {navLinks.map((link) => {
-          const isActive = pathname?.startsWith(link.href)
+          const isActive =
+            link.href === '/'
+              ? pathname === '/' || !!pathname?.startsWith(link.also ?? '/market')
+              : pathname?.startsWith(link.href)
           return (
             <Link
               key={link.href}

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { usePublicClient, useChainId } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { parseAbiItem } from 'viem'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import type { Market } from '@/lib/markets'
 import { CREDIT_MARKET_ABI } from '@/lib/creditMarketAbi'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -46,13 +46,13 @@ function wadToPercent(wad: bigint): number {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 interface PriceChartProps {
-  marketId: string
+  market: Market
 }
 
-export function PriceChart({ marketId }: PriceChartProps) {
+export function PriceChart({ market }: PriceChartProps) {
+  const marketId = market.slug
   const chainId = useChainId()
   const publicClient = usePublicClient()
-  const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
 
   const [range, setRange] = useState<TimeRange>('ALL')
 
@@ -70,15 +70,17 @@ export function PriceChart({ marketId }: PriceChartProps) {
   // between accrual epochs — e.g. during a demo time-warp.
 
   const { data: points = [], isLoading } = useQuery<PricePoint[]>({
-    queryKey: ['price-history', chainId, contracts.creditMarket, marketId],
+    queryKey: ['price-history', chainId, market.creditMarket, marketId],
     queryFn: async () => {
       if (!publicClient) return []
 
       const currentBlock = await publicClient.getBlockNumber()
-      const fromBlock = currentBlock > BLOCK_RANGE_CAP ? currentBlock - BLOCK_RANGE_CAP : 0n
+      const capped = currentBlock > BLOCK_RANGE_CAP ? currentBlock - BLOCK_RANGE_CAP : 0n
+      // Never scan before this market existed (registry startBlock; 0 in legacy mode).
+      const fromBlock = capped > market.startBlock ? capped : market.startBlock
 
       const logs = await publicClient.getLogs({
-        address: contracts.creditMarket,
+        address: market.creditMarket,
         event: FUNDING_ACCRUED,
         fromBlock,
         toBlock: 'latest',
@@ -109,7 +111,7 @@ export function PriceChart({ marketId }: PriceChartProps) {
       try {
         const [mark, block] = await Promise.all([
           publicClient.readContract({
-            address: contracts.creditMarket,
+            address: market.creditMarket,
             abi: CREDIT_MARKET_ABI,
             functionName: 'currentMark',
           }),

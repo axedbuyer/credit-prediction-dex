@@ -23,7 +23,7 @@ const barlow = Barlow({
 
 export const metadata: Metadata = {
   title: 'Pari — Tradable Credit For All',
-  description: 'Will MicroStrategy have a credit event in the next 12 months?',
+  description: 'Trade the probability of a credit event — corporate and sovereign credit markets on Base.',
 }
 
 export default function RootLayout({

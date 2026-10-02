@@ -2,11 +2,11 @@
 
 import { useState, useCallback } from 'react'
 import type { ReactNode } from 'react'
-import { useAccount, useReadContracts, useWriteContract, useChainId } from 'wagmi'
+import { useAccount, useReadContracts, useWriteContract } from 'wagmi'
 import { waitForTransactionReceipt } from '@wagmi/core'
 import { formatUnits, keccak256, toBytes } from 'viem'
 import { wagmiConfig } from '@/lib/wagmi'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import { useMarkets, type Market } from '@/lib/markets'
 
 // ── Role hashes ──────────────────────────────────────────────────────────────
 
@@ -138,9 +138,44 @@ type TxStatus = 'idle' | 'pending' | 'success' | 'error'
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function AdminPage() {
+  const { markets, isLoading } = useMarkets()
+  const [slug, setSlug] = useState<string>('')
+  const market = markets.find((m) => m.slug === slug) ?? markets[0]
+
+  return (
+    <div>
+      {markets.length > 1 && (
+        <div className="mx-auto max-w-3xl px-4 pt-8">
+          <label htmlFor="admin-market" className="pari-b-label">Market</label>
+          <select
+            id="admin-market"
+            value={market?.slug ?? ''}
+            onChange={(e) => setSlug(e.target.value)}
+            className="pari-b-input mt-1"
+          >
+            {markets.map((m) => (
+              <option key={m.slug} value={m.slug}>
+                {m.entityName}{m.active ? '' : ' (inactive)'}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {market ? (
+        // key remounts the panel per market so no tx status/confirm modal leaks across markets
+        <AdminPanel key={market.slug} market={market} />
+      ) : (
+        <div className="mx-auto max-w-3xl px-4 py-8 text-sm text-text-2">
+          {isLoading ? 'Loading markets…' : 'No markets found.'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AdminPanel({ market }: { market: Market }) {
   const { address, isConnected } = useAccount()
-  const chainId = useChainId()
-  const addrs = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
+  const addrs = market
 
   const [confirmModal, setConfirmModal] = useState(false)
   const [creditEventStatus, setCreditEventStatus] = useState<TxStatus>('idle')
@@ -305,7 +340,7 @@ export default function AdminPage() {
       <div>
         <h1 className="font-serif text-2xl text-text-1">Admin</h1>
         <p className="mt-1 text-sm text-text-2">
-          Will MicroStrategy have a credit event in the next 12 months?
+          {market.title}
         </p>
       </div>
 

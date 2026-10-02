@@ -10,8 +10,8 @@ export default function WhatIsPariPage() {
     <div>
       <h1>What is Pari</h1>
       <p>
-        Pari lets you trade a single question: <strong>&ldquo;Will MicroStrategy have a
-        credit event in the next 12 months?&rdquo;</strong> The price is the market&rsquo;s
+        Pari lets you trade one question per company or country: <strong>&ldquo;Will
+        [Entity] have a credit event in the next 12 months?&rdquo;</strong> The price is the market&rsquo;s
         answer, as a probability.
       </p>
       <p>

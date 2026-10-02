@@ -2,9 +2,8 @@
 
 import type { CSSProperties } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useChainId } from 'wagmi'
 import { ORDER_BOOK_URL } from '@/lib/constants'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import type { Market } from '@/lib/markets'
 
 // Raw shape returned by GET /orderbook (backend/order-book-server's
 // StoredOrder — full signed order, not a simplified {price, size} level).
@@ -55,7 +54,7 @@ function usd(n: number) {
 }
 
 async function fetchOrderBook(marketId: string): Promise<OrderBookData> {
-  const res = await fetch(`${ORDER_BOOK_URL}/orderbook?market=${marketId}`, {
+  const res = await fetch(`${ORDER_BOOK_URL}/orderbook?market=${encodeURIComponent(marketId)}`, {
     signal: AbortSignal.timeout(3_000),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -72,13 +71,12 @@ function SkeletonRow({ side }: { side: 'upbet' | 'downbet' }) {
 }
 
 interface OrderBookProps {
-  marketId: string
+  market: Market
 }
 
-export function OrderBook({ marketId }: OrderBookProps) {
-  const chainId = useChainId()
-  const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
-  const yesToken = contracts.yesToken.toLowerCase()
+export function OrderBook({ market }: OrderBookProps) {
+  const marketId = market.slug
+  const yesToken = market.yesToken.toLowerCase()
 
   const { data, isLoading } = useQuery<OrderBookData>({
     queryKey: ['orderbook', marketId],

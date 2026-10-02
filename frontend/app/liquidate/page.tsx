@@ -3,10 +3,13 @@
 import { useEffect, useState } from 'react'
 import { LiquidationCard, DEV_POSITIONS, type ClaimablePosition } from '@/components/LiquidationCard'
 import { LIQUIDATION_KEEPER_URL } from '@/lib/constants'
+import { useMarkets } from '@/lib/markets'
 
 const POLL_MS = 10_000
 
 export default function LiquidatePage() {
+  const { markets } = useMarkets()
+  const [filter, setFilter] = useState<string>('all') // market slug or 'all'
   const [positions, setPositions]   = useState<ClaimablePosition[]>([])
   const [loading, setLoading]       = useState(true)
   const [error, setError]           = useState('')
@@ -17,7 +20,11 @@ export default function LiquidatePage() {
 
     async function fetchPositions() {
       try {
-        const res = await fetch(`${LIQUIDATION_KEEPER_URL}/claimable`)
+        const res = await fetch(
+          filter === 'all'
+            ? `${LIQUIDATION_KEEPER_URL}/claimable`
+            : `${LIQUIDATION_KEEPER_URL}/claimable?market=${encodeURIComponent(filter)}`,
+        )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data: ClaimablePosition[] = await res.json()
         if (mounted) {
@@ -45,9 +52,16 @@ export default function LiquidatePage() {
       clearInterval(id)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [filter])
 
-  const hasPositions = positions.length > 0
+  // Resolve each entry's market from the on-chain registry by slug (a keeper that
+  // predates multi-market omits `market` — that is the legacy single market, mstr).
+  // Entries for markets the registry doesn't know are not claimable from here.
+  const rows = positions.flatMap((pos) => {
+    const market = markets.find((m) => m.slug === (pos.market ?? 'mstr'))
+    return market ? [{ pos, market }] : []
+  })
+  const hasPositions = rows.length > 0
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8">
@@ -61,6 +75,23 @@ export default function LiquidatePage() {
         here. Claim to acquire the position at a fixed formulaic price, then resell. Downbet
         holders are unaffected and are made whole as part of every claim.
       </p>
+
+      {markets.length > 1 && (
+        <div className="mt-4 flex items-center gap-2">
+          <label htmlFor="market-filter" className="pari-b-label">Market</label>
+          <select
+            id="market-filter"
+            value={filter}
+            onChange={(e) => { setLoading(true); setPositions([]); setFilter(e.target.value) }}
+            className="pari-b-input w-auto"
+          >
+            <option value="all">All markets</option>
+            {markets.map((m) => (
+              <option key={m.slug} value={m.slug}>{m.entityName}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Connection status */}
       <div className="mt-4 flex items-center gap-2">
@@ -102,8 +133,8 @@ export default function LiquidatePage() {
 
         {/* Position cards */}
         {hasPositions &&
-          positions.map((pos) => (
-            <LiquidationCard key={pos.user} position={pos} />
+          rows.map(({ pos, market }) => (
+            <LiquidationCard key={`${market.slug}:${pos.user}`} position={pos} market={market} />
           ))}
       </div>
 
