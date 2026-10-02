@@ -10,11 +10,15 @@
 // receipt handling, stop()). The bot drives an IYesSeller (seller.ts); in
 // production that's ClobYesSeller (clob-seller.ts).
 //
-// Deliberately does NOT call CreditMarket.owed() or frozenFunding() — only
-// LiquidationEngine.claim(user) and the handful of common views below — so
-// this bot works unchanged against both the currently-deployed contracts and
-// the upcoming fix/unified-owed redeploy (that branch changes pricing
-// internals, not claim()'s ABI).
+// Claiming uses only LiquidationEngine.claim(user) and the handful of common
+// views below, so it works unchanged against old and fixed contracts. The one
+// exception is a BEST-EFFORT CreditMarket.owed(user) read, used only to estimate
+// tail-case shortfalls for the shared-InsuranceFund alert — if it fails, the
+// estimate is simply 0 and claiming is unaffected.
+//
+// Multi-market: markets come from a BotMarketsProvider (the registry directory in
+// production, or a single static market via the 5-arg constructor); one wallet and
+// one USDC float serve them all — see the LiquidatorBot class comment.
 
 import http from 'http'
 import path from 'path'
@@ -32,10 +36,12 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
 import { ClobYesSeller } from './clob-seller'
 import type { Address, Hash, LocalAccount } from 'viem'
-import { createHolderIndex } from './holder-index'
+import { createMarketHolderIndex, HolderIndexManager, aggregateHolderStatus } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
 import { installShutdownHandlers, closeHttpServer } from './shutdown'
 import type { IYesSeller, SellResult } from './seller'
+import { buildDirectory, readRegistryShared } from './markets'
+import type { IRegistryClient, MarketInfo, MarketDirectory, MarketDirectoryStatus } from './registry'
 
 // ─── WAD constant (1e18, for fixed-point arithmetic) ──────────────────────────
 
@@ -63,6 +69,13 @@ export const CREDIT_MARKET_ABI = [
     type: 'function' as const,
     stateMutability: 'view' as const,
     inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'owed',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{ name: 'user', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
 ] as const
@@ -207,15 +220,39 @@ export interface IHolderSource {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-export interface BotConfig {
-  creditMarketAddress: Address
-  yesTokenAddress: Address
+/** Settings shared by every market: one wallet's USDC and the shared InsuranceFund. */
+export interface BotSharedConfig {
   usdcAddress: Address
-  liquidationEngineAddress: Address
   insuranceFundAddress: Address
-  clobSettlementAddress: Address
   pollIntervalMs?: number // default 30_000
   autoSell?: boolean      // default true
+}
+
+/** Single-market config (legacy / the 5-arg LiquidatorBot constructor). */
+export interface BotConfig extends BotSharedConfig {
+  creditMarketAddress: Address
+  yesTokenAddress: Address
+  liquidationEngineAddress: Address
+  clobSettlementAddress: Address
+}
+
+/** Everything the bot needs for ONE market. */
+export interface BotMarket {
+  slug: string
+  creditMarketAddress: Address
+  yesTokenAddress: Address
+  liquidationEngineAddress: Address
+  clobSettlementAddress: Address
+  holderSource: IHolderSource
+  /** Sells the YES acquired in THIS market on THIS market's book. */
+  seller: IYesSeller
+}
+
+export interface BotMarketsProvider {
+  /** Current markets (called every cycle — may grow as the registry refreshes). */
+  markets(): BotMarket[]
+  /** Present => multi-market /health additions (`registry`, `markets`, `alerts`). */
+  registryStatus?(): MarketDirectoryStatus
 }
 
 // ─── Health / counters ─────────────────────────────────────────────────────────
@@ -229,6 +266,30 @@ export type SkipReason =
   | 'insuranceFundShortfall'
   | 'other'
 
+export interface BotAlerts {
+  /** Largest single still-pending claim cost bound at the end of the last cycle (USDC raw). */
+  largestPendingClaim: string
+  /** max(0, largestPendingClaim − usdcBalance). */
+  floatShortfall: string
+  /** Sum of estimated tail-case shortfalls over all pending claims, all markets. */
+  pendingTailShortfall: string
+  /** max(0, pendingTailShortfall − InsuranceFund USDC balance). */
+  insuranceFundShortfall: string
+}
+
+export interface BotMarketHealth {
+  lastCycleAt: string | null
+  claims: number
+  tailClaims: number
+  skippedByReason: Record<string, number>
+  lastError: string | null
+  yesBalance: string | null
+  motionPending: boolean | null
+  pendingClaims: number
+  pendingTailShortfall: string
+  holderIndex: HolderIndexStatus
+}
+
 export interface BotHealth {
   status: 'ok'
   lastCycleAt: string | null
@@ -237,8 +298,14 @@ export interface BotHealth {
   skippedByReason: Record<string, number>
   lastError: string | null
   usdcBalance: string | null
+  /** Sum of the bot's YES balances across markets (null until first read). */
   yesBalance: string | null
+  /** Aggregate across markets — worst case (see aggregateHolderStatus). */
   holderIndex: HolderIndexStatus
+  // Multi-market additions:
+  registry?: MarketDirectoryStatus
+  alerts?: BotAlerts
+  markets?: Record<string, BotMarketHealth>
 }
 
 interface BotState {
@@ -249,6 +316,18 @@ interface BotState {
   lastError: string | null
   usdcBalance: bigint | null
   yesBalance: bigint | null
+}
+
+interface MarketBotState {
+  lastCycleAt: string | null
+  claims: number
+  tailClaims: number
+  skippedByReason: Partial<Record<SkipReason, number>>
+  lastError: string | null
+  yesBalance: bigint | null
+  motionPending: boolean | null
+  pendingClaims: number
+  pendingTailShortfall: bigint
 }
 
 // ─── Revert decoding ────────────────────────────────────────────────────────────
@@ -339,6 +418,45 @@ export function parseLiquidatedEvent(
 }
 
 // ─── LiquidatorBot ────────────────────────────────────────────────────────────
+//
+// Multi-market: one wallet, one USDC float, N markets. Each cycle:
+//   1. per market: refresh the holder index, read motionPending + currentMark
+//      (a market whose reads fail is skipped for the cycle — the others go on);
+//   2. discovery: every flagged (claimable) holder with a YES balance, across all
+//      non-frozen markets, plus an estimate of each one's tail-case shortfall;
+//   3. alerts: the InsuranceFund is SHARED, so its "short" alert compares its USDC
+//      balance with the SUM of the concurrent tail-case shortfalls (owed − m×Q);
+//   4. claims, one at a time (one wallet = one nonce stream), each through THAT
+//      market's LiquidationEngine, approving USDC to that engine as needed. The float
+//      check is per claim (a claim costs ≤ m×Q) and the end-of-cycle float alert
+//      compares the balance with the LARGEST single still-pending claim — claims
+//      are sequential and each Upbet is resold, so the float never has to cover
+//      the sum;
+//   5. per market: sell whatever YES the bot holds via that market's IYesSeller.
+
+/** Largest single claim a float must cover vs. the current balance (0 if it covers it). Pure. */
+export function floatShortfall(usdcBalance: bigint, pendingCosts: readonly bigint[]): bigint {
+  let max = 0n
+  for (const c of pendingCosts) if (c > max) max = c
+  return max > usdcBalance ? max - usdcBalance : 0n
+}
+
+/** How far the shared InsuranceFund's balance falls short of the SUM of concurrent tail shortfalls (0 if it covers them). Pure. */
+export function insuranceFundShortfall(fundBalance: bigint, shortfalls: readonly bigint[]): bigint {
+  let sum = 0n
+  for (const s of shortfalls) sum += s
+  return sum > fundBalance ? sum - fundBalance : 0n
+}
+
+interface PendingClaim {
+  market: BotMarket
+  holder: Address
+  Q: bigint
+  currentMark: bigint
+  costBound: bigint
+  tailShortfall: bigint
+  claimed: boolean
+}
 
 export class LiquidatorBot {
   private readonly state: BotState = {
@@ -350,18 +468,58 @@ export class LiquidatorBot {
     usdcBalance:      null,
     yesBalance:       null,
   }
+  private readonly marketStates = new Map<string, MarketBotState>()
+  private alerts: BotAlerts = {
+    largestPendingClaim: '0', floatShortfall: '0', pendingTailShortfall: '0', insuranceFundShortfall: '0',
+  }
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null
   private stopped = false
   private inFlightCycle: Promise<void> | null = null
 
+  private readonly provider: BotMarketsProvider
+  private readonly config: BotSharedConfig
+
+  // Single-market form (legacy / tests): one static market, flat /health.
+  constructor(
+    publicClient: IPublicClient,
+    walletClient: IWalletClient,
+    holderSource: IHolderSource,
+    seller: IYesSeller,
+    config: BotConfig,
+  )
+  // Multi-market form: markets come from a provider; /health adds registry + markets.
+  constructor(
+    publicClient: IPublicClient,
+    walletClient: IWalletClient,
+    provider: BotMarketsProvider,
+    config: BotSharedConfig,
+  )
   constructor(
     private readonly publicClient: IPublicClient,
     private readonly walletClient: IWalletClient,
-    private readonly holderSource: IHolderSource,
-    private readonly seller: IYesSeller,
-    private readonly config: BotConfig,
-  ) {}
+    arg3: IHolderSource | BotMarketsProvider,
+    arg4: IYesSeller | BotSharedConfig,
+    arg5?: BotConfig,
+  ) {
+    if (arg5 !== undefined) {
+      const cfg = arg5
+      const market: BotMarket = {
+        slug:                     'mstr',
+        creditMarketAddress:      cfg.creditMarketAddress,
+        yesTokenAddress:          cfg.yesTokenAddress,
+        liquidationEngineAddress: cfg.liquidationEngineAddress,
+        clobSettlementAddress:    cfg.clobSettlementAddress,
+        holderSource:             arg3 as IHolderSource,
+        seller:                   arg4 as IYesSeller,
+      }
+      this.provider = { markets: () => [market] }
+      this.config = cfg
+    } else {
+      this.provider = arg3 as BotMarketsProvider
+      this.config = arg4 as BotSharedConfig
+    }
+  }
 
   start(): void {
     const interval = this.config.pollIntervalMs ?? 30_000
@@ -410,100 +568,223 @@ export class LiquidatorBot {
     return account
   }
 
-  private bumpSkip(reason: SkipReason): void {
+  private mstate(slug: string): MarketBotState {
+    let s = this.marketStates.get(slug)
+    if (!s) {
+      s = { lastCycleAt: null, claims: 0, tailClaims: 0, skippedByReason: {}, lastError: null, yesBalance: null, motionPending: null, pendingClaims: 0, pendingTailShortfall: 0n }
+      this.marketStates.set(slug, s)
+    }
+    return s
+  }
+
+  private bumpSkip(reason: SkipReason, slug: string): void {
     this.state.skippedByReason[reason] = (this.state.skippedByReason[reason] ?? 0) + 1
+    const ms = this.mstate(slug)
+    ms.skippedByReason[reason] = (ms.skippedByReason[reason] ?? 0) + 1
+  }
+
+  private setError(slug: string, msg: string): void {
+    this.state.lastError = msg
+    this.mstate(slug).lastError = msg
+  }
+
+  private errMsg(err: unknown): string {
+    return err instanceof Error ? err.message : String(err)
   }
 
   async runCycle(): Promise<void> {
     const ts = new Date().toISOString()
+    const markets = this.provider.markets()
 
-    try {
-      await this.holderSource.refresh()
-    } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — holder source refresh failed (continuing with known holders):`, err)
-    }
-    const holders = this.holderSource.holders()
+    // ── 1. per-market state ────────────────────────────────────────────────
+    const live: Array<{ market: BotMarket; motionPending: boolean; currentMark: bigint }> = []
+    for (const market of markets) {
+      try {
+        await market.holderSource.refresh()
+      } catch (err) {
+        console.error(`[liquidator-bot] ${ts} — holder source refresh failed for ${market.slug} (continuing with known holders):`, err)
+      }
 
-    let motionPending: boolean
-    let currentMark: bigint
-    try {
-      ;[motionPending, currentMark] = await Promise.all([
-        this.publicClient.readContract({
-          address:      this.config.creditMarketAddress,
-          abi:          CREDIT_MARKET_ABI,
-          functionName: 'motionPending',
-        }) as Promise<boolean>,
-        this.publicClient.readContract({
-          address:      this.config.creditMarketAddress,
-          abi:          CREDIT_MARKET_ABI,
-          functionName: 'currentMark',
-        }) as Promise<bigint>,
-      ])
-    } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — failed to read market state:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      this.state.lastCycleAt = ts
-      return
-    }
-
-    if (motionPending) {
-      console.log(`[liquidator-bot] ${ts} — motion pending — skipping all claims this cycle`)
-      this.bumpSkip('motionPending')
-    } else {
-      // Claims are sequential — one wallet, one nonce, in holder-list order.
-      for (const holder of holders) {
-        await this.tryClaim(holder, currentMark, ts)
+      try {
+        const [motionPending, currentMark] = await Promise.all([
+          this.publicClient.readContract({
+            address:      market.creditMarketAddress,
+            abi:          CREDIT_MARKET_ABI,
+            functionName: 'motionPending',
+          }) as Promise<boolean>,
+          this.publicClient.readContract({
+            address:      market.creditMarketAddress,
+            abi:          CREDIT_MARKET_ABI,
+            functionName: 'currentMark',
+          }) as Promise<bigint>,
+        ])
+        this.mstate(market.slug).motionPending = motionPending
+        live.push({ market, motionPending, currentMark })
+      } catch (err) {
+        console.error(`[liquidator-bot] ${ts} — failed to read market state for ${market.slug}:`, err)
+        this.setError(market.slug, this.errMsg(err))
       }
     }
 
-    await this.maybeSell(currentMark, ts)
+    // ── 2. discovery across every non-frozen market ────────────────────────
+    const pending: PendingClaim[] = []
+    for (const { market, motionPending, currentMark } of live) {
+      if (motionPending) {
+        console.log(`[liquidator-bot] ${ts} — ${market.slug}: motion pending — skipping all claims this cycle`)
+        this.bumpSkip('motionPending', market.slug)
+        continue
+      }
+      for (const holder of market.holderSource.holders()) {
+        const p = await this.discover(market, holder, currentMark, ts)
+        if (p) pending.push(p)
+      }
+    }
+    for (const market of markets) {
+      const mine = pending.filter(p => p.market.slug === market.slug)
+      const ms = this.mstate(market.slug)
+      ms.pendingClaims = mine.length
+      ms.pendingTailShortfall = mine.reduce((a, p) => a + p.tailShortfall, 0n)
+    }
+
+    // ── 3. shared-InsuranceFund alert: SUM of concurrent tail shortfalls ───
+    await this.checkInsuranceFund(pending, ts)
+
+    // ── 4. claims — sequential (one wallet, one nonce stream) ──────────────
+    for (const p of pending) {
+      p.claimed = await this.tryClaim(p, ts)
+    }
+
+    // End-of-cycle float check against the LARGEST single still-pending claim.
+    const stillPending = pending.filter(p => !p.claimed)
+    const largest = stillPending.reduce((m, p) => (p.costBound > m ? p.costBound : m), 0n)
+    const floatShort = this.state.usdcBalance !== null
+      ? floatShortfall(this.state.usdcBalance, stillPending.map(p => p.costBound))
+      : 0n
+    if (floatShort > 0n) {
+      console.error(
+        `[liquidator-bot] ${ts} — ALERT USDC float short: largest single pending claim needs ${largest} ` +
+        `(max across ${new Set(stillPending.map(p => p.market.slug)).size} market(s), not the sum), ` +
+        `bot has ${this.state.usdcBalance}`,
+      )
+    }
+    this.alerts.largestPendingClaim = largest.toString()
+    this.alerts.floatShortfall = floatShort.toString()
+
+    // ── 5. sell whatever YES the bot ends up holding, per market ───────────
+    let totalYes: bigint | null = null
+    for (const { market, currentMark } of live) {
+      const y = await this.maybeSell(market, currentMark, ts)
+      if (y !== null) totalYes = (totalYes ?? 0n) + y
+    }
+    if (totalYes !== null) this.state.yesBalance = totalYes
 
     this.state.lastCycleAt = ts
+    for (const { market } of live) this.mstate(market.slug).lastCycleAt = ts
   }
 
-  // ─── claim one holder ─────────────────────────────────────────────────────
+  // ─── discovery of one holder ──────────────────────────────────────────────
 
-  private async tryClaim(holder: Address, currentMark: bigint, ts: string): Promise<void> {
+  private async discover(market: BotMarket, holder: Address, currentMark: bigint, ts: string): Promise<PendingClaim | null> {
     let isClaimable: boolean
     try {
       isClaimable = await this.publicClient.readContract({
-        address:      this.config.creditMarketAddress,
+        address:      market.creditMarketAddress,
         abi:          CREDIT_MARKET_ABI,
         functionName: 'claimable',
         args:         [holder],
       }) as boolean
     } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — claimable() read failed for ${holder}:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      this.bumpSkip('other')
-      return
+      console.error(`[liquidator-bot] ${ts} — ${market.slug}: claimable() read failed for ${holder}:`, err)
+      this.setError(market.slug, this.errMsg(err))
+      this.bumpSkip('other', market.slug)
+      return null
     }
-    if (!isClaimable) return
+    if (!isClaimable) return null
 
     let Q: bigint
     try {
       Q = await this.publicClient.readContract({
-        address:      this.config.yesTokenAddress,
+        address:      market.yesTokenAddress,
         abi:          ERC20_ABI,
         functionName: 'balanceOf',
         args:         [holder],
       }) as bigint
     } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — YES balanceOf(${holder}) read failed:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      this.bumpSkip('other')
-      return
+      console.error(`[liquidator-bot] ${ts} — ${market.slug}: YES balanceOf(${holder}) read failed:`, err)
+      this.setError(market.slug, this.errMsg(err))
+      this.bumpSkip('other', market.slug)
+      return null
     }
     if (Q === 0n) {
-      this.bumpSkip('zeroBalance')
-      return
+      this.bumpSkip('zeroBalance', market.slug)
+      return null
     }
 
     // Upper-bound cost: P ≤ tokenValue = Q × m / 1e18 always (normal case
-    // P = fFrozenTotal ≤ tokenValue by the 3% buffer; tail case P = tokenValue
+    // P = owed ≤ tokenValue by the 3% buffer; tail case P = tokenValue
     // exactly) — see root CLAUDE.md "Liquidation math".
     const costBound = (Q * currentMark) / WAD
 
+    // Best-effort tail-shortfall estimate (owed − m×Q) for the shared-InsuranceFund
+    // alert. A failed read (e.g. a contract without owed()) just means "unknown" —
+    // it never blocks or counts against the claim.
+    let tailShortfall = 0n
+    try {
+      const owed = await this.publicClient.readContract({
+        address:      market.creditMarketAddress,
+        abi:          CREDIT_MARKET_ABI,
+        functionName: 'owed',
+        args:         [holder],
+      }) as bigint
+      if (typeof owed === 'bigint' && owed > costBound) tailShortfall = owed - costBound
+    } catch {
+      tailShortfall = 0n
+    }
+
+    return { market, holder, Q, currentMark, costBound, tailShortfall, claimed: false }
+  }
+
+  private async checkInsuranceFund(pending: PendingClaim[], ts: string): Promise<void> {
+    const shortfalls = pending.map(p => p.tailShortfall).filter(s => s > 0n)
+    const total = shortfalls.reduce((a, b) => a + b, 0n)
+    this.alerts.pendingTailShortfall = total.toString()
+    this.alerts.insuranceFundShortfall = '0'
+    if (total === 0n) return
+
+    let fundBalance: bigint
+    try {
+      fundBalance = await this.publicClient.readContract({
+        address:      this.config.usdcAddress,
+        abi:          ERC20_ABI,
+        functionName: 'balanceOf',
+        args:         [this.config.insuranceFundAddress],
+      }) as bigint
+    } catch (err) {
+      console.error(`[liquidator-bot] ${ts} — InsuranceFund balance read failed (tail-shortfall check skipped):`, err)
+      return
+    }
+    const short = insuranceFundShortfall(fundBalance, shortfalls)
+    this.alerts.insuranceFundShortfall = short.toString()
+    const slugs = [...new Set(pending.filter(p => p.tailShortfall > 0n).map(p => p.market.slug))]
+    if (short > 0n) {
+      console.error(
+        `[liquidator-bot] ${ts} — ALERT shared InsuranceFund short: concurrent tail-case shortfalls total ${total} ` +
+        `across ${slugs.join(', ')} but the fund holds ${fundBalance} (short by ${short})`,
+      )
+    } else {
+      console.error(
+        `[liquidator-bot] ${ts} — ALERT tail-case claims pending in ${slugs.join(', ')}: InsuranceFund will top up ` +
+        `${total} total (fund holds ${fundBalance})`,
+      )
+    }
+  }
+
+  // ─── claim one holder ─────────────────────────────────────────────────────
+
+  /** Returns true iff a claim() tx for this holder succeeded. */
+  private async tryClaim(p: PendingClaim, ts: string): Promise<boolean> {
+    const { market, holder, Q, costBound } = p
+    const slug = market.slug
     const account = this.requireAccount()
 
     let usdcBalance: bigint
@@ -516,53 +797,53 @@ export class LiquidatorBot {
       }) as bigint
     } catch (err) {
       console.error(`[liquidator-bot] ${ts} — USDC balanceOf(bot) read failed:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      this.bumpSkip('other')
-      return
+      this.setError(slug, this.errMsg(err))
+      this.bumpSkip('other', slug)
+      return false
     }
     this.state.usdcBalance = usdcBalance
 
     if (usdcBalance < costBound) {
       console.error(
-        `[liquidator-bot] ${ts} — ALERT insufficient USDC float: holder=${holder} Q=${Q} ` +
+        `[liquidator-bot] ${ts} — ALERT insufficient USDC float: market=${slug} holder=${holder} Q=${Q} ` +
         `costBound=${costBound} usdcBalance=${usdcBalance} — skipping claim`,
       )
-      this.bumpSkip('insufficientFloat')
-      return
+      this.bumpSkip('insufficientFloat', slug)
+      return false
     }
 
-    // Ensure USDC allowance to LiquidationEngine covers this claim; approve
-    // max once (subsequent claims then never need to re-approve).
+    // Ensure USDC allowance to THIS market's LiquidationEngine covers the claim;
+    // approve max once per engine (subsequent claims then never need to re-approve).
     try {
       const allowance = await this.publicClient.readContract({
         address:      this.config.usdcAddress,
         abi:          ERC20_ABI,
         functionName: 'allowance',
-        args:         [account, this.config.liquidationEngineAddress],
+        args:         [account, market.liquidationEngineAddress],
       }) as bigint
       if (allowance < costBound) {
-        await this.approve(this.config.usdcAddress, this.config.liquidationEngineAddress, maxUint256, ts)
+        await this.approve(this.config.usdcAddress, market.liquidationEngineAddress, maxUint256, ts)
       }
     } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — USDC allowance check/approve failed for ${holder}:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      this.bumpSkip('other')
-      return
+      console.error(`[liquidator-bot] ${ts} — USDC allowance check/approve failed for ${holder} (${slug}):`, err)
+      this.setError(slug, this.errMsg(err))
+      this.bumpSkip('other', slug)
+      return false
     }
 
     // ── simulate first ────────────────────────────────────────────────────
     let gasEstimate: bigint
     try {
       gasEstimate = await this.publicClient.estimateContractGas({
-        address:      this.config.liquidationEngineAddress,
+        address:      market.liquidationEngineAddress,
         abi:          LIQUIDATION_ENGINE_ABI,
         functionName: 'claim',
         args:         [holder],
         account,
       })
     } catch (err) {
-      this.handleClaimSimRevert(err, holder, ts)
-      return
+      this.handleClaimSimRevert(err, holder, slug, ts)
+      return false
     }
 
     // Snapshot the InsuranceFund's USDC balance right before sending — used
@@ -586,20 +867,20 @@ export class LiquidatorBot {
     let txHash: Hash
     try {
       txHash = await this.walletClient.writeContract({
-        address:      this.config.liquidationEngineAddress,
+        address:      market.liquidationEngineAddress,
         abi:          LIQUIDATION_ENGINE_ABI,
         functionName: 'claim',
         args:         [holder],
         gas,
       })
     } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — claim tx submission failed for ${holder}:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      this.bumpSkip('other')
-      return
+      console.error(`[liquidator-bot] ${ts} — claim tx submission failed for ${holder} (${slug}):`, err)
+      this.setError(slug, this.errMsg(err))
+      this.bumpSkip('other', slug)
+      return false
     }
 
-    console.log(`[liquidator-bot] ${ts} — submitted claim(${holder}) ${txHash}`)
+    console.log(`[liquidator-bot] ${ts} — submitted claim(${holder}) on ${slug}: ${txHash}`)
 
     let receipt: { status: 'success' | 'reverted'; logs: readonly LogLike[] }
     try {
@@ -608,31 +889,34 @@ export class LiquidatorBot {
       // Broadcast succeeded but the outcome is genuinely unknown — do NOT bump
       // counters (mirrors the other keepers' receipt-wait-failed handling).
       console.error(`[liquidator-bot] ${ts} — receipt wait failed for ${txHash}:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      return
+      this.setError(slug, this.errMsg(err))
+      return false
     }
 
     if (receipt.status !== 'success') {
-      console.error(`[liquidator-bot] ${ts} — claim(${holder}) REVERTED on-chain: ${txHash}`)
-      this.bumpSkip('other')
-      return
+      console.error(`[liquidator-bot] ${ts} — claim(${holder}) on ${slug} REVERTED on-chain: ${txHash}`)
+      this.bumpSkip('other', slug)
+      return false
     }
 
-    const parsed = parseLiquidatedEvent(receipt.logs, this.config.liquidationEngineAddress)
+    const ms = this.mstate(slug)
+    const parsed = parseLiquidatedEvent(receipt.logs, market.liquidationEngineAddress)
     if (!parsed) {
       console.error(
-        `[liquidator-bot] ${ts} — claim(${holder}) succeeded (tx=${txHash}) but no Liquidated ` +
+        `[liquidator-bot] ${ts} — claim(${holder}) on ${slug} succeeded (tx=${txHash}) but no Liquidated ` +
         `event could be parsed from the receipt`,
       )
       this.state.claims++
-      return
+      ms.claims++
+      return true
     }
 
     this.state.claims++
-    if (parsed.tailCase) this.state.tailClaims++
+    ms.claims++
+    if (parsed.tailCase) { this.state.tailClaims++; ms.tailClaims++ }
 
     console.log(
-      `[liquidator-bot] ${ts} — claimed ${holder} Q=${parsed.yesAmount} P=${parsed.pricePaid} ` +
+      `[liquidator-bot] ${ts} — claimed ${holder} on ${slug} Q=${parsed.yesAmount} P=${parsed.pricePaid} ` +
       `tail=${parsed.tailCase}`,
     )
 
@@ -653,55 +937,56 @@ export class LiquidatorBot {
       }
       console.error(
         `[liquidator-bot] ${ts} — ALERT tail case — InsuranceFund covered ${shortfallDesc} ` +
-        `USDC to make NO whole (holder=${holder})`,
+        `USDC to make NO whole (market=${slug} holder=${holder})`,
       )
     }
+    return true
   }
 
-  private handleClaimSimRevert(err: unknown, holder: Address, ts: string): void {
+  private handleClaimSimRevert(err: unknown, holder: Address, slug: string, ts: string): void {
     const decoded = decodeClaimRevert(err)
     switch (decoded.kind) {
       case 'MotionPending':
-        console.log(`[liquidator-bot] ${ts} — motion pending (surfaced at simulate) for ${holder} — skipping`)
-        this.bumpSkip('motionPending')
+        console.log(`[liquidator-bot] ${ts} — motion pending (surfaced at simulate) for ${holder} (${slug}) — skipping`)
+        this.bumpSkip('motionPending', slug)
         break
       case 'NotClaimable':
         // Normal — someone else claimed first between our claimable() read
         // and simulate. Permissionless, first-come claiming (invariant 6):
         // this is expected competition, not an error.
-        console.log(`[liquidator-bot] ${ts} — ${holder} no longer claimable (claimed by someone else) — skipping`)
-        this.bumpSkip('notClaimable')
+        console.log(`[liquidator-bot] ${ts} — ${holder} no longer claimable on ${slug} (claimed by someone else) — skipping`)
+        this.bumpSkip('notClaimable', slug)
         break
       case 'PositionFrozen':
         console.error(
-          `[liquidator-bot] ${ts} — ALERT PositionFrozen simulating claim(${holder}) — the bot's own ` +
+          `[liquidator-bot] ${ts} — ALERT PositionFrozen simulating claim(${holder}) on ${slug} — the bot's own ` +
           `wallet appears to be a flagged/claimable position; cure it before further claims can proceed`,
         )
-        this.state.lastError = `bot position frozen (claim(${holder}) simulate)`
-        this.bumpSkip('botFrozen')
+        this.setError(slug, `bot position frozen (claim(${holder}) simulate)`)
+        this.bumpSkip('botFrozen', slug)
         break
       case 'ERC20InsufficientBalance':
         console.error(
           `[liquidator-bot] ${ts} — ALERT InsuranceFund cannot cover the tail-case shortfall for ` +
-          `${holder}: sender=${decoded.sender} balance=${decoded.balance} needed=${decoded.needed} — ` +
+          `${holder} (${slug}): sender=${decoded.sender} balance=${decoded.balance} needed=${decoded.needed} — ` +
           `position stays stuck until the fund is topped up`,
         )
-        this.state.lastError = `InsuranceFund insufficient balance (claim(${holder}))`
-        this.bumpSkip('insuranceFundShortfall')
+        this.setError(slug, `InsuranceFund insufficient balance (claim(${holder}))`)
+        this.bumpSkip('insuranceFundShortfall', slug)
         break
       case 'ERC20InsufficientAllowance':
         console.error(
-          `[liquidator-bot] ${ts} — ALERT ERC20InsufficientAllowance simulating claim(${holder}): ` +
+          `[liquidator-bot] ${ts} — ALERT ERC20InsufficientAllowance simulating claim(${holder}) on ${slug}: ` +
           `spender=${decoded.spender} allowance=${decoded.allowance} needed=${decoded.needed} — ` +
           `likely the InsuranceFund → CreditMarket leg is misconfigured`,
         )
-        this.state.lastError = `InsuranceFund insufficient allowance (claim(${holder}))`
-        this.bumpSkip('insuranceFundShortfall')
+        this.setError(slug, `InsuranceFund insufficient allowance (claim(${holder}))`)
+        this.bumpSkip('insuranceFundShortfall', slug)
         break
       default:
-        console.error(`[liquidator-bot] ${ts} — claim(${holder}) simulate failed (undecoded):`, err)
-        this.state.lastError = err instanceof Error ? err.message : String(err)
-        this.bumpSkip('other')
+        console.error(`[liquidator-bot] ${ts} — claim(${holder}) on ${slug} simulate failed (undecoded):`, err)
+        this.setError(slug, this.errMsg(err))
+        this.bumpSkip('other', slug)
     }
   }
 
@@ -731,69 +1016,81 @@ export class LiquidatorBot {
     console.log(`[liquidator-bot] ${ts} — approved ${tokenAddress} → ${spender} (tx=${txHash})`)
   }
 
-  // ─── sell whatever YES the bot ends the claim loop holding ────────────────
+  // ─── sell whatever YES the bot ends the claim loop holding (per market) ────
 
-  private async maybeSell(currentMark: bigint, ts: string): Promise<void> {
-    if (this.config.autoSell === false) return
+  /** Returns the bot's YES balance in this market (null if unknown / selling off). */
+  private async maybeSell(market: BotMarket, currentMark: bigint, ts: string): Promise<bigint | null> {
+    if (this.config.autoSell === false) return null
 
     const account = this.walletClient.account?.address
-    if (!account) return
+    if (!account) return null
+    const slug = market.slug
 
     let yesBalance: bigint
     try {
       yesBalance = await this.publicClient.readContract({
-        address:      this.config.yesTokenAddress,
+        address:      market.yesTokenAddress,
         abi:          ERC20_ABI,
         functionName: 'balanceOf',
         args:         [account],
       }) as bigint
     } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — YES balanceOf(bot) read failed before sell step:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      return
+      console.error(`[liquidator-bot] ${ts} — YES balanceOf(bot) read failed before sell step (${slug}):`, err)
+      this.setError(slug, this.errMsg(err))
+      return null
     }
-    this.state.yesBalance = yesBalance
+    this.mstate(slug).yesBalance = yesBalance
 
-    if (yesBalance === 0n) return
+    if (yesBalance === 0n) return yesBalance
 
     try {
       const allowance = await this.publicClient.readContract({
-        address:      this.config.yesTokenAddress,
+        address:      market.yesTokenAddress,
         abi:          ERC20_ABI,
         functionName: 'allowance',
-        args:         [account, this.config.clobSettlementAddress],
+        args:         [account, market.clobSettlementAddress],
       }) as bigint
       if (allowance < yesBalance) {
-        await this.approve(this.config.yesTokenAddress, this.config.clobSettlementAddress, maxUint256, ts)
+        await this.approve(market.yesTokenAddress, market.clobSettlementAddress, maxUint256, ts)
       }
     } catch (err) {
-      console.error(`[liquidator-bot] ${ts} — YES allowance check/approve to CLOBSettlement failed:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      return
+      console.error(`[liquidator-bot] ${ts} — YES allowance check/approve to CLOBSettlement failed (${slug}):`, err)
+      this.setError(slug, this.errMsg(err))
+      return yesBalance
     }
 
     let result: SellResult
     try {
-      result = await this.seller.sell({ yesAmount: yesBalance, markWad: currentMark })
+      // `mark` here is THIS market's currentMark, so SELL_MAX_DISCOUNT_BPS is per market.
+      result = await market.seller.sell({ yesAmount: yesBalance, markWad: currentMark })
     } catch (err) {
       // IYesSeller.sell() is documented "Never throws" — defensive only.
-      console.error(`[liquidator-bot] ${ts} — seller.sell() threw unexpectedly:`, err)
-      this.state.lastError = err instanceof Error ? err.message : String(err)
-      return
+      console.error(`[liquidator-bot] ${ts} — seller.sell() threw unexpectedly (${slug}):`, err)
+      this.setError(slug, this.errMsg(err))
+      return yesBalance
     }
     console.log(
-      `[liquidator-bot] ${ts} — sell result: action=${result.action}` +
+      `[liquidator-bot] ${ts} — ${slug} sell result: action=${result.action}` +
       (result.orderId  !== undefined ? ` orderId=${result.orderId}` : '') +
       (result.priceWad !== undefined ? ` priceWad=${result.priceWad}` : '') +
       (result.amount   !== undefined ? ` amount=${result.amount}` : '') +
       (result.reason   !== undefined ? ` reason=${result.reason}` : ''),
     )
+    return yesBalance
   }
 
   // ─── health ────────────────────────────────────────────────────────────────
 
+  private aggregateHolderIndex(): HolderIndexStatus {
+    const by: Record<string, HolderIndexStatus> = {}
+    for (const m of this.provider.markets()) by[m.slug] = m.holderSource.status()
+    const prefix = this.provider.registryStatus?.().mode === 'registry'
+    // Legacy single-market form: exactly the one market's status, as before.
+    return aggregateHolderStatus(by, { prefixErrors: prefix })
+  }
+
   getHealth(): BotHealth {
-    return {
+    const base: BotHealth = {
       status:          'ok',
       lastCycleAt:     this.state.lastCycleAt,
       claims:          this.state.claims,
@@ -802,8 +1099,31 @@ export class LiquidatorBot {
       lastError:       this.state.lastError,
       usdcBalance:     this.state.usdcBalance?.toString() ?? null,
       yesBalance:      this.state.yesBalance?.toString() ?? null,
-      holderIndex:     this.holderSource.status(),
+      holderIndex:     this.aggregateHolderIndex(),
     }
+    // Multi-market additions — only when a registry-aware provider is wired.
+    if (this.provider.registryStatus) {
+      base.registry = this.provider.registryStatus()
+      base.alerts = { ...this.alerts }
+      const markets: Record<string, BotMarketHealth> = {}
+      for (const m of this.provider.markets()) {
+        const ms = this.mstate(m.slug)
+        markets[m.slug] = {
+          lastCycleAt:          ms.lastCycleAt,
+          claims:               ms.claims,
+          tailClaims:           ms.tailClaims,
+          skippedByReason:      { ...ms.skippedByReason },
+          lastError:            ms.lastError,
+          yesBalance:           ms.yesBalance?.toString() ?? null,
+          motionPending:        ms.motionPending,
+          pendingClaims:        ms.pendingClaims,
+          pendingTailShortfall: ms.pendingTailShortfall.toString(),
+          holderIndex:          m.holderSource.status(),
+        }
+      }
+      base.markets = markets
+    }
+    return base
   }
 }
 
@@ -907,14 +1227,43 @@ export function parsePrivateKey(raw: string, envName: string): `0x${string}` {
 
 // ─── Production entry point ───────────────────────────────────────────────────
 
-function main(): void {
+/** Production provider: every market in the directory, with lazily-built holder index + seller. */
+export class DirectoryBotMarkets implements BotMarketsProvider {
+  private readonly cache = new Map<string, BotMarket>()
+
+  constructor(
+    private readonly directory: Pick<MarketDirectory, 'list' | 'status'>,
+    private readonly makeMarket: (m: MarketInfo) => BotMarket,
+  ) {}
+
+  markets(): BotMarket[] {
+    return this.directory.list().map(m => {
+      let bm = this.cache.get(m.slug)
+      if (!bm) {
+        bm = this.makeMarket(m)
+        this.cache.set(m.slug, bm)
+      }
+      return bm
+    })
+  }
+
+  registryStatus(): MarketDirectoryStatus {
+    return this.directory.status()
+  }
+}
+
+async function main(): Promise<void> {
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
 
   const privateKey = process.env.LIQUIDATOR_PRIVATE_KEY
   if (!privateKey) throw new Error('LIQUIDATOR_PRIVATE_KEY env var is required')
 
-  const addrs = resolveAddresses()
+  const registryMode = !!process.env.MARKET_REGISTRY_ADDRESS?.trim()
+  // Legacy mode keeps today's requirement: every address resolves (env, or the
+  // local deployments file). Registry mode only needs USDC + InsuranceFund, which
+  // fall back to the registry's own usdc()/insuranceFund().
+  const legacyAddrs = registryMode ? null : resolveAddresses()
 
   const chainId   = parseInt(process.env.CHAIN_ID ?? '84532')
   const transport = viemHttp(rpcUrl)
@@ -932,38 +1281,74 @@ function main(): void {
   const publicClient = createPublicClient({ chain, transport })
   const walletClient = createWalletClient({ account, chain, transport })
 
-  const holderSource = createHolderIndex(
-    publicClient as unknown as ILogClient,
-    addrs.yesTokenAddress as Address,
-    chainId,
+  const directory = buildDirectory({
+    client: publicClient as unknown as IRegistryClient,
+    legacy: legacyAddrs ? {
+      id: 0, slug: 'mstr', entityName: 'MicroStrategy', entityType: 'corporate',
+      creditMarket:      legacyAddrs.creditMarketAddress as Address,
+      yesToken:          legacyAddrs.yesTokenAddress as Address,
+      noToken:           '0x0000000000000000000000000000000000000000',
+      clobSettlement:    legacyAddrs.clobSettlementAddress as Address,
+      oracleRouter:      '0x0000000000000000000000000000000000000000',
+      liquidationEngine: legacyAddrs.liquidationEngineAddress as Address,
+      active: true, registeredAt: 0n,
+      startBlock: /^\d+$/.test(process.env.HOLDER_INDEX_FROM_BLOCK?.trim() ?? '') ? BigInt(process.env.HOLDER_INDEX_FROM_BLOCK!.trim()) : 0n,
+    } : undefined,
+  })
+  await directory.start()
+
+  // Shared addresses: env wins (legacy: resolveAddresses), registry mode falls back to the registry.
+  let usdcAddress: Address
+  let insuranceFundAddress: Address
+  if (legacyAddrs) {
+    usdcAddress = legacyAddrs.usdcAddress as Address
+    insuranceFundAddress = legacyAddrs.insuranceFundAddress as Address
+  } else {
+    const shared = await readRegistryShared(
+      publicClient as unknown as Parameters<typeof readRegistryShared>[0],
+      process.env.MARKET_REGISTRY_ADDRESS!.trim() as Address,
+    )
+    usdcAddress = (process.env.USDC_ADDRESS || shared.usdc) as Address
+    insuranceFundAddress = (process.env.INSURANCE_FUND_ADDRESS || shared.insuranceFund) as Address
+  }
+
+  const indexes = new HolderIndexManager(market =>
+    createMarketHolderIndex(publicClient as unknown as ILogClient, market, chainId, directory.mode),
   )
 
   const autoSell = (process.env.AUTO_SELL ?? 'true').trim().toLowerCase() !== 'false'
+  const orderBookUrl = process.env.ORDER_BOOK_URL ?? 'http://localhost:3001'
 
-  const seller = new ClobYesSeller({
-    orderBookUrl:           process.env.ORDER_BOOK_URL ?? 'http://localhost:3001',
-    chainId,
-    clobSettlementAddress:  addrs.clobSettlementAddress as Address,
-    yesTokenAddress:        addrs.yesTokenAddress as Address,
-    usdcAddress:            addrs.usdcAddress as Address,
-    account,
-    maxDiscountBps: process.env.SELL_MAX_DISCOUNT_BPS ? parseInt(process.env.SELL_MAX_DISCOUNT_BPS) : undefined,
-    orderTtlSec:    process.env.SELL_ORDER_TTL_SEC ? parseInt(process.env.SELL_ORDER_TTL_SEC) : undefined,
-  })
+  const provider = new DirectoryBotMarkets(directory, (m): BotMarket => ({
+    slug:                     m.slug,
+    creditMarketAddress:      m.creditMarket as Address,
+    yesTokenAddress:          m.yesToken as Address,
+    liquidationEngineAddress: m.liquidationEngine as Address,
+    clobSettlementAddress:    m.clobSettlement as Address,
+    holderSource:             indexes.get(m),
+    seller: new ClobYesSeller({
+      orderBookUrl,
+      chainId,
+      clobSettlementAddress:  m.clobSettlement as Address,
+      yesTokenAddress:        m.yesToken as Address,
+      usdcAddress,
+      account,
+      // Registry mode: ask for THIS market's book. Legacy mode sends no ?market=
+      // (an old order-book-server wouldn't know it; "no param" means mstr anyway).
+      marketSlug:     directory.mode === 'registry' ? m.slug : undefined,
+      maxDiscountBps: process.env.SELL_MAX_DISCOUNT_BPS ? parseInt(process.env.SELL_MAX_DISCOUNT_BPS) : undefined,
+      orderTtlSec:    process.env.SELL_ORDER_TTL_SEC ? parseInt(process.env.SELL_ORDER_TTL_SEC) : undefined,
+    }),
+  }))
 
   const bot = new LiquidatorBot(
     publicClient as unknown as IPublicClient,
     walletClient as unknown as IWalletClient,
-    holderSource,
-    seller,
+    provider,
     {
-      creditMarketAddress:      addrs.creditMarketAddress as Address,
-      yesTokenAddress:          addrs.yesTokenAddress as Address,
-      usdcAddress:              addrs.usdcAddress as Address,
-      liquidationEngineAddress: addrs.liquidationEngineAddress as Address,
-      insuranceFundAddress:     addrs.insuranceFundAddress as Address,
-      clobSettlementAddress:    addrs.clobSettlementAddress as Address,
-      pollIntervalMs:           parseInt(process.env.POLL_INTERVAL_MS ?? '30000'),
+      usdcAddress,
+      insuranceFundAddress,
+      pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS ?? '30000'),
       autoSell,
     },
   )
@@ -971,20 +1356,25 @@ function main(): void {
   bot.start()
   const server = startHealthServer(bot, parseInt(process.env.HEALTH_PORT ?? '3004'))
 
-  console.log('[liquidator-bot] started')
+  console.log(`[liquidator-bot] started (${directory.mode} mode, ${directory.list().length} market(s))`)
 
   // Graceful shutdown: every Railway redeploy sends SIGTERM to this process
   // (it's PID 1 under the exec-form CMD `node -r ts-node/register`). Order:
   // stop scheduling and let an in-flight cycle finish (bot.stop() — this may
   // include waiting for a submitted claim()/approve() tx receipt), THEN close
-  // the health server and release the holder index's Redis connection.
+  // the health server, stop the registry refresh and release the holder
+  // indexes' Redis connections.
   installShutdownHandlers('liquidator-bot', [
     { name: 'liquidator-bot', run: () => bot.stop() },
     { name: 'http-server', run: () => closeHttpServer(server) },
-    { name: 'holder-index', run: () => holderSource.close() },
+    { name: 'registry', run: async () => directory.stop() },
+    { name: 'holder-index', run: () => indexes.close() },
   ])
 }
 
 if (require.main === module) {
-  main()
+  main().catch(err => {
+    console.error('[liquidator-bot] fatal:', err)
+    process.exit(1)
+  })
 }

@@ -29,8 +29,11 @@
 #   3. frontend /                 -> must be HTTP 200
 #   4. funding-keeper liveness, indirectly, via chain state: funding-keeper
 #      has no public URL (Railway-internal), so instead we read
-#      lastFundingTime() and epochLength() off CreditMarket on Base Sepolia
-#      via a raw JSON-RPC eth_call and assert the epoch hasn't gone stale.
+#      lastFundingTime() and epochLength() off EVERY active market's CreditMarket
+#      on Base Sepolia via a raw JSON-RPC eth_call and assert each epoch hasn't
+#      gone stale. The market list comes from the liquidation-keeper's /health
+#      `markets` field (slug -> {creditMarket, active}); if it's absent (registry
+#      not deployed / older keeper) only the MSTR CreditMarket below is checked.
 #      NOTE: trades and setMark() also call accrueFunding() internally, so
 #      a "fresh" lastFundingTime is not proof the keeper itself is running
 #      — only a lower bound on funding-accrual health in general. A stale
@@ -148,53 +151,83 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Which CreditMarkets to check: every ACTIVE market the liquidation-keeper
+          # reports in /health `.markets` (slug -> {creditMarket, active, ...}; it
+          # mirrors the on-chain MarketRegistry). If that field is missing — registry
+          # not deployed yet, an older keeper, or the keeper is unreachable (its own
+          # check reports that) — fall back to the single MSTR market above.
+          markets="mstr $CREDIT_MARKET_ADDRESS"
+          if curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+               -o /tmp/lk_markets.json "$LIQUIDATION_KEEPER_HEALTH_URL" \
+             && jq -e '(.markets // {}) | length > 0' /tmp/lk_markets.json >/dev/null 2>&1; then
+            markets=$(jq -r '.markets | to_entries[] | select(.value.active != false and (.value.creditMarket // "") != "") | "\(.key) \(.value.creditMarket)"' /tmp/lk_markets.json)
+            echo "Markets from liquidation-keeper /health:"
+          else
+            echo "No .markets in liquidation-keeper /health — falling back to the MSTR CreditMarket only"
+          fi
+          echo "$markets"
+
           call_eth() {
-            local selector="$1"
+            local to="$1" selector="$2"
             curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
               -X POST "$BASE_SEPOLIA_RPC_URL" \
               -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"$CREDIT_MARKET_ADDRESS\",\"data\":\"$selector\"},\"latest\"]}"
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"$to\",\"data\":\"$selector\"},\"latest\"]}"
           }
 
-          echo "Calling lastFundingTime() ($SELECTOR_LAST_FUNDING_TIME) on $CREDIT_MARKET_ADDRESS"
-          lft_response=$(call_eth "$SELECTOR_LAST_FUNDING_TIME")
-          echo "Response: $lft_response"
-          lft_hex=$(echo "$lft_response" | jq -r '.result // empty')
-          if [ -z "$lft_hex" ] || [ "$lft_hex" = "null" ]; then
-            echo "::error::eth_call for lastFundingTime() failed or returned no result: $lft_response"
-            exit 1
-          fi
+          failed=0
+          while read -r slug market; do
+            [ -n "$slug" ] || continue
+            echo "── $slug ($market)"
+            echo "Calling lastFundingTime() ($SELECTOR_LAST_FUNDING_TIME)"
+            lft_response=$(call_eth "$market" "$SELECTOR_LAST_FUNDING_TIME")
+            echo "Response: $lft_response"
+            lft_hex=$(echo "$lft_response" | jq -r '.result // empty')
+            if [ -z "$lft_hex" ] || [ "$lft_hex" = "null" ]; then
+              echo "::error::[$slug] eth_call for lastFundingTime() failed or returned no result: $lft_response"
+              failed=1
+              continue
+            fi
 
-          echo "Calling epochLength() ($SELECTOR_EPOCH_LENGTH) on $CREDIT_MARKET_ADDRESS"
-          el_response=$(call_eth "$SELECTOR_EPOCH_LENGTH")
-          echo "Response: $el_response"
-          el_hex=$(echo "$el_response" | jq -r '.result // empty')
-          if [ -z "$el_hex" ] || [ "$el_hex" = "null" ]; then
-            echo "::error::eth_call for epochLength() failed or returned no result: $el_response"
-            exit 1
-          fi
+            echo "Calling epochLength() ($SELECTOR_EPOCH_LENGTH)"
+            el_response=$(call_eth "$market" "$SELECTOR_EPOCH_LENGTH")
+            echo "Response: $el_response"
+            el_hex=$(echo "$el_response" | jq -r '.result // empty')
+            if [ -z "$el_hex" ] || [ "$el_hex" = "null" ]; then
+              echo "::error::[$slug] eth_call for epochLength() failed or returned no result: $el_response"
+              failed=1
+              continue
+            fi
 
-          last_funding_time=$((16#${lft_hex#0x}))
-          epoch_length=$((16#${el_hex#0x}))
-          now=$(date +%s)
-          age=$((now - last_funding_time))
-          # threshold = 1.5 * epochLength, done in integer math as (epochLength * 15) / 10
-          threshold=$(( epoch_length * STALENESS_MULTIPLIER_X10 / 10 ))
+            last_funding_time=$((16#${lft_hex#0x}))
+            epoch_length=$((16#${el_hex#0x}))
+            now=$(date +%s)
+            age=$((now - last_funding_time))
+            # threshold = 1.5 * epochLength, done in integer math as (epochLength * 15) / 10
+            threshold=$(( epoch_length * STALENESS_MULTIPLIER_X10 / 10 ))
 
-          age_hours=$(awk "BEGIN { printf \"%.2f\", $age / 3600 }")
-          threshold_hours=$(awk "BEGIN { printf \"%.2f\", $threshold / 3600 }")
+            age_hours=$(awk "BEGIN { printf \"%.2f\", $age / 3600 }")
+            threshold_hours=$(awk "BEGIN { printf \"%.2f\", $threshold / 3600 }")
 
-          echo "lastFundingTime = $last_funding_time"
-          echo "epochLength     = $epoch_length seconds"
-          echo "now             = $now"
-          echo "age             = $age seconds (${age_hours}h)"
-          echo "threshold       = $threshold seconds (${threshold_hours}h)  [1.5 x epochLength]"
+            echo "lastFundingTime = $last_funding_time"
+            echo "epochLength     = $epoch_length seconds"
+            echo "now             = $now"
+            echo "age             = $age seconds (${age_hours}h)"
+            echo "threshold       = $threshold seconds (${threshold_hours}h)  [1.5 x epochLength]"
+
+            if [ "$age" -gt "$threshold" ]; then
+              echo "::error::[$slug] funding accrual is stale: age ${age_hours}h exceeds threshold ${threshold_hours}h (now=$now, lastFundingTime=$last_funding_time, epochLength=$epoch_length)"
+              failed=1
+            else
+              echo "[$slug] OK"
+            fi
+          done <<< "$markets"
+
           echo "NOTE: trades and setMark() also call accrueFunding(), so a fresh"
           echo "lastFundingTime is a lower bound on keeper health, not proof the"
           echo "funding-keeper process itself is running."
 
-          if [ "$age" -gt "$threshold" ]; then
-            echo "::error::funding accrual is stale: age ${age_hours}h exceeds threshold ${threshold_hours}h (now=$now, lastFundingTime=$last_funding_time, epochLength=$epoch_length)"
+          if [ "$failed" -ne 0 ]; then
             exit 1
           fi
           echo "funding-keeper liveness (via chain): OK"
