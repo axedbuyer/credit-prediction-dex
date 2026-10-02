@@ -1,12 +1,12 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { useAccount, useBalance, useReadContract, useWriteContract, useSignTypedData, useChainId, usePublicClient } from 'wagmi'
+import { useAccount, useBalance, useReadContract, useWriteContract, useSignTypedData, usePublicClient } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { waitForTransactionReceipt } from '@wagmi/core'
 import { parseUnits, formatUnits } from 'viem'
 import { wagmiConfig } from '@/lib/wagmi'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import type { Market } from '@/lib/markets'
 import { ORDER_BOOK_URL } from '@/lib/constants'
 import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
 import { tradeFee, minGrossForNet } from '@/lib/feeMath'
@@ -30,7 +30,7 @@ const ORDER_TYPES = {
 
 type Side = 'YES' | 'NO'
 type Direction = 'BUY' | 'SELL'
-type Status = 'idle' | 'minting' | 'signing' | 'submitting' | 'success' | 'error'
+type Status = 'idle' | 'approving' | 'minting' | 'signing' | 'submitting' | 'success' | 'error'
 
 // Raw StoredOrder shape from GET /orderbook — the book is shared across YES
 // and NO orders for the market (tokenIn/tokenOut disambiguate which), so
@@ -54,7 +54,7 @@ function sideLabel(s: Side): 'Upbet' | 'Downbet' {
 }
 
 async function fetchOrderBook(marketId: string): Promise<OrderBookData> {
-  const res = await fetch(`${ORDER_BOOK_URL}/orderbook?market=${marketId}`, {
+  const res = await fetch(`${ORDER_BOOK_URL}/orderbook?market=${encodeURIComponent(marketId)}`, {
     signal: AbortSignal.timeout(3_000),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -78,22 +78,25 @@ function computeTokenAmountWei(
 // ── Component ────────────────────────────────────────────────────────────────
 
 interface TradePanelProps {
-  marketId: string
+  // One market object is the single source of the EIP-712 domain's verifyingContract
+  // AND every token address in the signed order (CLOBSettlement does not validate that
+  // an order's tokens belong to its market, so they must never be mixed across markets).
+  market: Market
   initialSide?: Side
   initialDirection?: Direction
 }
 
-export function TradePanel({ marketId, initialSide, initialDirection }: TradePanelProps) {
+export function TradePanel({ market, initialSide, initialDirection }: TradePanelProps) {
+  const marketId = market.slug
   const { address, isConnected } = useAccount()
-  const chainId = useChainId()
   const publicClient = usePublicClient()
-  const contracts = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
+  const contracts = market
 
   // Live on-chain trading-fee rate (CLOBSettlement.feeBps is admin-editable) —
   // falls back to the env-based FEE_BPS while loading/on error. `source`
   // gates Downbet-buy SIGNING specifically: a stale env fallback would
   // mis-size the gross amountIn and revert on-chain (see handleSubmit).
-  const { feeBps: liveFeeBps, source: feeBpsSource } = useFeeBps()
+  const { feeBps: liveFeeBps, source: feeBpsSource } = useFeeBps(market.clobSettlement)
 
   const [side, setSide] = useState<Side>(initialSide ?? 'YES')
   const [direction, setDirection] = useState<Direction>(initialDirection ?? 'BUY')
@@ -161,6 +164,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
     query: { enabled: !!address },
   })
   const isFrozen = claimableData === true
+  const marketClosed = !market.active
 
   // ── Carry-owed preview (SELL + YES only) ────────────────────────────────────
   const wantsCarryPreview = direction === 'SELL' && side === 'YES' && !isFrozen
@@ -290,8 +294,29 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       : null
 
   // ── Submit ─────────────────────────────────────────────────────────────────
+  // Approve `spender` for at least `needed` USDC (existing allowance + needed, so
+  // other resting orders on the same market stay covered). No-op if already enough.
+  const ensureAllowance = useCallback(async (spender: `0x${string}`, needed: bigint) => {
+    if (!address || !publicClient) return
+    const current = await publicClient.readContract({
+      address: contracts.usdc,
+      abi: ERC20_ABI,
+      functionName: 'allowance',
+      args: [address, spender],
+    })
+    if (current >= needed) return
+    setStatus('approving')
+    const approveHash = await writeContractAsync({
+      address: contracts.usdc,
+      abi: ERC20_ABI,
+      functionName: 'approve',
+      args: [spender, current + needed],
+    })
+    await waitForTransactionReceipt(wagmiConfig, { hash: approveHash })
+  }, [address, publicClient, contracts.usdc, writeContractAsync])
+
   const handleSubmit = useCallback(async () => {
-    if (!address || !isValidAmount || isFrozen || carryShortfall || feeRateUnknownForNoBuy) return
+    if (!address || !isValidAmount || isFrozen || marketClosed || carryShortfall || feeRateUnknownForNoBuy) return
     setStatus('idle')
     setErrorMsg('')
     setSuccessOrderId('')
@@ -312,6 +337,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
             : shortfall * (1_000_000n - limitPriceRaw) / 1_000_000n + 1n
 
           setStatus('minting')
+          await ensureAllowance(contracts.creditMarket, mintUsdc)
           const hash = await writeContractAsync({
             address: contracts.creditMarket,
             abi: CREDIT_MARKET_ABI,
@@ -344,6 +370,12 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       const amountIn = direction === 'BUY' ? grossUsdcIn : tokenAmountWei
       const minAmountOut = direction === 'BUY' ? tokenAmountWei : usdcAmountWei
 
+      // Buying spends USDC through THIS market's CLOBSettlement — make sure it is
+      // approved for the (gross) amount before the order can ever settle.
+      if (direction === 'BUY') {
+        await ensureAllowance(contracts.clobSettlement, amountIn)
+      }
+
       // The demo chain is time-warped well ahead of wall-clock time, so a
       // wall-clock expiry would already be in the past on-chain. Compute
       // expiry from the CHAIN's own latest block timestamp instead, falling
@@ -358,6 +390,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       }
       const nonce  = BigInt(Date.now())
 
+      // verifyingContract and the order's token addresses all come from `market` above.
       const domain = {
         name: 'CLOBSettlement',
         version: '1',
@@ -418,7 +451,16 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
               : "Carry owed exceeds this order's proceeds — increase the price or amount",
           )
         }
-        if (body?.error && /position frozen/i.test(body.error)) {
+        if (body?.error === 'UnknownMarket') {
+          throw new Error('This market is not recognised by the order book yet. Try again in a moment.')
+        }
+        if (body?.error === 'InvalidTokenPair') {
+          throw new Error('That order doesn’t match this market. Refresh the page and try again.')
+        }
+        if (body?.error === 'MarketInactive') {
+          throw new Error('This market is closed to new orders.')
+        }
+        if (body?.error && /position frozen|PositionFrozen/i.test(body.error)) {
           throw new Error('Your position is frozen pending liquidation. Cure it from your Portfolio or wait for a claim.')
         }
         const err = body?.error ?? (await res.text().catch(() => ''))
@@ -440,17 +482,18 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       )
     }
   }, [
-    address, isValidAmount, isFrozen, carryShortfall, feeRateUnknownForNoBuy, liveFeeBps,
+    address, isValidAmount, isFrozen, marketClosed, carryShortfall, ensureAllowance, feeRateUnknownForNoBuy, liveFeeBps,
     usdcAmt, limitPrice, side, direction,
     yesBalance, noBalance, contracts, marketId, publicClient,
     writeContractAsync, signTypedDataAsync,
   ])
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const busy = status === 'minting' || status === 'signing' || status === 'submitting'
+  const busy = status === 'approving' || status === 'minting' || status === 'signing' || status === 'submitting'
 
   const buttonLabel =
     !isConnected             ? 'Connect wallet to trade'
+    : marketClosed           ? 'Market closed'
     : isFrozen               ? 'Position frozen'
     : busy                   ? statusLabel(status)
     : feeRateUnknownForNoBuy ? 'Confirming live fee rate for Downbet orders…'
@@ -460,6 +503,12 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
   return (
     <div className="flex flex-col gap-4">
       <p className="pari-eyebrow">Place Order</p>
+
+      {marketClosed && (
+        <div className="border border-subtle bg-surface-2 px-3 py-2.5 text-xs text-text-2">
+          This market is closed to new orders.
+        </div>
+      )}
 
       {/* Frozen banner — flagged positions are fully locked (mint, redeem, any CLOB trade) */}
       {isFrozen && (
@@ -603,7 +652,7 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
       {/* Submit button */}
       <button
         onClick={handleSubmit}
-        disabled={!isConnected || !isValidAmount || busy || isFrozen || carryShortfall || feeRateUnknownForNoBuy}
+        disabled={!isConnected || !isValidAmount || busy || isFrozen || marketClosed || carryShortfall || feeRateUnknownForNoBuy}
         className={`pari-b-btn w-full py-3 ${side === 'YES' ? 'pari-b-btn--danger' : 'pari-b-btn--primary'}`}
       >
         {buttonLabel}
@@ -625,7 +674,8 @@ export function TradePanel({ marketId, initialSide, initialDirection }: TradePan
 }
 
 function statusLabel(s: Status) {
-  if (s === 'minting')    return 'Minting tokens…'
+  if (s === 'approving')  return 'Approve USDC in wallet…'
+  if (s === 'minting')    return 'Preparing position…'
   if (s === 'signing')    return 'Sign order in wallet…'
   if (s === 'submitting') return 'Submitting…'
   return 'Processing…'

@@ -23,3 +23,22 @@ Read positions via YES.balanceOf(address) and NO.balanceOf(address).
 
 ## Do not build
 Mobile layout, fee distributor UI, market listing UI, LP vault UI
+
+## Multi-market structure (D5: registry-driven discovery)
+- `lib/marketRegistry.ts` — MarketRegistry ABI + `MarketInfo` (verbatim copy from the
+  canonical `backend/shared/registry.ts`; re-copy on contract change).
+- `lib/markets.ts` — THE market source: `useMarkets()`, `useMarket(slug)`,
+  `useActiveMarkets()`. Reads `allMarkets()` from `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`;
+  if unset, legacy mode synthesizes one market `mstr` from the old single-market
+  `NEXT_PUBLIC_*` address vars. Nothing else may read `CONTRACT_ADDRESSES` directly.
+- `lib/marketCopy.ts` — long-form copy keyed by slug (legal name, ticker, credit events)
+  with entityType fallbacks, so a newly registered market renders without a rebuild.
+  The ONLY place entity names live; display name = registry `entityName`.
+- Routes: `/` market list; `/market/[id]` (id = slug); `/portfolio` aggregates all
+  markets; `/liquidate` flagged positions across markets (claim → that market's
+  LiquidationEngine); `/admin` has a market picker.
+- Components take a `market: Market` prop. TradePanel signs with the EIP-712
+  `verifyingContract` AND token addresses from the SAME market object (CLOBSettlement
+  doesn't validate that tokens belong to its market); `useFeeBps(clobAddress)` is per market.
+- Order book: `GET /orderbook?market=<slug>`; liquidation keeper:
+  `GET /claimable[?market=<slug>]` (entries carry `market`, `creditMarket`, `liquidationEngine`).
