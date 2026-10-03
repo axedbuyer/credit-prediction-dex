@@ -63,9 +63,15 @@ export default function Home() {
           Real Credit · Real Yield · Real Marketplace
         </p>
         <div className="mt-10">
-          <a href="#markets" className="pari-a-btn pari-a-btn--primary pari-a-btn--lg">
+          {/* Straight to trading on the first active market (registry order — MSTR);
+              other entities are one click away in the Markets menu / list below. While
+              markets load it falls back to the list. */}
+          <Link
+            href={active[0] ? `/market/${active[0].slug}` : '#markets'}
+            className="pari-a-btn pari-a-btn--primary pari-a-btn--lg"
+          >
             Trade Now
-          </a>
+          </Link>
         </div>
       </section>
 

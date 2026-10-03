@@ -4,6 +4,7 @@ import { ConnectButton } from '@rainbow-me/rainbowkit'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { PariLogo } from '@/components/PariLogo'
+import { MarketsMenu } from '@/components/MarketsMenu'
 
 const navLinks: { href: string; label: string; also?: string }[] = [
   { href: '/', label: 'Markets', also: '/market' },
@@ -28,6 +29,7 @@ export function Header() {
             link.href === '/'
               ? pathname === '/' || !!pathname?.startsWith(link.also ?? '/market')
               : pathname?.startsWith(link.href)
+          if (link.href === '/') return <MarketsMenu key={link.href} isActive={!!isActive} />
           return (
             <Link
               key={link.href}
