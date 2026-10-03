@@ -8,6 +8,21 @@ Companion to `docs/deploy-testnet.md` §3–4 (service topology) and
 `docs/deploy-followups.md` (incident fixes). Secrets are marked — pull them from the
 local gitignored `.env` files, never from this doc.
 
+## Multi-market (built 2026-10-02, cutover PENDING — `docs/multi-market-cutover.md`)
+
+Until stage C of the cutover, nothing below changes: every service runs in **legacy mode**
+(one market, `mstr`, from the single-set address vars on this page). New vars:
+
+| Var | Services | Meaning |
+|---|---|---|
+| `MARKET_REGISTRY_ADDRESS` | all five Railway services | Set → registry mode: markets from `MarketRegistry.allMarkets()`; the single-set address vars (`CREDIT_MARKET_ADDRESS`, `YES/NO_TOKEN_ADDRESS`, `CLOB_SETTLEMENT_ADDRESS`, `LIQUIDATION_ENGINE_ADDRESS`, `HOLDER_INDEX_FROM_BLOCK`, `TRACKED_HOLDERS`) are then ignored. `USDC_ADDRESS` stays required on order-book-server + matching-engine; liquidator-bot falls back to the registry's `usdc()` / `insuranceFund()`. |
+| `REGISTRY_REFRESH_MS` | all five | Registry re-read interval, default 60000 (new markets need no redeploy). |
+| `LEGACY_SWEEP_MS` | order-book-server | Legacy Redis-key sweep interval, default 30000 (0 disables the timer; boot still sweeps). |
+| `CHAIN_ID` | matching-engine | Optional, default 84532 (only for local anvil). |
+| `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` | Vercel | Set → frontend discovers markets on-chain; the `NEXT_PUBLIC_*_ADDRESS` market vars are then ignored (`NEXT_PUBLIC_USDC_ADDRESS` still used). |
+
+Registry address: *TBD — fill in after cutover stage B.*
+
 ## Every Railway service
 
 ```

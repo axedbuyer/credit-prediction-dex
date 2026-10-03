@@ -101,6 +101,13 @@ canonical references below.*
   `docs/security/invariant-findings-2026-09-26.md`. **All three fixed (unified `owed()`)
   and deployed in the 2026-10-01 batch-1 redeploy.**
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
+- **Multi-market built, NOT deployed (2026-10-02):** branch `feat/multi-market-contracts` —
+  MarketRegistry + `AddMarket.s.sol` (per-market contract sets, shared InsuranceFund,
+  per-market CLOB), all backends and the frontend multi-market, launch markets MSTR (live,
+  becomes market #1 with no redeploy), CoreWeave 10%, Turkey 2%. Everything runs in
+  legacy single-market mode until the registry env vars are set. Design + decisions:
+  `docs/multi-market-design.md`; rollout: `docs/multi-market-cutover.md` (stages A code /
+  B chain / C env flip).
 
 ## Ops wallets and secrets
 
@@ -225,6 +232,22 @@ unreachable from WSL — the owner pushes from outside WSL.
   and `TokensMinted` is 2-arg (an older 4-arg chart ABI silently matched nothing).
 - **TradePanel order expiry uses CHAIN time (`getBlock`), not wall clock** — required
   because demo chains are time-warped. Keep it that way.
+- **Multi-market plumbing (2026-10-02):** (1) `backend/shared/registry.ts` is the ONE
+  registry reader; each service holds an identical copy (Docker build contexts are
+  per-service) — edit the canonical file, run `backend/shared/sync-registry.sh`; CI fails
+  on drift. (2) No `MARKET_REGISTRY_ADDRESS` = legacy mode (one `mstr` market from the old
+  vars) — that's how the hosted stack keeps working until cutover. (3) Keepers' holder
+  index starts at the registry's `startBlock`, NOT `registeredAt` (MSTR was registered long
+  after launch). (4) The order-book legacy-key migration is a recurring SWEEP, not
+  one-shot, because Railway overlaps old/new deployments. (5) **CLOBSettlement never
+  checks that order tokens belong to its market** (any non-YES token is treated as the NO
+  leg) — the order-book server, the settler and the frontend each enforce
+  {USDC, that market's YES/NO}; never add an order path that skips this. On-chain fix
+  rides the next CLOB redeploy. (6) **Any forge script broadcast on chain 84532 — incl.
+  local anvil/fork rehearsals — overwrites `contracts/broadcast/<script>/84532/run-latest.json`.**
+  The real batch-1 record is `run-1790824920355.json`; back up `contracts/broadcast` before
+  rehearsing. (7) The new deploy scripts write `deployments/<net>/…` ONLY under
+  `--broadcast` (the old dry-run-writes-JSON incident can't recur there).
 - **The economics invariants in root `CLAUDE.md` are load-bearing.** In particular:
   never burn YES outside `redeem`/`settleYES` (complete-set invariant), never let cost
   basis into the seizure trigger, never erase `fundingDebt` without USDC moving. Tests

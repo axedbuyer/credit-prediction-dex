@@ -6,6 +6,7 @@ import type { IPublicClient, IWalletClient, OrderRemover, SettlerConfig } from '
 import { MatchingEngine as RealMatchingEngine } from '../engine'
 import type { MatchingEngine } from '../engine'
 import type { StoredOrder } from '../types'
+import { MarketDirectory, legacyMarket } from '../registry'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -15,10 +16,17 @@ const USDC_ADDRESS         = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as con
 const SETTLER_ADDR         = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
 const TX_HASH              = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' as const
 
+const YES_ADDR = '0x0000000000000000000000000000000000000001' as const
+const NO_ADDR  = '0x0000000000000000000000000000000000000002' as const
+
+// Legacy one-market directory (mstr) — the settler's pre-multi-market behaviour.
 const CONFIG: SettlerConfig = {
-  clobSettlementAddress: CLOB_ADDRESS,
-  creditMarketAddress:   CREDIT_MARKET_ADDR,
-  usdcAddress:           USDC_ADDRESS,
+  usdcAddress: USDC_ADDRESS,
+  directory: new MarketDirectory({
+    legacy: legacyMarket({
+      creditMarket: CREDIT_MARKET_ADDR, yesToken: YES_ADDR, noToken: NO_ADDR, clobSettlement: CLOB_ADDRESS,
+    }),
+  }),
 }
 
 // A real ContractFunctionRevertedError, decoded from actual ABI-encoded revert
@@ -38,11 +46,12 @@ function makeOrder(
   side: 'bid' | 'ask' = 'ask',
   overrides: Partial<Pick<StoredOrder, 'maker' | 'tokenIn' | 'tokenOut'>> = {},
 ): StoredOrder {
+  const isBid = side === 'bid'
   return {
     id,
     maker:        overrides.maker    ?? '0xmaker',
-    tokenIn:      overrides.tokenIn  ?? '0x0000000000000000000000000000000000000001',
-    tokenOut:     overrides.tokenOut ?? '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    tokenIn:      overrides.tokenIn  ?? (isBid ? USDC_ADDRESS : YES_ADDR),
+    tokenOut:     overrides.tokenOut ?? (isBid ? YES_ADDR : USDC_ADDRESS),
     amountIn:     '1000000000000000000',
     minAmountOut: '230000',
     expiry:       String(Math.floor(Date.now() / 1000) + 3600),
@@ -142,8 +151,8 @@ describe('Settler — successful settlement', () => {
     expect(takerSig).toBe(taker.signature)
 
     // Both orders removed from the store
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask1', 'ask')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid1', 'bid')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask1', 'ask', 'mstr')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid1', 'bid', 'mstr')
 
     // settled event emitted with tx hash
     expect(settled).toEqual([TX_HASH])
@@ -254,7 +263,7 @@ describe('Settler — deterministic revert handling', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-fs', 'ask')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-fs', 'ask', 'mstr')
     // Buyer order was untouched — must be released so it can still match.
     expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-fs')
     expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-fs')
@@ -279,7 +288,7 @@ describe('Settler — deterministic revert handling', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf', 'ask')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf', 'ask', 'mstr')
     // The un-flagged taker order was untouched — release it so it can still match.
     expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-pf')
     expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-pf')
@@ -301,8 +310,8 @@ describe('Settler — deterministic revert handling', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf-err', 'ask')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-pf-err', 'bid')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf-err', 'ask', 'mstr')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-pf-err', 'bid', 'mstr')
   }, 10_000)
 
   it('SlippageExceeded (fee-config mismatch): both orders removed, no tx submitted', async () => {
@@ -318,8 +327,8 @@ describe('Settler — deterministic revert handling', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-slip', 'ask')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-slip', 'bid')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-slip', 'ask', 'mstr')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-slip', 'bid', 'mstr')
   }, 10_000)
 
   it('generic RPC error (not a deterministic revert) → nothing removed', async () => {
@@ -587,7 +596,7 @@ describe('Settler — NonceUsed handling', () => {
     expect(reads.every(r => r.functionName === 'usedNonces')).toBe(true)
     expect(reads.map(r => r.args)).toContainEqual([MAKER_A, 1n])
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nonce', 'ask')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nonce', 'ask', 'mstr')
     // The innocent counterparty's order stays in the book and can match again.
     expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-nonce')
     expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-nonce')
@@ -607,8 +616,8 @@ describe('Settler — NonceUsed handling', () => {
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
     expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nu-err', 'ask')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-nu-err', 'bid')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nu-err', 'ask', 'mstr')
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-nu-err', 'bid', 'mstr')
   }, 10_000)
 
   it('usedNonces() reports neither spent → both orders removed', async () => {
@@ -637,19 +646,19 @@ describe('RedisOrderRemover', () => {
     }
     const remover = new RedisOrderRemover(redis)
 
-    await remover.removeOrder('order-abc', 'bid')
+    await remover.removeOrder('order-abc', 'bid', 'mstr')
 
     expect(redis.del).toHaveBeenCalledWith('orders:order-abc')
-    expect(redis.zrem).toHaveBeenCalledWith('orderbook:bids', 'order-abc')
+    expect(redis.zrem).toHaveBeenCalledWith('orderbook:mstr:bids', 'order-abc')
   })
 
-  it('uses orderbook:asks for ask-side orders', async () => {
+  it('uses the market-namespaced asks key for ask-side orders', async () => {
     const redis = {
       del:  vi.fn().mockResolvedValue(1),
       zrem: vi.fn().mockResolvedValue(1),
     }
-    await new RedisOrderRemover(redis).removeOrder('order-xyz', 'ask')
+    await new RedisOrderRemover(redis).removeOrder('order-xyz', 'ask', 'mstr')
 
-    expect(redis.zrem).toHaveBeenCalledWith('orderbook:asks', 'order-xyz')
+    expect(redis.zrem).toHaveBeenCalledWith('orderbook:mstr:asks', 'order-xyz')
   })
 })

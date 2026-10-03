@@ -27,6 +27,7 @@ export interface OrderWire {
 
 export interface StoredOrder extends OrderWire {
   id: string
+  market: string  // market slug (multi-market); readers treat a missing value as 'mstr'
   side: Side
   price: number   // USDC-per-token float, used only for sorting
   timestamp: number

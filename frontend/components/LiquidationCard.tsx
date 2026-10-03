@@ -3,10 +3,11 @@
 import { useState, useCallback } from 'react'
 import Link from 'next/link'
 import { formatUnits } from 'viem'
-import { useWriteContract, useChainId } from 'wagmi'
+import { useAccount, useWriteContract, usePublicClient } from 'wagmi'
 import { waitForTransactionReceipt } from '@wagmi/core'
 import { wagmiConfig } from '@/lib/wagmi'
-import { CONTRACT_ADDRESSES, type SupportedChainId } from '@/lib/contracts'
+import { ERC20_ABI } from '@/lib/creditMarketAbi'
+import type { Market } from '@/lib/markets'
 
 // ── ABI ───────────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,9 @@ const LIQUIDATION_ENGINE_ABI = [
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ClaimablePosition {
+  market?: string      // market slug (absent on a pre-multi-market keeper → treated as 'mstr')
+  creditMarket?: string
+  liquidationEngine?: string
   user: string         // holder address
   notional: string     // YES token balance, 6-decimal, as bigint string
   owed: string         // owed(user) at poll time, 6-decimal — NOT fixed at flag time;
@@ -58,11 +62,14 @@ function shortAddr(addr: string): string {
 
 interface LiquidationCardProps {
   position: ClaimablePosition
+  // Resolved from the on-chain registry by the position's slug — the claim always goes
+  // to THIS market's LiquidationEngine, never an address taken from the keeper response.
+  market: Market
 }
 
-export function LiquidationCard({ position }: LiquidationCardProps) {
-  const chainId = useChainId()
-  const addrs = CONTRACT_ADDRESSES[chainId as SupportedChainId] ?? CONTRACT_ADDRESSES[84532]
+export function LiquidationCard({ position, market }: LiquidationCardProps) {
+  const publicClient = usePublicClient()
+  const { address: claimer } = useAccount()
   const { writeContractAsync } = useWriteContract()
 
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
@@ -79,8 +86,28 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
     setTxStatus('pending')
     setTxError('')
     try {
+      // The engine pulls the claim price in USDC — approve THIS market's engine first
+      // (padded 1%: owed keeps accruing between quote and tx; the cap is min(owed, value)).
+      const needed = claimPriceBig + claimPriceBig / 100n + 1n
+      if (claimer && publicClient) {
+        const current = await publicClient.readContract({
+          address: market.usdc,
+          abi: ERC20_ABI,
+          functionName: 'allowance',
+          args: [claimer, market.liquidationEngine],
+        })
+        if (current < needed) {
+          const approveHash = await writeContractAsync({
+            address: market.usdc,
+            abi: ERC20_ABI,
+            functionName: 'approve',
+            args: [market.liquidationEngine, needed],
+          })
+          await waitForTransactionReceipt(wagmiConfig, { hash: approveHash })
+        }
+      }
       const hash = await writeContractAsync({
-        address: addrs.liquidationEngine,
+        address: market.liquidationEngine,
         abi: LIQUIDATION_ENGINE_ABI,
         functionName: 'claim',
         args: [position.user as `0x${string}`],
@@ -96,7 +123,7 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
           : msg.slice(0, 100),
       )
     }
-  }, [writeContractAsync, addrs, position.user])
+  }, [writeContractAsync, publicClient, claimer, market, claimPriceBig, position.user])
 
   return (
     <div className={`pari-b-card ${isFrozen ? 'opacity-50' : ''}`}>
@@ -111,7 +138,10 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
 
       {/* Header row */}
       <div className="mb-4 flex items-center justify-between">
-        <span className="font-mono text-xs text-text-2">{shortAddr(position.user)}</span>
+        <div>
+          <p className="text-xs font-semibold text-text-1">{market.entityName}</p>
+          <span className="font-mono text-xs text-text-2">{shortAddr(position.user)}</span>
+        </div>
         {position.tailCase && (
           <span className="pari-badge pari-badge--warning">Tail Case</span>
         )}
@@ -160,7 +190,7 @@ export function LiquidationCard({ position }: LiquidationCardProps) {
             your ~{usdc(profitBig.toString())} profit.
           </p>
           <Link
-            href="/market/mstr"
+            href={`/market/${market.slug}`}
             className="pari-b-btn pari-b-btn--secondary inline-flex"
           >
             Go to trade panel to sell Upbet →

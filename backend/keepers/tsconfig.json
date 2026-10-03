@@ -12,7 +12,7 @@
     "skipLibCheck": true,
     "declaration": true
   },
-  "include": ["funding-keeper.ts", "liquidation-keeper.ts", "liquidator-bot.ts", "holder-index.ts", "shutdown.ts", "seller.ts", "clob-seller.ts"],
+  "include": ["funding-keeper.ts", "liquidation-keeper.ts", "liquidator-bot.ts", "holder-index.ts", "shutdown.ts", "seller.ts", "clob-seller.ts", "registry.ts", "markets.ts"],
   "exclude": ["node_modules", "dist"],
   "ts-node": {
     "transpileOnly": true
