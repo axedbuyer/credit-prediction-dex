@@ -25,7 +25,10 @@ Until stage C of the cutover, nothing below changes: every service runs in **leg
 `contracts/deployments/base-sepolia/core.json`). Markets: `mstr` (batch-1 set), `crwv`
 CreditMarket `0xA895a7d71f3CF6e9Ac9e6e00B86eaccc4C6F8dC0`, `try` CreditMarket
 `0x3F72DA6652C4a14984a6B94BA9EB1a2782ff40Ae` — full address sets in
-`contracts/deployments/base-sepolia/markets/<slug>.json`. Not yet set on any service (stage C).
+`contracts/deployments/base-sepolia/markets/<slug>.json`. **Set as `MARKET_REGISTRY_ADDRESS` on all
+five Railway services 2026-10-03 (stage C) — they now run in registry mode;** the old
+single-set address vars are still present (ignored) so rollback = delete this one var +
+redeploy. Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`: set by the owner via the dashboard.
 
 ## Every Railway service
 
