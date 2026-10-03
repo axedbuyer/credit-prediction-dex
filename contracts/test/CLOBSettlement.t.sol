@@ -36,8 +36,8 @@ contract CLOBSettlementTest is Test {
         taker = vm.addr(takerKey);
 
         usdc     = new MockUSDC();
-        yesToken = new YESToken(admin);
-        noToken  = new NOToken(admin);
+        yesToken = new YESToken(admin, "YES", "YES");
+        noToken  = new NOToken(admin, "NO", "NO");
         market   = new CreditMarket(
             admin, address(usdc), address(yesToken), address(noToken), 0.23e18, 1 days
         );

@@ -79,8 +79,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
     function setUp() public {
         // ── deploy (mirrors Integration.t.sol / IntegrationV1bTest) ────────────
         usdc = new MockUSDC();
-        yesToken = new YESToken(admin);
-        noToken = new NOToken(admin);
+        yesToken = new YESToken(admin, "YES", "YES");
+        noToken = new NOToken(admin, "NO", "NO");
         market = new CreditMarket(admin, address(usdc), address(yesToken), address(noToken), INITIAL_MARK, 1 days);
         clob = new CLOBSettlement(address(market), admin);
         router = new OracleRouter(admin, address(market));

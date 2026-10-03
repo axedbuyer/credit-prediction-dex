@@ -65,7 +65,7 @@ this doc unchanged, and **all 10 hard invariants hold per market**. Design + pha
 |---|---|---|---|---|---|
 | `mstr` | MicroStrategy (MicroStrategy Incorporated) | corporate | MSTR | Bankruptcy, Failure to Pay | 23% (live, batch-1 contracts = market #1) |
 | `crwv` | CoreWeave (CoreWeave, Inc.) | corporate | CRWV | Bankruptcy, Failure to Pay | 10% |
-| `turkey` | Turkey (Republic of Türkiye) | sovereign | TUR | Failure to Pay, Repudiation/Moratorium, Restructuring | 2% |
+| `try` | Turkey (Republic of Turkey) | sovereign | TRY | Failure to Pay, Repudiation/Moratorium, Restructuring | 2% |
 
 **Per-market config (launch):** `depositCap` 50,000 USDC; keeper `setMark` bounds ≤ 5 points
 per update, ≥ 1h apart; trading fee 50 bps, 50/50 team wallet / shared InsuranceFund.
