@@ -38,8 +38,8 @@ contract LiquidationEngineTest is Test {
 
     function setUp() public {
         mockUsdc      = new MockUSDC();
-        yesToken      = new YESToken(admin);
-        noToken       = new NOToken(admin);
+        yesToken      = new YESToken(admin, "YES", "YES");
+        noToken       = new NOToken(admin, "NO", "NO");
         insuranceFund = new InsuranceFund(admin, address(mockUsdc));
         market        = _deployMarket(MARK_5PCT);
         engine        = new LiquidationEngine(address(market), address(insuranceFund));

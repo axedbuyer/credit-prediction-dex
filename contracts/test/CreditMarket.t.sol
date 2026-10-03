@@ -31,8 +31,8 @@ contract CreditMarketTest is Test {
 
     function setUp() public {
         mockUsdc = new MockUSDC();
-        yesToken = new YESToken(admin);
-        noToken = new NOToken(admin);
+        yesToken = new YESToken(admin, "YES", "YES");
+        noToken = new NOToken(admin, "NO", "NO");
         market = _marketAt(0.23e18);
 
         mockUsdc.mint(alice, 10_000e18);

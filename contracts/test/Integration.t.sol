@@ -45,8 +45,8 @@ contract IntegrationTest is Test {
 
         // ── deploy all contracts ───────────────────────────────────────────
         usdc     = new MockUSDC();
-        yesToken = new YESToken(admin);
-        noToken  = new NOToken(admin);
+        yesToken = new YESToken(admin, "YES", "YES");
+        noToken  = new NOToken(admin, "NO", "NO");
         market   = new CreditMarket(
             admin, address(usdc), address(yesToken), address(noToken), MARK, 1 days
         );
@@ -349,8 +349,8 @@ contract IntegrationV1bTest is Test {
 
         // ── deploy ─────────────────────────────────────────────────────────
         usdc              = new MockUSDC();
-        yesToken          = new YESToken(admin);
-        noToken           = new NOToken(admin);
+        yesToken          = new YESToken(admin, "YES", "YES");
+        noToken           = new NOToken(admin, "NO", "NO");
         market            = new CreditMarket(
             admin, address(usdc), address(yesToken), address(noToken), MARK_5PCT, 1 days
         );
