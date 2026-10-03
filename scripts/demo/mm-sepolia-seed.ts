@@ -29,7 +29,7 @@ const ERC20_ABI = parseAbi([
   'function allowance(address owner, address spender) view returns (uint256)',
   'function balanceOf(address owner) view returns (uint256)',
 ])
-const MARKET_ABI = parseAbi(['function mint(uint256 usdcAmount)'])
+const MARKET_ABI = parseAbi(['function mint(uint256 usdcAmount)', 'function currentMark() view returns (uint256)'])
 const MAX = 2n ** 256n - 1n
 
 const account = privateKeyToAccount(KEY)
@@ -67,6 +67,30 @@ function buyOrder(token: Address, qty: number, price: number): OrderInput {
 
 // --market <slug> | MM_MARKET=<slug>: resolve the market's contracts from the
 // order-book-server directory. Absent => the mstr addresses from the deployments file.
+// Quote ladder for a --market run: centred on that market's on-chain mark c, tick
+// = min(1¢, c/4) so a 2% market still gets a sane two-sided book. Mirrors the mstr
+// ladder's shape (YES ±1/±3 ticks; NO asks at 1−c and +2 ticks, NO bid −2 ticks).
+// MM_QTY = tokens per level on a --market ladder (default 4); the sell side needs
+// 2 × MM_QTY of each token, so that much USDC is minted.
+const QTY = Number(process.env.MM_QTY ?? 4)
+
+function ladder(c: number): [string, OrderInput][] {
+  const t = Math.min(0.01, c / 4)
+  const r = (x: number) => Math.round(x * 1e4) / 1e4
+  const pct = (x: number) => `${(x * 100).toFixed(2)}¢`
+  const lv: [string, Address, 'ask' | 'bid', number][] = [
+    ['YES', YES, 'ask', r(c + t)], ['YES', YES, 'ask', r(c + 3 * t)],
+    ['YES', YES, 'bid', r(c - t)], ['YES', YES, 'bid', r(c - 3 * t)],
+    ['NO ', NO, 'ask', r(1 - c)], ['NO ', NO, 'ask', r(1 - c + 2 * t)],
+    ['NO ', NO, 'bid', r(1 - c - 2 * t)],
+  ]
+  return lv.map(([name, tok, side, px]) => [
+    `${side} ${name} ${QTY} @ ${pct(px)}`, side === 'ask' ? sellOrder(tok, QTY, px) : buyOrder(tok, QTY, px),
+  ])
+}
+
+let selectedMarket: string | undefined
+
 async function resolveMarket(): Promise<void> {
   const i = process.argv.indexOf('--market')
   const slug = (i >= 0 ? process.argv[i + 1] : undefined) ?? process.env.MM_MARKET
@@ -77,6 +101,7 @@ async function resolveMarket(): Promise<void> {
   const m = markets.find(x => x.slug === slug)
   if (!m) throw new Error(`unknown market "${slug}" (have: ${markets.map(x => x.slug).join(', ')})`)
   if (!m.active) throw new Error(`market "${slug}" is inactive`)
+  selectedMarket = slug
   ;({ yesToken: YES, noToken: NO, creditMarket: CREDIT_MARKET, clobSettlement: CLOB_SETTLEMENT } = m)
   console.log(`market: ${slug}  yes=${YES} no=${NO} clob=${CLOB_SETTLEMENT}`)
 }
@@ -93,13 +118,20 @@ async function main() {
     if (cur < MAX / 2n) await send(token, ERC20_ABI, 'approve', [spender, MAX])
   }
 
-  console.log('2. mint 12 USDC → 12 YES + 12 NO…')
+  const mintAmt = selectedMarket ? BigInt(Math.round(2 * QTY * 1e6)) : 12_000_000n
+  console.log(`2. mint ${Number(mintAmt) / 1e6} USDC → YES + NO…`)
   const yesBal = await pub.readContract({ address: YES, abi: ERC20_ABI, functionName: 'balanceOf', args: [account.address] })
-  if (yesBal < 12_000_000n) await send(CREDIT_MARKET, MARKET_ABI, 'mint', [12_000_000n])
+  if (yesBal < mintAmt) await send(CREDIT_MARKET, MARKET_ABI, 'mint', [mintAmt])
   else console.log('  already minted, skipping')
 
+  let quotes: [string, OrderInput][]
+  if (selectedMarket) {
+    const mark = Number(await pub.readContract({ address: CREDIT_MARKET, abi: MARKET_ABI, functionName: 'currentMark' })) / 1e18
+    console.log(`3. resting quotes around the ${selectedMarket} mark ${(mark * 100).toFixed(2)}%…`)
+    quotes = ladder(mark)
+  } else {
   console.log('3. resting quotes around 23%…')
-  const quotes: [string, OrderInput][] = [
+  quotes = [
     ['ask YES 4 @ 24¢', sellOrder(YES, 4, 0.24)],
     ['ask YES 4 @ 26¢', sellOrder(YES, 4, 0.26)],
     ['bid YES 4 @ 22¢', buyOrder(YES, 4, 0.22)],
@@ -108,6 +140,7 @@ async function main() {
     ['ask NO  4 @ 79¢', sellOrder(NO, 4, 0.79)],
     ['bid NO  4 @ 75¢', buyOrder(NO, 4, 0.75)],
   ]
+  }
   for (const [label, order] of quotes) {
     const sig = await signOrder({ privateKey: KEY } as any, order, baseSepolia.id, CLOB_SETTLEMENT)
     const res = await postOrder(ORDER_BOOK, toWire(order, sig))
