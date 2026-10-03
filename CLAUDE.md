@@ -29,13 +29,14 @@ smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ah
 Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 2026-10-01
 (batch 1, `docs/redeploy-batch1-runbook.md`): the unified `owed()` fix, a 50,000 USDC
 `depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
-`contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built
-and tested on branch `feat/multi-market-contracts` (2026-10-02) but NOT yet deployed** —
-201 contract tests (incl. a 2-market invariant suite), 397 off-chain tests, 11/11
-multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min) —
-contracts, backends and frontend all run in a legacy single-market (`mstr`) mode until
-`MARKET_REGISTRY_ADDRESS` / `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` are set; rollout runbook
-`docs/multi-market-cutover.md`.
+`contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built and merged to `main`
+(2026-10-03); its contracts are DEPLOYED to Base Sepolia and the Railway services
+run in registry mode since 2026-10-03 (Vercel switch pending)** — 201 contract tests (incl. a 2-market invariant suite), 397
+off-chain tests, 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
+MarketRegistry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` (addresses per market in
+`contracts/deployments/base-sepolia/`). Without `MARKET_REGISTRY_ADDRESS` /
+`NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` every service falls back to legacy single-market
+(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`.
 
 ---
 
