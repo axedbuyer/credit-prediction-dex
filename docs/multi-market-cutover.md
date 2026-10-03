@@ -1,6 +1,11 @@
 # Multi-market cutover — Base Sepolia runbook (phase 4)
 
-*Written 2026-10-02. Status: **not executed.** Every on-chain step needs the owner's explicit
+*Written 2026-10-02. Status: **stage A done 2026-10-03** (PRs #2 + #3; live in legacy mode,
+sweep moved 6 orders + 2 nonce sets); **stage B done 2026-10-03** — fork rehearsal passed
+(whole stage cost 0.000049 ETH), registry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`, crwv and
+try added (try broadcast run by the owner — the auto-mode classifier blocked it for Claude);
+stage C pending.**
+*Original status line: **not executed.** Every on-chain step needs the owner's explicit
 go-ahead (checkpoint CP4). Read with `docs/multi-market-design.md`, `docs/hosted-env-vars.md`,
 `docs/multi-market-local-rehearsal.md` and the gotchas in `docs/HANDOVER.md`.*
 
