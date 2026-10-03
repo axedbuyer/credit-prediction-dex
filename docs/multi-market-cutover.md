@@ -5,9 +5,9 @@ sweep moved 6 orders + 2 nonce sets); **stage B done 2026-10-03** — fork rehea
 (whole stage cost 0.000049 ETH), registry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`, crwv and
 try added (try broadcast run by the owner — the auto-mode classifier blocked it for Claude);
 **stage C (Railway) done 2026-10-03** — all five services in registry mode (3 markets),
-books seeded for crwv + try at 1 token/level (deployer held only ~6 USDC; re-seed bigger
-with `MM_QTY=4 … mm-sepolia-seed.ts --market <slug>` after a Circle-faucet top-up);
-Vercel var pending (owner, dashboard).**
+books seeded for crwv + try at 4 tokens/level (1 + a top-up of 3 after a 20 USDC
+Circle-faucet refill); Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` set by the owner and
+PR #4 merged the same day — **cutover complete.**
 *Original status line: **not executed.** Every on-chain step needs the owner's explicit
 go-ahead (checkpoint CP4). Read with `docs/multi-market-design.md`, `docs/hosted-env-vars.md`,
 `docs/multi-market-local-rehearsal.md` and the gotchas in `docs/HANDOVER.md`.*
