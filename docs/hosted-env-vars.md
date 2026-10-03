@@ -28,7 +28,7 @@ CreditMarket `0xA895a7d71f3CF6e9Ac9e6e00B86eaccc4C6F8dC0`, `try` CreditMarket
 `contracts/deployments/base-sepolia/markets/<slug>.json`. **Set as `MARKET_REGISTRY_ADDRESS` on all
 five Railway services 2026-10-03 (stage C) — they now run in registry mode;** the old
 single-set address vars are still present (ignored) so rollback = delete this one var +
-redeploy. Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`: set by the owner via the dashboard.
+redeploy. Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` set by the owner 2026-10-03 (frontend in registry mode).
 
 ## Every Railway service
 
