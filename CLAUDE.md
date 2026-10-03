@@ -29,7 +29,13 @@ smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ah
 Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 2026-10-01
 (batch 1, `docs/redeploy-batch1-runbook.md`): the unified `owed()` fix, a 50,000 USDC
 `depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
-`contracts/deployments/base-sepolia.json`.
+`contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built
+and tested on branch `feat/multi-market-contracts` (2026-10-02) but NOT yet deployed** —
+201 contract tests (incl. a 2-market invariant suite), 397 off-chain tests, 11/11
+multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min) —
+contracts, backends and frontend all run in a legacy single-market (`mstr`) mode until
+`MARKET_REGISTRY_ADDRESS` / `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` are set; rollout runbook
+`docs/multi-market-cutover.md`.
 
 ---
 
@@ -121,7 +127,7 @@ InsuranceFund.sol     — USDC reserve, timelock-gated withdrawals, covers liqui
                         tail-case shortfalls
 LiquidationEngine.sol — formulaic claim of seizure-flagged YES positions (no Dutch
                         auction); YES token transfers, never burned
-MarketRegistry.sol    — (multi-market, being built) admin-owned slug → market contract set
+MarketRegistry.sol    — (multi-market) admin-owned slug → market contract set
                         + minimal metadata; entries immutable, `active` toggle only
 ```
 
@@ -210,8 +216,18 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
 
 ### Backend Services
 
+Every service serves ALL markets from one process, discovered via `MarketDirectory`
+(`backend/shared/registry.ts`, copied per service by `sync-registry.sh`, CI-checked):
+registry mode when `MARKET_REGISTRY_ADDRESS` is set, else legacy one-market `mstr` mode
+from the old single-set env vars. Per-service multi-market detail: `backend/CLAUDE.md`.
+
 ```
-/order-book-server  — REST: POST /order, DELETE /order/:id, GET /orderbook, GET /health
+/order-book-server  — REST: GET /markets, GET /orderbook?market=<slug> (no param = mstr),
+                      POST /order (market derived from the order's token; 400
+                      InvalidTokenPair / UnknownMarket / MarketInactive), DELETE /order/:id,
+                      GET /health (per-market fee). Redis books namespaced
+                      orderbook:<slug>:*; a recurring sweep migrates legacy keys
+                      (mutations rate-limited per client IP). POST /order
                       (mutations rate-limited per client IP). POST /order
                       pre-filters against chain state (src/chain.ts, IChainReader/viem):
                       rejects flagged/claimable makers (PositionFrozen) and un-fundable
@@ -223,9 +239,14 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
                       and prunes the offending order(s) instead of retrying (other reverts
                       keep the retry behavior). Wires the settler when SETTLER_PRIVATE_KEY +
                       BASE_SEPOLIA_RPC_URL are set (log-only fallback otherwise).
+                      Matches each market's book independently and settles on that
+                      market's CLOB; refuses (prunes) any pair whose tokens aren't exactly
+                      {USDC, that market's YES/NO} — CLOBSettlement itself doesn't check.
 /funding-keeper     — accrueFunding() every epoch; flags (locks) any position
-                      breaching the seizure trigger.
-/liquidation-keeper — exposes GET /claimable (flagged positions + formulaic price P);
+                      breaching the seizure trigger. Every active market, sequentially,
+                      one market's failure isolated from the others.
+/liquidation-keeper — exposes GET /claimable[?market=<slug>] (flagged positions +
+                      formulaic price P, each tagged market/creditMarket/liquidationEngine);
                       does not claim itself — claiming is permissionless.
                       Both keepers discover YES holders from the token's Transfer
                       events (keepers/holder-index.ts; startup backfill + incremental
@@ -237,14 +258,22 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
                       sells the Upbet via clob-seller.ts — crosses the best bid down to
                       mark − SELL_MAX_DISCOUNT_BPS (3%), else rests an ask at the mark.
                       Own hot wallet; uses only claim() (works on old + fixed contracts).
+                      All markets from one USDC float (alert vs the largest single claim)
+                      and the SHARED InsuranceFund (alert vs concurrent tail shortfalls).
 /oracle-monitor     — placeholder for ISDA DC scraper (manual multisig in MVP).
 ```
 
 ### Frontend (Next.js 14)
 
 ```
-/app: /market/[id] (trading), /portfolio (balances + display layer + redeem),
-      /admin (submit credit event, pause — team only), /liquidate (flagged + claim)
+/app: / (market list), /market/[id] (id = slug; trading), /portfolio (all markets:
+      balances + display layer + redeem), /admin (market picker; credit event, pause —
+      team only), /liquidate (flagged across markets + claim)
+/lib: markets.ts (useMarkets/useMarket — registry via NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS,
+      else legacy one-market fallback), marketRegistry.ts (ABI copy), marketCopy.ts
+      (per-slug long-form copy + corporate/sovereign fallback). Every component takes a
+      `market` object; TradePanel's EIP-712 domain AND token addresses come from that one
+      object (mitigates the CLOB token-validation gap); USDC approvals are per market.
 /components:
   OrderBook, PriceChart, FundingTicker — standard market UI (poll /orderbook; TradingView
     Lightweight Charts; live annual-carry display)

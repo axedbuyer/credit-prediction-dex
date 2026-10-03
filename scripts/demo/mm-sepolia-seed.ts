@@ -3,6 +3,9 @@
 // 23% mark via the local order-book-server. Reuses clob.ts signing helpers.
 //
 // Run:  set -a && . ../../contracts/.env && set +a && npx tsx mm-sepolia-seed.ts
+// Multi-market: add `--market <slug>` (or MM_MARKET=<slug>) to seed that market; its
+// CreditMarket/YES/NO/CLOB addresses come from the order-book-server's GET /markets
+// instead of deployments/base-sepolia.json (which only describes mstr).
 import { createPublicClient, createWalletClient, http, parseAbi, type Address } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
@@ -16,10 +19,10 @@ const KEY = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}`
 if (!KEY) throw new Error('DEPLOYER_PRIVATE_KEY not set (source contracts/.env)')
 
 const USDC = deployments.usdc as Address
-const YES = deployments.yesToken as Address
-const NO = deployments.noToken as Address
-const CREDIT_MARKET = deployments.creditMarket as Address
-const CLOB_SETTLEMENT = deployments.clobSettlement as Address
+let YES = deployments.yesToken as Address
+let NO = deployments.noToken as Address
+let CREDIT_MARKET = deployments.creditMarket as Address
+let CLOB_SETTLEMENT = deployments.clobSettlement as Address
 
 const ERC20_ABI = parseAbi([
   'function approve(address spender, uint256 amount) returns (bool)',
@@ -62,7 +65,24 @@ function buyOrder(token: Address, qty: number, price: number): OrderInput {
   }
 }
 
+// --market <slug> | MM_MARKET=<slug>: resolve the market's contracts from the
+// order-book-server directory. Absent => the mstr addresses from the deployments file.
+async function resolveMarket(): Promise<void> {
+  const i = process.argv.indexOf('--market')
+  const slug = (i >= 0 ? process.argv[i + 1] : undefined) ?? process.env.MM_MARKET
+  if (!slug) return
+  const res = await fetch(`${ORDER_BOOK}/markets`)
+  if (!res.ok) throw new Error(`GET ${ORDER_BOOK}/markets failed: ${res.status}`)
+  const { markets } = (await res.json()) as { markets: Array<{ slug: string; active: boolean; creditMarket: Address; yesToken: Address; noToken: Address; clobSettlement: Address }> }
+  const m = markets.find(x => x.slug === slug)
+  if (!m) throw new Error(`unknown market "${slug}" (have: ${markets.map(x => x.slug).join(', ')})`)
+  if (!m.active) throw new Error(`market "${slug}" is inactive`)
+  ;({ yesToken: YES, noToken: NO, creditMarket: CREDIT_MARKET, clobSettlement: CLOB_SETTLEMENT } = m)
+  console.log(`market: ${slug}  yes=${YES} no=${NO} clob=${CLOB_SETTLEMENT}`)
+}
+
 async function main() {
+  await resolveMarket()
   console.log(`MM seeding from ${account.address} via ${RPC}`)
 
   console.log('1. approvals (skip if already max)…')

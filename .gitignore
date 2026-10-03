@@ -46,3 +46,5 @@ dump.rdb
 scripts/demo/.run/
 # node_modules symlink (→ backend/matching-engine) — dir-only node_modules/ misses it
 scripts/demo/node_modules
+scripts/smoke/node_modules
+scripts/smoke/.run/
