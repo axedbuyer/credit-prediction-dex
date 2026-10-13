@@ -38,6 +38,16 @@
 #      a "fresh" lastFundingTime is not proof the keeper itself is running
 #      — only a lower bound on funding-accrual health in general. A stale
 #      timestamp IS a reliable signal something is wrong, though.
+#   5. liquidator-bot /health      -> must be HTTP 200, lastCycleAt fresh (< 10 min;
+#      the bot polls every 30s), and its two money alerts clear:
+#      alerts.floatShortfall == "0" (USDC float covers the largest pending
+#      claim) and alerts.insuranceFundShortfall == "0" (the SHARED InsuranceFund
+#      covers concurrent tail shortfalls). The bot only logs when it claims, so
+#      without this check a dead bot is indistinguishable from an idle one.
+#      A stale lastCycleAt is re-checked once ~45s later before failing.
+#   6. hot-wallet gas             -> eth_getBalance of the keeper, settler and
+#      liquidator EOAs must each be >= its minimum (a wallet out of gas fails
+#      silently: accruals, fills or claims just stop landing).
 
 name: Uptime Monitor
 
@@ -55,6 +65,16 @@ env:
   ORDER_BOOK_SERVER_HEALTH_URL: https://order-book-server-production-9bb6.up.railway.app/health
   LIQUIDATION_KEEPER_HEALTH_URL: https://liquidation-keeper-production.up.railway.app/health
   FRONTEND_URL: https://credit-prediction-dex.vercel.app/
+  LIQUIDATOR_BOT_HEALTH_URL: https://liquidator-bot-production-1939.up.railway.app/health
+  LIQUIDATOR_BOT_STALE_SECONDS: "600"
+  # Hot wallets (public addresses) and their minimum ETH balances, in wei.
+  #   keeper   — accrueFunding x3 markets/day + flags; min 0.0005 ETH
+  #   settler  — verifyAndSettle per fill (~2e-6 ETH each); min 0.0001 ETH
+  #   liquidator — claim + approvals + CLOB sells; min 0.0002 ETH
+  HOT_WALLETS: |
+    keeper 0x63F98358246D5860A5b4c85fBB7936494F4FeC54 500000000000000
+    settler 0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9 100000000000000
+    liquidator 0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661 200000000000000
   BASE_SEPOLIA_RPC_URL: https://sepolia.base.org
   CREDIT_MARKET_ADDRESS: "0xe8D0448Fb825875AE2CEFfEdA561Ea98508F8369"
   # Function selectors below are `cast sig` of the public getters on
@@ -232,6 +252,94 @@ jobs:
           fi
           echo "funding-keeper liveness (via chain): OK"
 
+      - name: liquidator-bot /health
+        id: check-bot
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "GET $LIQUIDATOR_BOT_HEALTH_URL"
+          fetch_health() {
+            code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+              -o /tmp/bot_body.txt -w "%{http_code}" "$LIQUIDATOR_BOT_HEALTH_URL" || true)
+            echo "HTTP status: $code"
+            echo "Body:"
+            cat /tmp/bot_body.txt || true
+            echo
+            if [ "$code" != "200" ]; then
+              echo "::error::liquidator-bot /health returned HTTP $code (expected 200) at $LIQUIDATOR_BOT_HEALTH_URL"
+              exit 1
+            fi
+          }
+          cycle_age() {
+            local last
+            last=$(jq -r '.lastCycleAt // empty' /tmp/bot_body.txt)
+            if [ -z "$last" ]; then echo 999999; return; fi
+            echo $(( $(date +%s) - $(date -d "$last" +%s) ))
+          }
+
+          fetch_health
+          age=$(cycle_age)
+          if [ "$age" -gt "$LIQUIDATOR_BOT_STALE_SECONDS" ]; then
+            echo "lastCycleAt is ${age}s old — re-checking in 45s in case a cycle was mid-flight"
+            sleep 45
+            fetch_health
+            age=$(cycle_age)
+            if [ "$age" -gt "$LIQUIDATOR_BOT_STALE_SECONDS" ]; then
+              echo "::error::liquidator-bot claim loop is stale: lastCycleAt is ${age}s old (limit ${LIQUIDATOR_BOT_STALE_SECONDS}s) — lastError: $(jq -r '.lastError' /tmp/bot_body.txt)"
+              exit 1
+            fi
+          fi
+
+          failed=0
+          float_short=$(jq -r '.alerts.floatShortfall // "0"' /tmp/bot_body.txt)
+          if [ "$float_short" != "0" ]; then
+            echo "::error::liquidator-bot USDC float is short by $float_short (raw 6-dec) for the largest pending claim — top up the liquidator wallet"
+            failed=1
+          fi
+          if_short=$(jq -r '.alerts.insuranceFundShortfall // "0"' /tmp/bot_body.txt)
+          if [ "$if_short" != "0" ]; then
+            echo "::error::shared InsuranceFund is short by $if_short (raw 6-dec) vs pending tail-case shortfalls"
+            failed=1
+          fi
+          if [ "$(jq -r '.lastError' /tmp/bot_body.txt)" != "null" ]; then
+            echo "::warning::liquidator-bot lastError: $(jq -r '.lastError' /tmp/bot_body.txt)"
+          fi
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+          echo "liquidator-bot: OK (cycle ${age}s ago, markets=$(jq -r '(.markets // {}) | keys | join(",")' /tmp/bot_body.txt), claims=$(jq -r '.claims' /tmp/bot_body.txt), usdc=$(jq -r '.usdcBalance' /tmp/bot_body.txt))"
+
+      - name: hot-wallet gas balances
+        id: check-gas
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          failed=0
+          while read -r name addr min_wei; do
+            [ -n "$name" ] || continue
+            resp=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+              -X POST "$BASE_SEPOLIA_RPC_URL" -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"$addr\",\"latest\"]}" || true)
+            hex=$(echo "$resp" | jq -r '.result // empty' 2>/dev/null || true)
+            if [ -z "$hex" ]; then
+              echo "::error::[$name] eth_getBalance failed for $addr: $resp"
+              failed=1
+              continue
+            fi
+            # wei can exceed bash's 64-bit range for big balances — compare in python
+            verdict=$(python3 -c "b=int('$hex',16); m=int('$min_wei'); print(f'{b/1e18:.6f} {\"ok\" if b>=m else \"low\"}')")
+            eth=${verdict% *}; state=${verdict#* }
+            if [ "$state" = "low" ]; then
+              echo "::error::[$name] $addr has $eth ETH, below the $(python3 -c "print(int('$min_wei')/1e18)") ETH minimum — top it up"
+              failed=1
+            else
+              echo "[$name] $addr: $eth ETH OK"
+            fi
+          done <<< "$HOT_WALLETS"
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Summarize results
         if: always()
         run: |
@@ -253,6 +361,8 @@ jobs:
           check "liquidation-keeper /health"        "${{ steps.check-lk.outcome }}"
           check "frontend /"                        "${{ steps.check-fe.outcome }}"
           check "funding-keeper liveness (via chain)" "${{ steps.check-funding.outcome }}"
+          check "liquidator-bot /health"            "${{ steps.check-bot.outcome }}"
+          check "hot-wallet gas balances"           "${{ steps.check-gas.outcome }}"
 
           if [ "$failed" -eq 1 ]; then
             echo "::error::one or more uptime checks failed — see logs above for details"

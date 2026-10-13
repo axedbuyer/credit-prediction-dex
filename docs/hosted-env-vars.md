@@ -176,7 +176,13 @@ RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
 Root Directory must be `backend/keepers` (Settings → Source; the CLI's
 `environment edit … source.rootDirectory` only sticks once a source is connected).
 Optional: `AUTO_SELL` (true), `SELL_MAX_DISCOUNT_BPS` (300), `SELL_ORDER_TTL_SEC` (86400),
-`HEALTH_PORT` (3004). The wallet needs Base Sepolia ETH for gas and a USDC float ≥ the
+`HEALTH_PORT` (3004). **Public health URL (2026-10-13):**
+`https://liquidator-bot-production-1939.up.railway.app/health` — a Railway domain on port 3004;
+the bot's HTTP server answers only `GET /health` (read-only status, everything else 404), so the
+service is still not a public API. Monitored hourly by `.github/workflows/uptime.yml` (HTTP 200,
+`lastCycleAt` < 10 min, `alerts.floatShortfall` and `alerts.insuranceFundShortfall` both `"0"`);
+the same workflow alerts on keeper/settler/liquidator ETH below 0.0005 / 0.0001 / 0.0002. The bot
+logs only when it claims, so an empty Railway log is normal — use /health, not logs, for liveness. The wallet needs Base Sepolia ETH for gas and a USDC float ≥ the
 largest position it may claim (a claim costs ≤ m×Q); `/health` → `skippedByReason`
 shows `insufficientFloat` / `insuranceFundShortfall` when it can't claim. Update the
 contract addresses here after any CreditMarket-family redeploy.
