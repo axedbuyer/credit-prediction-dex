@@ -123,9 +123,22 @@ YES_TOKEN_ADDRESS=0x9ED5A4c6B1B5334645Ec47e7ce087e281fcEC59D
 HOLDER_INDEX_FROM_BLOCK=47528136
 REDIS_URL=${{Redis.REDIS_URL}}
 HEALTH_PORT=3002
+# optional retry/alert tuning (defaults shown)
+ACCRUE_MAX_ATTEMPTS=4
+ACCRUE_RETRY_BASE_MS=2000
+KEEPER_MIN_ETH=0.0005
 ```
-Health check `GET :3002/health` (includes `holderIndex` discovery status). (No CLOB
-address needed.)
+Health check `GET :3002/health` (includes `holderIndex` discovery status, per-market
+`accrual {consecutiveFailures,lastSuccessAt,lastError}` and an `alerts` object listing failing
+markets + keeper ETH balance state). (No CLOB address needed.)
+
+**Retry/alert (funding-keeper):** transient RPC/network/nonce errors on `accrueFunding`
+(submit + receipt) and `flagClaimable` are retried up to `ACCRUE_MAX_ATTEMPTS` with
+exponential backoff from `ACCRUE_RETRY_BASE_MS`; contract reverts are not retried, and
+`lastFundingTime` is re-read before any retry so a landed attempt is never re-submitted. When a
+market exhausts its attempts the log gets one `[ALERT] funding-keeper accrual failed market=<slug>
+attempts=N epochsBehind=N ...` line; `[ALERT] funding-keeper wallet low on ETH` fires (max once
+per hour) when the wallet is under `KEEPER_MIN_ETH`. Grep Railway logs for `[ALERT]`.
 
 **Holder discovery (both keepers):** holders are discovered from YES `Transfer` events
 (`backend/keepers/holder-index.ts`). `HOLDER_INDEX_FROM_BLOCK` is REQUIRED — the YES

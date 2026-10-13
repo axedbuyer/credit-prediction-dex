@@ -1,9 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import {
   FundingKeeper,
+  FundingKeeperService,
+  LowBalanceMonitor,
+  isTransientError,
+  backoffDelayMs,
   startHealthServer,
   resolveAddresses,
   type IPublicClient,
@@ -22,7 +26,10 @@ const HOLDER_ADDR   = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as const
 const TX_HASH       = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
 const FLAG_TX_HASH  = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const
 
-const CONFIG: KeeperConfig = { creditMarketAddress: CREDIT_MARKET }
+const CONFIG: KeeperConfig = {
+  creditMarketAddress: CREDIT_MARKET,
+  retry: { maxAttempts: 4, baseMs: 0, sleep: async () => {} },
+}
 
 function makeStatus(overrides: Partial<HolderIndexStatus> = {}): HolderIndexStatus {
   return {
@@ -844,5 +851,186 @@ describe('resolveAddresses', () => {
     } finally {
       cleanup()
     }
+  })
+})
+
+// ─── Retry + alerting ─────────────────────────────────────────────────────────
+
+describe('FundingKeeper — retry and alerting', () => {
+  const transientErr = () => Object.assign(new Error('HTTP request failed: fetch failed (ETIMEDOUT)'), { name: 'HttpRequestError' })
+  const alerts = (spy: ReturnType<typeof vi.spyOn>) =>
+    spy.mock.calls.map(c => String(c[0])).filter(l => l.startsWith('[ALERT]'))
+
+  let errSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const cfg = (extra: Partial<KeeperConfig> = {}, sleep = vi.fn(async () => {})): KeeperConfig => ({
+    creditMarketAddress: CREDIT_MARKET, label: 'mstr',
+    retry: { maxAttempts: 4, baseMs: 100, sleep }, ...extra,
+  })
+
+  it('classifies errors: transient vs deterministic reverts', () => {
+    expect(isTransientError(transientErr())).toBe(true)
+    expect(isTransientError(new Error('nonce too low'))).toBe(true)
+    expect(isTransientError(new Error('replacement transaction underpriced'))).toBe(true)
+    expect(isTransientError(new Error('execution reverted'))).toBe(false)
+    expect(isTransientError(new Error('something unknown'))).toBe(false)
+    const revert = Object.assign(new Error('timeout in message'), { name: 'ContractFunctionExecutionError',
+      cause: Object.assign(new Error('x'), { name: 'ContractFunctionRevertedError' }) })
+    expect(isTransientError(revert)).toBe(false)
+    expect(backoffDelayMs(100, 1, () => 0)).toBe(100)
+    expect(backoffDelayMs(100, 3, () => 1)).toBe(500)
+  })
+
+  it('transient write error then success: retries with backoff, succeeds, resets failures', async () => {
+    let n = 0
+    const { publicClient, walletClient } = makeMocks({
+      writeContract: () => (++n === 1 ? Promise.reject(transientErr()) : Promise.resolve(TX_HASH)),
+    })
+    const sleep = vi.fn(async () => {})
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), cfg({}, sleep))
+    await keeper.runOnce()
+    expect(walletClient.writeContract).toHaveBeenCalledTimes(2)
+    expect(sleep).toHaveBeenCalledTimes(1)
+    expect(sleep.mock.calls[0][0]).toBeGreaterThanOrEqual(100)
+    expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+    expect(keeper.getAccrualState()).toMatchObject({ consecutiveFailures: 0, lastError: null })
+    expect(alerts(errSpy)).toHaveLength(0)
+  })
+
+  it('exhausting attempts logs one [ALERT] and tracks state; seizure check still runs', async () => {
+    const { publicClient, walletClient } = makeMocks({
+      writeContract: () => Promise.reject(transientErr()),
+    })
+    const holders = makeFakeHolderSource([HOLDER_ADDR])
+    const keeper = new FundingKeeper(publicClient, walletClient, holders, cfg())
+    await keeper.runOnce()
+    expect(walletClient.writeContract).toHaveBeenCalledTimes(4)
+    const a = alerts(errSpy)
+    expect(a).toHaveLength(1)
+    expect(a[0]).toMatch(/market=mstr .*attempts=4 .*epochsBehind=\d+ .*consecutiveFailures=1 .*error=/)
+    expect(keeper.getAccrualState().consecutiveFailures).toBe(1)
+    expect(keeper.getAccrualState().lastError).toMatch(/HTTP request failed/)
+    expect(holders.refresh).toHaveBeenCalled()   // Phase B ran
+    await keeper.runOnce()
+    expect(keeper.getAccrualState().consecutiveFailures).toBe(2)
+  })
+
+  it('one market exhausting retries does not stop the next market (service)', async () => {
+    const A = CREDIT_MARKET, B = '0x1111111111111111111111111111111111111111' as const
+    const writes: string[] = []
+    const mk = (addr: `0x${string}`, fail: boolean) => {
+      const { publicClient, walletClient } = makeMocks({
+        writeContract: () => { writes.push(addr); return fail ? Promise.reject(transientErr()) : Promise.resolve(TX_HASH) },
+      })
+      return new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(),
+        cfg({ creditMarketAddress: addr, label: addr === A ? 'mstr' : 'try' }))
+    }
+    const workers: Record<string, FundingKeeper> = { mstr: mk(A, true), try: mk(B, false) }
+    const infos = [{ slug: 'mstr', active: true }, { slug: 'try', active: true }]
+    const dir = {
+      list: () => infos, bySlug: (s: string) => infos.find(i => i.slug === s),
+      status: () => ({}), mode: 'registry' as const,
+    }
+    const svc = new FundingKeeperService(dir as never, (m: { slug: string }) => workers[m.slug])
+    await svc.runAll()
+    expect(writes.filter(w => w === A)).toHaveLength(4)
+    expect(writes.filter(w => w === B)).toHaveLength(1)
+    const h = svc.getHealthExtras()
+    expect(Object.keys(h.alerts.accrualFailing)).toEqual(['mstr'])
+    expect(h.markets.try.accrual?.consecutiveFailures).toBe(0)
+  })
+
+  it('does not retry a deterministic revert (gas estimate, thrown revert, reverted receipt)', async () => {
+    for (const mocks of [
+      makeMocks({ estimateContractGas: () => Promise.reject(Object.assign(new Error('boom'), { name: 'ContractFunctionRevertedError' })) }),
+      makeMocks({ writeContract: () => Promise.reject(new Error('execution reverted')) }),
+      makeMocks({ waitForTransactionReceipt: () => Promise.resolve({ status: 'reverted' as const }) }),
+    ]) {
+      const sleep = vi.fn(async () => {})
+      const keeper = new FundingKeeper(mocks.publicClient, mocks.walletClient, makeFakeHolderSource(), cfg({}, sleep))
+      await keeper.runOnce()
+      expect((mocks.walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(1)
+      expect(sleep).not.toHaveBeenCalled()
+      expect(keeper.getAccrualState().consecutiveFailures).toBe(1)
+    }
+    expect(alerts(errSpy)).toHaveLength(3)
+  })
+
+  it('landed-but-receipt-lost: re-reads lastFundingTime and does NOT re-submit', async () => {
+    let lft = 1000n
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) =>
+        functionName === 'lastFundingTime' ? Promise.resolve(lft) : defaultReadContract({ functionName }),
+      writeContract: () => Promise.resolve(TX_HASH),
+      waitForTransactionReceipt: () => { lft = 2000n; return Promise.reject(transientErr()) },  // tx mined, receipt lost
+    })
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), cfg())
+    await keeper.runOnce()
+    expect(walletClient.writeContract).toHaveBeenCalledTimes(1)
+    expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+    expect(keeper.getAccrualState().consecutiveFailures).toBe(0)
+    expect(alerts(errSpy)).toHaveLength(0)
+  })
+
+  it('receipt wait failing without landing re-waits on the SAME hash (no second tx)', async () => {
+    let waits = 0
+    const { publicClient, walletClient } = makeMocks({
+      waitForTransactionReceipt: () => (++waits === 1 ? Promise.reject(transientErr()) : Promise.resolve({ status: 'success' as const })),
+    })
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource(), cfg())
+    await keeper.runOnce()
+    expect(walletClient.writeContract).toHaveBeenCalledTimes(1)
+    expect(waits).toBe(2)
+    expect(keeper.getLastRunAt()).toBeInstanceOf(Date)
+  })
+
+  it('flagClaimable: does not resend when a transient failure hid a flag that landed', async () => {
+    let flagWrites = 0
+    let claimable = false
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) =>
+        functionName === 'claimable' ? Promise.resolve(claimable)
+        : functionName === 'isSeizable' ? Promise.resolve(true)
+        : defaultReadContract({ functionName }),
+      writeContract: ({ functionName }) => {
+        if (functionName === 'flagClaimable') {
+          flagWrites++
+          claimable = true                     // landed on-chain...
+          return Promise.reject(transientErr()) // ...but the RPC call failed
+        }
+        return Promise.resolve(TX_HASH)
+      },
+    })
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), cfg())
+    await keeper.runOnce()
+    expect(flagWrites).toBe(1)
+  })
+
+  it('low-balance alert fires once per hour while low, re-arms after recovery', async () => {
+    let now = 0
+    let bal = 100n
+    const client = { getBalance: vi.fn(async () => bal) }
+    const mon = new LowBalanceMonitor(client, KEEPER_ADDR, 500n, 3_600_000, () => now)
+    await mon.check()
+    await mon.check()
+    now += 1_800_000
+    await mon.check()
+    expect(alerts(errSpy)).toHaveLength(1)
+    expect(alerts(errSpy)[0]).toMatch(/low on ETH/)
+    now += 1_800_001
+    await mon.check()
+    expect(alerts(errSpy)).toHaveLength(2)
+    expect(mon.state().lowBalance).toBe(true)
+    bal = 1000n
+    await mon.check()
+    expect(mon.state().lowBalance).toBe(false)
+    bal = 10n
+    await mon.check()                       // recovered then low again -> immediate alert
+    expect(alerts(errSpy)).toHaveLength(3)
   })
 })
