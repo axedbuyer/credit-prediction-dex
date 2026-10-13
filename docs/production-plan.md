@@ -102,8 +102,9 @@ from `Transfer` events (requirement 1 below).
   `deploy-mainnet` Makefile target with a chain-id guard and mainnet USDC constant,
   frontend 8453 entries in `lib/contracts.ts` / `lib/wagmi.ts` / `lib/constants.ts`.
   Still open for mainnet: RPC provider choice, a fork rehearsal of `Deploy.s.sol` on 8453,
-  and explicit ops addresses — `Deploy.s.sol`'s KEEPER/PAUSER/team defaults are the
-  TESTNET hot wallets and must be overridden (ties into the Safe role ceremony).
+  and explicit ops addresses — `Deploy.s.sol` defaults KEEPER to the Sepolia keeper EOA and
+  PAUSER/attester/team to the deployer EOA; make them required on 8453 (ties into the Safe
+  role ceremony — see HANDOVER "Before any Base MAINNET deploy").
 - **Deliberately skipped**: structured logging/metrics stack, subgraph, private relay
   for liquidation MEV (documented-acceptable MVP limitation).
 
