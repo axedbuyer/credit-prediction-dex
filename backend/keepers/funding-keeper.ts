@@ -5,6 +5,7 @@ import cron from 'node-cron'
 import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import type { Address, Hash } from 'viem'
 import { createMarketHolderIndex, HolderIndexManager, aggregateHolderStatus } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
@@ -917,8 +918,8 @@ async function main(): Promise<void> {
   const privateKey = process.env.KEEPER_PRIVATE_KEY
   if (!privateKey) throw new Error('KEEPER_PRIVATE_KEY env var is required')
 
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('RPC_URL (or BASE_SEPOLIA_RPC_URL) env var is required')
 
   // Legacy mode (no MARKET_REGISTRY_ADDRESS) keeps today's requirement: the single
   // market's addresses must resolve (env, or the local deployments file).
@@ -930,9 +931,7 @@ async function main(): Promise<void> {
 
   // CHAIN_ID env var lets local Anvil (31337) work without code changes
   const chainId = parseInt(process.env.CHAIN_ID ?? '84532')
-  const chain = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({ id: chainId, name: 'Local', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } })
+  const chain = chainFor(chainId, rpcUrl)
 
   const publicClient  = createPublicClient({ chain, transport })
   const walletClient  = createWalletClient({ account, chain, transport })

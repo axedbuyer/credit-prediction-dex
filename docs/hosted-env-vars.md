@@ -229,3 +229,19 @@ NEXT_PUBLIC_LIQUIDATION_KEEPER_URL=https://<liquidation-keeper Railway PUBLIC do
 The two Railway public domains must exist before the Vercel deploy is useful (the app
 builds without them but the market page can't load a book). `NEXT_PUBLIC_FEE_BPS` is only the preview
 fallback while the live on-chain fee rate loads; Downbet buys can't be signed until it has.
+
+## Mainnet plumbing (Base 8453) — code-ready, NOT deployed
+
+Nothing runs on mainnet yet; with none of these set, everything stays on Base Sepolia (84532).
+
+| Var | Where | Meaning |
+|---|---|---|
+| `CHAIN_ID` | all Railway services | `8453` = Base mainnet, `84532` = Base Sepolia (default), anything else = local anvil. |
+| `RPC_URL` | all Railway services | Generic RPC endpoint; takes precedence over `BASE_SEPOLIA_RPC_URL` (which keeps working). |
+| `NEXT_PUBLIC_CHAIN_ID` | Vercel | `84532` (default) or `8453`. With `8453` the app throws a config error at boot unless `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` (or all legacy address vars) is set — it never falls back to testnet addresses. USDC is fixed to `0x8335…2913` on 8453. |
+| `BASE_RPC_URL` | contracts (forge/make) | Mainnet RPC for `foundry.toml` `base` endpoint and `make deploy-mainnet`. |
+| `CONFIRM_MAINNET` | contracts (make) | Must be `yes`; `make deploy-mainnet` also refuses unless `cast chain-id` returns 8453. |
+
+Mainnet deployment outputs go to `contracts/deployments/base.json` and `base/<slug>.json`
+(see `contracts/deployments/README.md`); `Deploy.s.sol` pins mainnet USDC on chain 8453 and
+rejects it on 84532. Explorer verification uses Blockscout (`https://base.blockscout.com/api`).

@@ -9,17 +9,18 @@
 // NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS. Legacy mode (env unset): synthesizes exactly one
 // market `mstr` from the pre-registry single-market NEXT_PUBLIC_* address vars so a site
 // deployed before the registry exists keeps working unchanged. Nothing else in the app
-// may read CONTRACT_ADDRESSES directly.
+// may read CONTRACT_ADDRESSES / ACTIVE_ADDRESSES directly.
 
 import { useMemo } from 'react'
 import { useReadContract } from 'wagmi'
-import { CONTRACT_ADDRESSES } from '@/lib/contracts'
+import { ACTIVE_ADDRESSES } from '@/lib/contracts'
 import {
   MARKET_REGISTRY_ABI,
   parseRegistryMarkets,
   type Hex,
   type MarketInfo,
 } from '@/lib/marketRegistry'
+import { assertChainConfig } from '@/lib/chainConfig'
 import { getMarketCopy, marketTitle, type MarketCopy } from '@/lib/marketCopy'
 
 export interface Market extends MarketInfo {
@@ -28,10 +29,12 @@ export interface Market extends MarketInfo {
   copy: MarketCopy
 }
 
+assertChainConfig()
+
 const REGISTRY = process.env.NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS as Hex | undefined
 export const REGISTRY_CONFIGURED = !!REGISTRY
 
-const SHARED_USDC = CONTRACT_ADDRESSES[84532].usdc
+const SHARED_USDC = ACTIVE_ADDRESSES.usdc
 
 function decorate(m: MarketInfo): Market {
   return {
@@ -44,7 +47,7 @@ function decorate(m: MarketInfo): Market {
 
 // ── Legacy fallback (registry env unset) ────────────────────────────────────
 function legacyMarkets(): Market[] {
-  const a = CONTRACT_ADDRESSES[84532]
+  const a = ACTIVE_ADDRESSES
   return [
     decorate({
       id: 0,
