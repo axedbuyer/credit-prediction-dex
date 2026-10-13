@@ -1,11 +1,11 @@
 import { createConfig, http } from 'wagmi'
 import { base, baseSepolia } from 'wagmi/chains'
 import { ACTIVE_CHAIN, assertChainConfig } from '@/lib/chainConfig'
+import { connectorsForWallets } from '@rainbow-me/rainbowkit'
+import { metaMaskWallet, coinbaseWallet } from '@rainbow-me/rainbowkit/wallets'
 
 // Fail loudly (build/boot) if mainnet is selected without mainnet addresses.
 assertChainConfig()
-import { connectorsForWallets } from '@rainbow-me/rainbowkit'
-import { metaMaskWallet, coinbaseWallet } from '@rainbow-me/rainbowkit/wallets'
 
 const rawProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
 
