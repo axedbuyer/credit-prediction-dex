@@ -6,6 +6,7 @@ import { HttpOrderBookClient } from './client'
 import { MatchingEngine } from './engine'
 import { createSettler } from './settler'
 import { createShutdownHandler } from './shutdown'
+import { createHealthServer, startBalancePoller, closeHealthServer, parseEthToWei } from './health'
 import { MarketDirectory, legacyMarket, type Hex, type IRegistryClient } from './registry'
 import type { CreatedSettler } from './settler'
 import type { MatchingEngineConfig } from './types'
@@ -104,6 +105,33 @@ async function start() {
   }
 
   engine.start()
+
+  // /health: liveness of the match loop + settler wallet balance (cached, never blocks).
+  const poller = created ? startBalancePoller(created.getBalance) : undefined
+  const pollMs = config.pollIntervalMs ?? 500
+  // Empty env values (as shipped in .env.example) mean "unset" — parseInt('') is NaN, which
+  // would make the staleness check silently never fire.
+  const envInt = (name: string, dflt: number): number => {
+    const n = parseInt(process.env[name] ?? '')
+    return Number.isFinite(n) && n > 0 ? n : dflt
+  }
+  const healthPort = envInt('HEALTH_PORT', 3005)
+  const healthServer = createHealthServer({
+    startedAtMs: Date.now(),
+    lastCycleAt: () => engine.getLastCycleAt(),
+    markets: () => engine.getMarketHealth(),
+    settlerStats: () => created?.settler.getStats() ?? {},
+    registry: () => directory.status(),
+    settlerWired: !!created,
+    balanceWei: () => poller?.get() ?? null,
+    // Floor of 30s: a cycle is ~3 internal HTTP fetches, and an external monitor must not
+    // page on one slow order-book response or GC pause (5 x 500ms alone would be 2.5s).
+    staleMs: envInt('HEALTH_STALE_MS', Math.max(5 * pollMs, 30_000)),
+    minBalanceWei: parseEthToWei(process.env.SETTLER_MIN_ETH, 100_000_000_000_000n),
+  })
+  healthServer.listen(healthPort, '0.0.0.0', () => {
+    console.log(`[matching-engine] HTTP on http://0.0.0.0:${healthPort}/health`)
+  })
   console.log(`Matching engine polling ${orderBookUrl}/orderbook every ${config.pollIntervalMs ?? 500}ms`)
 
   // ─── Graceful shutdown ──────────────────────────────────────────────────────
@@ -115,7 +143,8 @@ async function start() {
   // see src/shutdown.ts for the sequence and SHUTDOWN_TIMEOUT_MS for the bound.
   const shutdownHandler = createShutdownHandler({
     log: (msg) => console.log(msg),
-    stopEngine: async () => { directory.stop(); await engine.stop() },
+    stopEngine: async () => { directory.stop(); poller?.stop(); await engine.stop() },
+    closeHealth: () => closeHealthServer(healthServer),
     drainSettler: created ? () => created!.settler.whenIdle() : undefined,
     describePending: created ? () => created!.settler.describePending() : undefined,
     closeRedis: created ? () => created!.redis.quit().then(() => {}) : undefined,
