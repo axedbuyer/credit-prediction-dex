@@ -193,8 +193,6 @@ function briefError(err: unknown): string {
   return m.split('\n')[0].slice(0, 300)
 }
 
-/** Funding epoch the cron runs on (every 8 hours) — used only to express "epochs behind". */
-export const EPOCH_SECONDS = 8 * 3600
 
 export interface AccrualState {
   consecutiveFailures: number
@@ -317,11 +315,12 @@ export class FundingKeeper {
     try {
       const last = await this.readLastFundingTime()
       const ageSec = Math.max(0, Math.floor(Date.now() / 1000) - Number(last))
-      behind = String(Math.floor(ageSec / EPOCH_SECONDS))
+      // Hours, not "epochs": on-chain epochLength (1 day) differs from the keeper's 8h cron.
+      behind = (ageSec / 3600).toFixed(1) + 'h'
     } catch { /* RPC may be the very thing that is down */ }
     console.error(
       `[ALERT] funding-keeper accrual failed market=${this.config.label ?? 'default'} ` +
-      `attempts=${attempts} epochsBehind=${behind} consecutiveFailures=${this.consecutiveFailures} ` +
+      `attempts=${attempts} sinceLastAccrual=${behind} consecutiveFailures=${this.consecutiveFailures} ` +
       `error=${this.lastError}`,
     )
   }

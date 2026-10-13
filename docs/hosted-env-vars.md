@@ -137,7 +137,7 @@ markets + keeper ETH balance state). (No CLOB address needed.)
 exponential backoff from `ACCRUE_RETRY_BASE_MS`; contract reverts are not retried, and
 `lastFundingTime` is re-read before any retry so a landed attempt is never re-submitted. When a
 market exhausts its attempts the log gets one `[ALERT] funding-keeper accrual failed market=<slug>
-attempts=N epochsBehind=N ...` line; `[ALERT] funding-keeper wallet low on ETH` fires (max once
+attempts=N sinceLastAccrual=<hours>h ...` line; `[ALERT] funding-keeper wallet low on ETH` fires (max once
 per hour) when the wallet is under `KEEPER_MIN_ETH`. Grep Railway logs for `[ALERT]`.
 
 **Holder discovery (both keepers):** holders are discovered from YES `Transfer` events

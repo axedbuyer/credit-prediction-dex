@@ -912,7 +912,7 @@ describe('FundingKeeper — retry and alerting', () => {
     expect(walletClient.writeContract).toHaveBeenCalledTimes(4)
     const a = alerts(errSpy)
     expect(a).toHaveLength(1)
-    expect(a[0]).toMatch(/market=mstr .*attempts=4 .*epochsBehind=\d+ .*consecutiveFailures=1 .*error=/)
+    expect(a[0]).toMatch(/market=mstr .*attempts=4 .*sinceLastAccrual=[\d.]+h .*consecutiveFailures=1 .*error=/)
     expect(keeper.getAccrualState().consecutiveFailures).toBe(1)
     expect(keeper.getAccrualState().lastError).toMatch(/HTTP request failed/)
     expect(holders.refresh).toHaveBeenCalled()   // Phase B ran
