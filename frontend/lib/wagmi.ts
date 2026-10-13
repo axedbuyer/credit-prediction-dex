@@ -1,5 +1,9 @@
 import { createConfig, http } from 'wagmi'
-import { baseSepolia } from 'wagmi/chains'
+import { base, baseSepolia } from 'wagmi/chains'
+import { ACTIVE_CHAIN, assertChainConfig } from '@/lib/chainConfig'
+
+// Fail loudly (build/boot) if mainnet is selected without mainnet addresses.
+assertChainConfig()
 import { connectorsForWallets } from '@rainbow-me/rainbowkit'
 import { metaMaskWallet, coinbaseWallet } from '@rainbow-me/rainbowkit/wallets'
 
@@ -37,9 +41,11 @@ const connectors = connectorsForWallets(
 )
 
 export const wagmiConfig = createConfig({
-  chains: [baseSepolia],
+  chains: [ACTIVE_CHAIN],
   connectors,
   transports: {
+    // Both keys are required by the config's type; only ACTIVE_CHAIN is in `chains`.
+    [base.id]: http(process.env.NEXT_PUBLIC_RPC_URL),
     [baseSepolia.id]: http(process.env.NEXT_PUBLIC_RPC_URL),
   },
   ssr: true,

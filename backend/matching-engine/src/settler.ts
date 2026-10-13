@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import { createPublicClient, createWalletClient, defineChain, http, BaseError, ContractFunctionRevertedError } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import type { Address, Hash } from 'viem'
 import type { StoredOrder } from './types'
 import type { MatchingEngine } from './engine'
@@ -712,22 +713,15 @@ export function createSettler(engine: MatchingEngine, directory: MarketDirectory
   const privateKey = process.env.SETTLER_PRIVATE_KEY
   if (!privateKey) throw new Error('SETTLER_PRIVATE_KEY env var is required')
 
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('RPC_URL (or BASE_SEPOLIA_RPC_URL) env var is required')
 
   const account = privateKeyToAccount(privateKey as `0x${string}`)
   const transport = http(rpcUrl)
 
   // CHAIN_ID env override lets a local anvil node (31337) work; default Base Sepolia.
   const chainId = parseInt(process.env.CHAIN_ID ?? String(baseSepolia.id))
-  const chain = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id: chainId,
-        name: 'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls: { default: { http: [rpcUrl] } },
-      })
+  const chain = chainFor(chainId, rpcUrl)
   const publicClient = createPublicClient({ chain, transport })
   const walletClient = createWalletClient({ account, chain, transport })
 

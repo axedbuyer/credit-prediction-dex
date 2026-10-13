@@ -2,6 +2,7 @@ import path from 'path'
 import fs from 'fs'
 import { createPublicClient, defineChain, http } from 'viem'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import { HttpOrderBookClient } from './client'
 import { MatchingEngine } from './engine'
 import { createSettler } from './settler'
@@ -41,16 +42,10 @@ const config: MatchingEngineConfig = {
 const registryAddress = process.env.MARKET_REGISTRY_ADDRESS as Hex | undefined
 let directory: MarketDirectory
 if (registryAddress) {
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('MARKET_REGISTRY_ADDRESS requires BASE_SEPOLIA_RPC_URL')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('MARKET_REGISTRY_ADDRESS requires RPC_URL (or BASE_SEPOLIA_RPC_URL)')
   const chainId = parseInt(process.env.CHAIN_ID ?? String(baseSepolia.id))
-  const chain = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id: chainId, name: 'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls: { default: { http: [rpcUrl] } },
-      })
+  const chain = chainFor(chainId, rpcUrl)
   directory = new MarketDirectory({
     client: createPublicClient({ chain, transport: http(rpcUrl) }) as unknown as IRegistryClient,
     registryAddress,
@@ -96,7 +91,7 @@ async function start() {
   // engine against a book) — in that mode there's no settlement queue or Redis
   // connection for shutdown to drain.
   let created: CreatedSettler | undefined
-  if (process.env.SETTLER_PRIVATE_KEY && process.env.BASE_SEPOLIA_RPC_URL) {
+  if (process.env.SETTLER_PRIVATE_KEY && rpcUrlFromEnv()) {
     created = createSettler(engine, directory, usdcAddress)
     console.log('[settler] wired — matched pairs will be settled on-chain')
   } else {
