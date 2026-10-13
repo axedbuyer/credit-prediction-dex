@@ -4,6 +4,7 @@ import { buildApp } from './server'
 import { RedisOrderStore, createRedisClient } from './orderbook'
 import { createPublicClient, http } from 'viem'
 import { createChainReader, resolveViemChain } from './chain'
+import { rpcUrlFromEnv } from './chains'
 import { MarketDirectory, type IRegistryClient, type Hex } from './registry'
 import { MarketServicesRegistry } from './marketServices'
 import { migrateLegacyKeys, type MigrationRedis } from './migration'
@@ -66,7 +67,7 @@ async function main() {
     // CHAIN_ID env override lets a local Anvil node (31337) work without code changes.
     chainId: parseInt(process.env.CHAIN_ID ?? '84532'),
     port: parseInt(process.env.PORT ?? '3001'),
-    rpcUrl: process.env.BASE_SEPOLIA_RPC_URL,
+    rpcUrl: rpcUrlFromEnv(),
     // STATIC fallback only — see feeSource below, which is the live rate
     // server.ts actually reads per-request. Kept here for any caller that
     // still inspects config.feeBps directly (defensive; buildApp prefers
@@ -153,7 +154,7 @@ async function main() {
   let marketServices: MarketServicesRegistry | undefined
   let syncTimer: ReturnType<typeof setInterval> | undefined
   if (registryAddress) {
-    if (!config.rpcUrl) throw new Error('MARKET_REGISTRY_ADDRESS requires BASE_SEPOLIA_RPC_URL')
+    if (!config.rpcUrl) throw new Error('MARKET_REGISTRY_ADDRESS requires RPC_URL (or BASE_SEPOLIA_RPC_URL)')
     const registryClient = createPublicClient({
       chain: resolveViemChain(config.chainId, config.rpcUrl),
       transport: http(config.rpcUrl),
