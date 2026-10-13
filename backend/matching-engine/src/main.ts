@@ -96,7 +96,7 @@ async function start() {
     created = createSettler(engine, directory, usdcAddress)
     console.log('[settler] wired — matched pairs will be settled on-chain')
   } else {
-    console.warn('[settler] SETTLER_PRIVATE_KEY or BASE_SEPOLIA_RPC_URL not set — matches will be logged only')
+    console.warn('[settler] SETTLER_PRIVATE_KEY or RPC_URL/BASE_SEPOLIA_RPC_URL not set — matches will be logged only')
   }
 
   engine.start()
