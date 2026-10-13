@@ -295,14 +295,14 @@ Mainnet *plumbing* exists (`CHAIN_ID=8453`, `RPC_URL`, `NEXT_PUBLIC_CHAIN_ID`,
 `make deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, USDC pinned per chain in
 `Deploy.s.sol`) but has **never been run against 8453**. Open items, in order:
 
-- **`Deploy.s.sol` ops-address defaults are the TESTNET hot wallets.** `KEEPER_ADDRESS`,
-  `PAUSER_ADDRESS`, `ORACLE_ATTESTER_ADDRESS` and the team wallet fall back to the Sepolia
-  keeper/deployer EOAs (see "Ops wallets and secrets"). A mainnet run that forgets to set
-  them would grant mainnet roles to testnet keys whose private keys sit in local `.env`
-  files (and one in this repo's chat history). Fix before mainnet: make these REQUIRED (no
-  default) when `block.chainid == 8453`, the same way USDC is pinned — and do it as part
-  of the Safe role ceremony, since admin/pauser/attester should land on the Safe anyway.
-  `AddMarket.s.sol` needs the same review.
+- **`Deploy.s.sol` ops-address defaults are unsafe for mainnet.** `KEEPER_ADDRESS` falls
+  back to `DEFAULT_KEEPER` = the **Sepolia keeper EOA** (its key sits in local `.env` files),
+  and `PAUSER_ADDRESS`, `ORACLE_ATTESTER_ADDRESS` and `TEAM_WALLET` fall back to whichever raw
+  deployer EOA runs the script (not a Safe). A mainnet run that forgets the env vars would
+  grant KEEPER_ROLE to a testnet key and leave pause/attest power on a hot EOA. Fix before
+  mainnet: make all four REQUIRED (no default) when `block.chainid == 8453`, the same way
+  USDC is pinned — as part of the Safe role ceremony, since pauser/attester/admin should
+  land on the Safe anyway. Give `AddMarket.s.sol` the same review.
 - Fresh mainnet hot wallets (keeper, settler, liquidator) — never reuse testnet keys.
 - Safe role ceremony + credit-event dress rehearsal on Sepolia (production-plan
   requirements 2 and 4); audit + legal read (requirement 3 / Phase 3).
