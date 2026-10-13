@@ -31,12 +31,15 @@ Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 202
 `depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
 `contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built and merged to `main`
 (2026-10-03); its contracts are DEPLOYED to Base Sepolia and the Railway services
-and frontend run in registry mode since 2026-10-03** — 201 contract tests (incl. a 2-market invariant suite), 397
-off-chain tests, 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
+and frontend run in registry mode since 2026-10-03** — 201 contract tests (incl. a 2-market invariant suite), 440
+off-chain tests (2026-10-13), 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
 MarketRegistry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` (addresses per market in
 `contracts/deployments/base-sepolia/`). Without `MARKET_REGISTRY_ADDRESS` /
 `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` every service falls back to legacy single-market
-(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`.
+(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Ops hardening
+(2026-10-13):** matching-engine `GET /health`, funding-keeper retry + `[ALERT]` logs, hourly
+uptime checks for the liquidator bot + hot-wallet gas, and mainnet *plumbing* only
+(`CHAIN_ID`/`RPC_URL`/`NEXT_PUBLIC_CHAIN_ID`, `make deploy-mainnet` guard) — nothing on mainnet.
 
 ---
 
@@ -239,13 +242,19 @@ from the old single-set env vars. Per-service multi-market detail: `backend/CLAU
                       PositionFrozen/SlippageExceeded/NonceUsed reverts at gas-estimation
                       and prunes the offending order(s) instead of retrying (other reverts
                       keep the retry behavior). Wires the settler when SETTLER_PRIVATE_KEY +
-                      BASE_SEPOLIA_RPC_URL are set (log-only fallback otherwise).
+                      RPC_URL (or BASE_SEPOLIA_RPC_URL) are set (log-only fallback
+                      otherwise). GET /health on HEALTH_PORT (3005): 503 "stale" when the
+                      match loop hasn't completed a cycle in max(5×poll, 30s); per-market
+                      lastError/settled/pruned; settler ETH + settlerLowBalance.
                       Matches each market's book independently and settles on that
                       market's CLOB; refuses (prunes) any pair whose tokens aren't exactly
                       {USDC, that market's YES/NO} — CLOBSettlement itself doesn't check.
 /funding-keeper     — accrueFunding() every epoch; flags (locks) any position
                       breaching the seizure trigger. Every active market, sequentially,
-                      one market's failure isolated from the others.
+                      one market's failure isolated from the others. Transient RPC/nonce
+                      errors retry with backoff (ACCRUE_MAX_ATTEMPTS, never re-sends an
+                      accrual/flag that already landed); a market that still fails logs
+                      one `[ALERT]` line; low keeper ETH alerts hourly (KEEPER_MIN_ETH).
 /liquidation-keeper — exposes GET /claimable[?market=<slug>] (flagged positions +
                       formulaic price P, each tagged market/creditMarket/liquidationEngine);
                       does not claim itself — claiming is permissionless.
