@@ -1,7 +1,7 @@
 # Pari: MVP → Production — Minimum Incremental Build Plan
 
-Status: approved for scope 2026-07-06. **Phase 1 is done** (2026-09-25); **Phase 2 is done
-except the items still unticked below**; Phase 3 is half done (both contract guard-rails, the
+Status: approved for scope 2026-07-06. **Phase 1 is done** (2026-09-25); **Phase 2 is done**
+(2026-10-13; only a few mainnet loose ends noted inline); Phase 3 is half done (both contract guard-rails, the
 invariant suite and the F1/F2/F4 fixes shipped in the 2026-10-01 batch-1 redeploy — the Safe
 role ceremony, audit and legal read are open); Phase 4 not started. Items marked ✅ are
 shipped. Last reviewed 2026-10-13.
@@ -81,10 +81,12 @@ from `Transfer` events (requirement 1 below).
 - ✅ Holder indexing (requirement 1).
 - ✅ Graceful shutdown on all services (drain in-flight settlement before exit;
   2026-09-26 — plus `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`).
-- `/health` on order-book-server ✅ (checks Redis) and matching-engine (still none — it
-  has no HTTP server; keepers already have one).
-- Retry-and-alert wrapper on funding-keeper (today one RPC hiccup silently skips an
-  epoch cycle's accrual — seizure checks now run even when accrual fails, 2026-09-26).
+- ✅ `/health` on order-book-server (checks Redis) and matching-engine (2026-10-13: loop
+  staleness → 503, per-market errors, settler ETH). Its Railway domain + uptime check are
+  pending an owner decision on public health URLs.
+- ✅ Retry-and-alert wrapper on funding-keeper (2026-10-13): bounded backoff for
+  transient errors, landed-attempt detection (no double submit), one `[ALERT]` log line
+  per failed market, hourly low-ETH alert, `alerts` in its internal /health.
 - ✅ **Liquidator of last resort** (not in the original plan): `backend/keepers/liquidator-bot.ts`
   claims every flagged position promptly and resells via the CLOB; live on Railway since
   2026-09-29 (multi-market since 2026-10-03), own hot wallet `0x941A…9661`. ✅ 2026-10-13:
@@ -95,10 +97,13 @@ from `Transfer` events (requirement 1 below).
 - ✅ Rate limiting on `POST /order` (+ `DELETE /order/:id`, per client IP,
   `@fastify/rate-limit`); ✅ CORS origin from env instead of `*` (`CORS_ORIGINS` on
   order-book-server and liquidation-keeper).
-- Mainnet plumbing: viem `base` chain object in settler/keepers, `deployments/base.json`
+- ✅ Mainnet plumbing (2026-10-13 — code paths only, never run against 8453): viem `base` chain object in settler/keepers, `deployments/base.json`
   naming convention, foundry.toml `[rpc_endpoints]`/`[etherscan]` `base` entries,
   `deploy-mainnet` Makefile target with a chain-id guard and mainnet USDC constant,
   frontend 8453 entries in `lib/contracts.ts` / `lib/wagmi.ts` / `lib/constants.ts`.
+  Still open for mainnet: RPC provider choice, a fork rehearsal of `Deploy.s.sol` on 8453,
+  and explicit ops addresses — `Deploy.s.sol`'s KEEPER/PAUSER/team defaults are the
+  TESTNET hot wallets and must be overridden (ties into the Safe role ceremony).
 - **Deliberately skipped**: structured logging/metrics stack, subgraph, private relay
   for liquidation MEV (documented-acceptable MVP limitation).
 
