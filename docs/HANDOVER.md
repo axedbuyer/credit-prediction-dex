@@ -281,10 +281,33 @@ list.
    raw EOAs — see "Ops wallets and secrets" above), invariant/fuzz suite + audit (audit
    still deliberately deferred by the owner, not forgotten), credit-event dress
    rehearsal on Sepolia.
-2. ~~Liquidator bot~~ — live on Railway since 2026-09-29 (`liquidator-bot`, internal).
-   Keep its USDC float ≥ the largest position it may claim (a claim costs ≤ m×Q) and watch
-   its logs for `ALERT` lines (float / InsuranceFund short).
-3. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
+2. ~~Liquidator bot~~ — live on Railway since 2026-09-29 (`liquidator-bot`). Keep its USDC
+   float ≥ the largest position it may claim (a claim costs ≤ m×Q). Since 2026-10-13 the
+   hourly uptime workflow fails (email) on a stale claim loop, a float/InsuranceFund
+   shortfall, or low hot-wallet gas — no need to watch logs.
+3. ~~Ops polish~~ — done 2026-10-13 (matching-engine /health, funding-keeper retry +
+   `[ALERT]`, uptime coverage). Remaining: a public domain for matching-engine port 3005 +
+   its uptime step.
+
+### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
+
+Mainnet *plumbing* exists (`CHAIN_ID=8453`, `RPC_URL`, `NEXT_PUBLIC_CHAIN_ID`,
+`make deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, USDC pinned per chain in
+`Deploy.s.sol`) but has **never been run against 8453**. Open items, in order:
+
+- **`Deploy.s.sol` ops-address defaults are the TESTNET hot wallets.** `KEEPER_ADDRESS`,
+  `PAUSER_ADDRESS`, `ORACLE_ATTESTER_ADDRESS` and the team wallet fall back to the Sepolia
+  keeper/deployer EOAs (see "Ops wallets and secrets"). A mainnet run that forgets to set
+  them would grant mainnet roles to testnet keys whose private keys sit in local `.env`
+  files (and one in this repo's chat history). Fix before mainnet: make these REQUIRED (no
+  default) when `block.chainid == 8453`, the same way USDC is pinned — and do it as part
+  of the Safe role ceremony, since admin/pauser/attester should land on the Safe anyway.
+  `AddMarket.s.sol` needs the same review.
+- Fresh mainnet hot wallets (keeper, settler, liquidator) — never reuse testnet keys.
+- Safe role ceremony + credit-event dress rehearsal on Sepolia (production-plan
+  requirements 2 and 4); audit + legal read (requirement 3 / Phase 3).
+- Pick a mainnet RPC provider; fork-rehearse `Deploy.s.sol` + `AddMarket.s.sol` on a Base
+  mainnet fork (`anvil --fork-url $BASE_RPC_URL`) before broadcasting.
 
 For redeploying contracts or services after a code change, use `docs/redeploy-guide.md`
 — it captures the dry-run and EIP-712 domain-invalidation gotchas above in runbook form.
