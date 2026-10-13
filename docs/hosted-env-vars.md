@@ -108,8 +108,18 @@ ORDER_BOOK_URL=http://<order-book-server private domain>:<port>   # Railway priv
 SETTLER_PRIVATE_KEY=<SECRET — backend/matching-engine/.env>
 BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 REDIS_URL=${{Redis.REDIS_URL}}
+HEALTH_PORT=3005          # optional, default 3005
+HEALTH_STALE_MS=          # optional, default 5 x POLL_INTERVAL_MS
+SETTLER_MIN_ETH=0.0001    # optional, default 0.0001
 ```
-No public domain, no HTTP health check (no server in this process).
+`GET :3005/health` (bound 0.0.0.0): 200 JSON, or 503 `status: "stale"` when the last
+completed match cycle is older than `HEALTH_STALE_MS`. Body has per-market
+`lastCycleAt`/`lastError`/`settledPairs`/`prunedOrders` (since boot), `registry` status,
+`settlerWired`, `settlerBalanceEth` (cached, refreshed <= every 60s; null if unknown) and
+`settlerLowBalance` (balance < `SETTLER_MIN_ETH`; reported in the body only, no 503).
+For external monitoring, Railway needs a public domain targeting `HEALTH_PORT` (set up
+by the orchestrator, not in this repo); without one the endpoint is only reachable on the
+private network.
 
 ## Railway — funding-keeper (root dir `backend/keepers`, internal-only)
 

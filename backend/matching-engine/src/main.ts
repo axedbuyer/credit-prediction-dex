@@ -6,6 +6,7 @@ import { HttpOrderBookClient } from './client'
 import { MatchingEngine } from './engine'
 import { createSettler } from './settler'
 import { createShutdownHandler } from './shutdown'
+import { createHealthServer, startBalancePoller, closeHealthServer, parseEthToWei } from './health'
 import { MarketDirectory, legacyMarket, type Hex, type IRegistryClient } from './registry'
 import type { CreatedSettler } from './settler'
 import type { MatchingEngineConfig } from './types'
@@ -104,6 +105,25 @@ async function start() {
   }
 
   engine.start()
+
+  // /health: liveness of the match loop + settler wallet balance (cached, never blocks).
+  const poller = created ? startBalancePoller(created.getBalance) : undefined
+  const pollMs = config.pollIntervalMs ?? 500
+  const healthPort = parseInt(process.env.HEALTH_PORT ?? '3005')
+  const healthServer = createHealthServer({
+    startedAtMs: Date.now(),
+    lastCycleAt: () => engine.getLastCycleAt(),
+    markets: () => engine.getMarketHealth(),
+    settlerStats: () => created?.settler.getStats() ?? {},
+    registry: () => directory.status(),
+    settlerWired: !!created,
+    balanceWei: () => poller?.get() ?? null,
+    staleMs: parseInt(process.env.HEALTH_STALE_MS ?? String(5 * pollMs)),
+    minBalanceWei: parseEthToWei(process.env.SETTLER_MIN_ETH, 100_000_000_000_000n),
+  })
+  healthServer.listen(healthPort, '0.0.0.0', () => {
+    console.log(`[matching-engine] HTTP on http://0.0.0.0:${healthPort}/health`)
+  })
   console.log(`Matching engine polling ${orderBookUrl}/orderbook every ${config.pollIntervalMs ?? 500}ms`)
 
   // ─── Graceful shutdown ──────────────────────────────────────────────────────
@@ -115,7 +135,8 @@ async function start() {
   // see src/shutdown.ts for the sequence and SHUTDOWN_TIMEOUT_MS for the bound.
   const shutdownHandler = createShutdownHandler({
     log: (msg) => console.log(msg),
-    stopEngine: async () => { directory.stop(); await engine.stop() },
+    stopEngine: async () => { directory.stop(); poller?.stop(); await engine.stop() },
+    closeHealth: () => closeHealthServer(healthServer),
     drainSettler: created ? () => created!.settler.whenIdle() : undefined,
     describePending: created ? () => created!.settler.describePending() : undefined,
     closeRedis: created ? () => created!.redis.quit().then(() => {}) : undefined,
