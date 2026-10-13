@@ -109,7 +109,13 @@ async function start() {
   // /health: liveness of the match loop + settler wallet balance (cached, never blocks).
   const poller = created ? startBalancePoller(created.getBalance) : undefined
   const pollMs = config.pollIntervalMs ?? 500
-  const healthPort = parseInt(process.env.HEALTH_PORT ?? '3005')
+  // Empty env values (as shipped in .env.example) mean "unset" — parseInt('') is NaN, which
+  // would make the staleness check silently never fire.
+  const envInt = (name: string, dflt: number): number => {
+    const n = parseInt(process.env[name] ?? '')
+    return Number.isFinite(n) && n > 0 ? n : dflt
+  }
+  const healthPort = envInt('HEALTH_PORT', 3005)
   const healthServer = createHealthServer({
     startedAtMs: Date.now(),
     lastCycleAt: () => engine.getLastCycleAt(),
@@ -118,7 +124,9 @@ async function start() {
     registry: () => directory.status(),
     settlerWired: !!created,
     balanceWei: () => poller?.get() ?? null,
-    staleMs: parseInt(process.env.HEALTH_STALE_MS ?? String(5 * pollMs)),
+    // Floor of 30s: a cycle is ~3 internal HTTP fetches, and an external monitor must not
+    // page on one slow order-book response or GC pause (5 x 500ms alone would be 2.5s).
+    staleMs: envInt('HEALTH_STALE_MS', Math.max(5 * pollMs, 30_000)),
     minBalanceWei: parseEthToWei(process.env.SETTLER_MIN_ETH, 100_000_000_000_000n),
   })
   healthServer.listen(healthPort, '0.0.0.0', () => {
