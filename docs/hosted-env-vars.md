@@ -109,7 +109,7 @@ SETTLER_PRIVATE_KEY=<SECRET — backend/matching-engine/.env>
 BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 REDIS_URL=${{Redis.REDIS_URL}}
 HEALTH_PORT=3005          # optional, default 3005
-HEALTH_STALE_MS=          # optional, default 5 x POLL_INTERVAL_MS
+HEALTH_STALE_MS=          # optional, default max(5 x POLL_INTERVAL_MS, 30000)
 SETTLER_MIN_ETH=0.0001    # optional, default 0.0001
 ```
 `GET :3005/health` (bound 0.0.0.0): 200 JSON, or 503 `status: "stale"` when the last
