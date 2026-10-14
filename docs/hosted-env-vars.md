@@ -157,7 +157,7 @@ per hour) when the wallet is under `KEEPER_MIN_ETH`. Grep Railway logs for `[ALE
 token deploy block (47528136 on Base Sepolia, the batch-1 deploy); the keepers refuse to boot without it.
 `REDIS_URL` (Railway reference to the managed Redis) persists the scan cursor + holder
 set under `holder-index:84532:<yes token>:*`, shared by both keepers, so only the first
-boot pays the full backfill (one `eth_getLogs` call per 1,000 blocks since the deploy
+boot pays the full backfill (one `eth_getLogs` call per 200 blocks since the deploy
 block — the public RPC's cap per call). `TRACKED_HOLDERS` (optional extra seed addresses) is no longer
 set — removed from both services 2026-09-26. Optional tuning: `HOLDER_INDEX_CHUNK_SIZE` (200 — the public Base Sepolia RPC rejects larger `eth_getLogs` ranges since ~2026-10-14), `HOLDER_INDEX_CONCURRENCY`
 (4).
