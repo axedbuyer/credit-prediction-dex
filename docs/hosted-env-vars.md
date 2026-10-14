@@ -95,7 +95,7 @@ That would rule out a stable shared hop in front of the edge. Re-run this check 
 any hosting change: probe with ~10 plain requests plus a few spoofed ones, and read the
 `x-ratelimit-remaining` sequence.
 
-## Railway — matching-engine (root dir `backend/matching-engine`, internal-only)
+## Railway — matching-engine (root dir `backend/matching-engine`, read-only public /health)
 
 ```
 YES_TOKEN_ADDRESS=0x9ED5A4c6B1B5334645Ec47e7ce087e281fcEC59D
@@ -117,9 +117,11 @@ completed match cycle is older than `HEALTH_STALE_MS`. Body has per-market
 `lastCycleAt`/`lastError`/`settledPairs`/`prunedOrders` (since boot), `registry` status,
 `settlerWired`, `settlerBalanceEth` (cached, refreshed <= every 60s; null if unknown) and
 `settlerLowBalance` (balance < `SETTLER_MIN_ETH`; reported in the body only, no 503).
-For external monitoring, Railway needs a public domain targeting `HEALTH_PORT` (set up
-by the orchestrator, not in this repo); without one the endpoint is only reachable on the
-private network.
+**Public health URL (2026-10-14):**
+`https://matching-engine-production-f04c.up.railway.app/health` — a Railway domain on port 3005;
+the health server answers only `GET /health`. Monitored hourly by `.github/workflows/uptime.yml`
+(HTTP 200 — a 503 "stale" is re-checked once after 45s — and `settlerWired` true; per-market
+`lastError` and `settlerLowBalance` only warn).
 
 ## Railway — funding-keeper (root dir `backend/keepers`, internal-only)
 
