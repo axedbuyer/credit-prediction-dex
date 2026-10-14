@@ -48,6 +48,12 @@
 #   6. hot-wallet gas             -> eth_getBalance of the keeper, settler and
 #      liquidator EOAs must each be >= its minimum (a wallet out of gas fails
 #      silently: accruals, fills or claims just stop landing).
+#   7. matching-engine /health    -> must be HTTP 200 (it returns 503 "stale"
+#      when the match loop hasn't completed a cycle in max(5x poll, 30s)) and
+#      settlerWired == true (else matched pairs are only logged, never
+#      settled). A 503 is re-checked once ~45s later before failing.
+#      Per-market lastError and settlerLowBalance only warn — settler gas is
+#      enforced by check 6.
 
 name: Uptime Monitor
 
@@ -67,6 +73,7 @@ env:
   FRONTEND_URL: https://credit-prediction-dex.vercel.app/
   LIQUIDATOR_BOT_HEALTH_URL: https://liquidator-bot-production-1939.up.railway.app/health
   LIQUIDATOR_BOT_STALE_SECONDS: "600"
+  MATCHING_ENGINE_HEALTH_URL: https://matching-engine-production-f04c.up.railway.app/health
   # Hot wallets (public addresses) and their minimum ETH balances, in wei.
   #   keeper   — accrueFunding x3 markets/day + flags; min 0.0005 ETH
   #   settler  — verifyAndSettle per fill (~2e-6 ETH each); min 0.0001 ETH
@@ -309,6 +316,42 @@ jobs:
           fi
           echo "liquidator-bot: OK (cycle ${age}s ago, markets=$(jq -r '(.markets // {}) | keys | join(",")' /tmp/bot_body.txt), claims=$(jq -r '.claims' /tmp/bot_body.txt), usdc=$(jq -r '.usdcBalance' /tmp/bot_body.txt))"
 
+      - name: matching-engine /health
+        id: check-me
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "GET $MATCHING_ENGINE_HEALTH_URL"
+          fetch_health() {
+            code=$(curl -sS --max-time 20 --retry 2 --retry-delay 10 --retry-all-errors \
+              -o /tmp/me_body.txt -w "%{http_code}" "$MATCHING_ENGINE_HEALTH_URL" || true)
+            echo "HTTP status: $code"
+            echo "Body:"
+            cat /tmp/me_body.txt || true
+            echo
+          }
+
+          fetch_health
+          if [ "$code" = "503" ]; then
+            echo "match loop reported stale — re-checking in 45s in case a cycle was mid-flight"
+            sleep 45
+            fetch_health
+          fi
+          if [ "$code" != "200" ]; then
+            echo "::error::matching-engine /health returned HTTP $code (expected 200; 503 = match loop stale) at $MATCHING_ENGINE_HEALTH_URL"
+            exit 1
+          fi
+          if [ "$(jq -r '.settlerWired' /tmp/me_body.txt)" != "true" ]; then
+            echo "::error::matching-engine settler is not wired (SETTLER_PRIVATE_KEY / RPC_URL missing) — matched pairs are not being settled on-chain"
+            exit 1
+          fi
+          jq -r '(.markets // {}) | to_entries[] | select(.value.lastError != null) | "\(.key): \(.value.lastError)"' /tmp/me_body.txt \
+            | while read -r line; do echo "::warning::matching-engine market error — $line"; done
+          if [ "$(jq -r '.settlerLowBalance' /tmp/me_body.txt)" = "true" ]; then
+            echo "::warning::matching-engine settler ETH is low ($(jq -r '.settlerBalanceEth' /tmp/me_body.txt) ETH)"
+          fi
+          echo "matching-engine: OK (cycle $(jq -r '.lastCycleAgeMs' /tmp/me_body.txt)ms ago, markets=$(jq -r '(.markets // {}) | keys | join(",")' /tmp/me_body.txt), settler=$(jq -r '.settlerBalanceEth' /tmp/me_body.txt) ETH)"
+
       - name: hot-wallet gas balances
         id: check-gas
         continue-on-error: true
@@ -363,6 +406,7 @@ jobs:
           check "funding-keeper liveness (via chain)" "${{ steps.check-funding.outcome }}"
           check "liquidator-bot /health"            "${{ steps.check-bot.outcome }}"
           check "hot-wallet gas balances"           "${{ steps.check-gas.outcome }}"
+          check "matching-engine /health"           "${{ steps.check-me.outcome }}"
 
           if [ "$failed" -eq 1 ]; then
             echo "::error::one or more uptime checks failed — see logs above for details"
