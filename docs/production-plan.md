@@ -1,20 +1,27 @@
 # Pari: MVP → Production — Minimum Incremental Build Plan
 
-Status: approved for scope 2026-07-06. **Phase 1 is done** (as of 2026-09-25); Phase 2
-is partly done; Phases 3–4 not started. Items marked ✅ are shipped.
+Status: approved for scope 2026-07-06. **Phase 1 is done** (2026-09-25); **Phase 2 is done**
+(2026-10-13; only a few mainnet loose ends noted inline); Phase 3 is half done (both contract guard-rails, the
+invariant suite and the F1/F2/F4 fixes shipped in the 2026-10-01 batch-1 redeploy — the Safe
+role ceremony, audit and legal read are open); Phase 4 not started. Items marked ✅ are
+shipped. Last reviewed 2026-10-13.
 Decisions locked: external audit (booked early, no budget cap set) · Railway hosting for
 Phase 1 · `setMark` max-Δ bound and `depositCap` contract changes are in scope.
 
 ## Where we are
 
 *Originally written 2026-07-06, when nothing had touched a real network. Current state
-(2026-09-25):* all seven contracts are live and verified on Base Sepolia (fee-aware
-CLOBSettlement since 2026-07-12), the four backend services run on Railway, the frontend
-is live on Vercel, the book is seeded, and GitHub Actions CI runs the forge, vitest and
-frontend type-check suites on every push/PR. See `docs/HANDOVER.md` for details. Still
-true: there is no mainnet configuration anywhere (foundry.toml, viem chains, wagmi, and
-the frontend address map are Sepolia-only), and every `DEFAULT_ADMIN_ROLE` sits on the
-raw deployer EOA.
+(2026-10-13):* **three markets are live on Base Sepolia** — MSTR (the batch-1 contract set,
+redeployed 2026-10-01 with the unified `owed()` fix, `depositCap` and bounded `setMark`),
+CoreWeave and Turkey (added 2026-10-03 via `AddMarket.s.sol` + `MarketRegistry`
+`0xdF1A…5720`); all 22 contract addresses are verified on Blockscout. Five backend
+services run on Railway in registry mode (order-book-server, matching-engine,
+funding-keeper, liquidation-keeper, liquidator-bot), the frontend is live on Vercel in
+registry mode, books are seeded, CI runs forge + vitest + frontend type-check on every
+PR, and an hourly GitHub Actions uptime monitor covers every service plus hot-wallet gas.
+See `docs/HANDOVER.md`. Still true: every `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE` and
+OracleRouter attester role sits on the raw deployer EOA (requirement 2 — the biggest
+open launch blocker we can build ourselves).
 
 The one genuine correctness gap called out here originally — keepers only watching a
 hand-maintained `TRACKED_HOLDERS` list — is closed: both keepers now discover YES holders
@@ -36,7 +43,9 @@ from `Transfer` events (requirement 1 below).
    that must be fixed before mainnet — `docs/security/invariant-findings-2026-09-26.md`),
    Slither clean (✅ first pass
    2026-09-26: 0 real High/Medium — `docs/security/slither-2026-09-26.md`), and an **external
-   audit** (see Phase 3). `depositCap` stays in regardless — audited code still launches
+   audit** (see Phase 3). ✅ F1/F2/F4 fixed (unified `owed()`) and deployed in the 2026-10-01
+   batch-1 redeploy; the suite now runs per market (2-market invariant suite, 201 forge tests).
+   Audit: **deliberately deferred by the owner** — not booked yet. `depositCap` stays in regardless — audited code still launches
    capped; the cap rises with track record.
 4. **Credit-event dress rehearsal on Base Sepolia** — full lifecycle on the public
    testnet with the real Safe flow: motion → pause → attest → settle, plus a live
@@ -63,7 +72,7 @@ from `Transfer` events (requirement 1 below).
 - ✅ `.env.example` for every backend service and the frontend.
 - ✅ GitHub Actions CI: `forge test`, vitest (both backend packages), `tsc --noEmit`
   (frontend) on every PR.
-- **Book the audit slot now** (lead time 2–6 weeks; ballpark $20–50k for seven small
+- **Book the audit slot** — *deferred by the owner, not booked (2026-10-13)* (lead time 2–6 weeks; ballpark $20–50k for seven small
   contracts at boutique firms; Cantina/Spearbit/Sherlock-style competitive review is the
   alternative channel).
 
@@ -72,27 +81,41 @@ from `Transfer` events (requirement 1 below).
 - ✅ Holder indexing (requirement 1).
 - ✅ Graceful shutdown on all services (drain in-flight settlement before exit;
   2026-09-26 — plus `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`).
-- `/health` on order-book-server ✅ (checks Redis) and matching-engine (still none — it
-  has no HTTP server; keepers already have one).
-- Retry-and-alert wrapper on funding-keeper (today one RPC hiccup silently skips an
-  epoch cycle's accrual — seizure checks now run even when accrual fails, 2026-09-26).
+- ✅ `/health` on order-book-server (checks Redis) and matching-engine (2026-10-13: loop
+  staleness → 503, per-market errors, settler ETH). Its Railway domain + uptime check are
+  pending an owner decision on public health URLs.
+- ✅ Retry-and-alert wrapper on funding-keeper (2026-10-13): bounded backoff for
+  transient errors, landed-attempt detection (no double submit), one `[ALERT]` log line
+  per failed market, hourly low-ETH alert, `alerts` in its internal /health.
+- ✅ **Liquidator of last resort** (not in the original plan): `backend/keepers/liquidator-bot.ts`
+  claims every flagged position promptly and resells via the CLOB; live on Railway since
+  2026-09-29 (multi-market since 2026-10-03), own hot wallet `0x941A…9661`. ✅ 2026-10-13:
+  public read-only `/health` + hourly uptime check (claim loop freshness, USDC-float and
+  InsuranceFund shortfall alerts) and a hot-wallet gas check for keeper/settler/liquidator.
+- ✅ **Multi-market** (not in the original plan): MSTR + CoreWeave + Turkey, one contract
+  set per market + `MarketRegistry`; cutover complete 2026-10-03 (`docs/multi-market-cutover.md`).
 - ✅ Rate limiting on `POST /order` (+ `DELETE /order/:id`, per client IP,
   `@fastify/rate-limit`); ✅ CORS origin from env instead of `*` (`CORS_ORIGINS` on
   order-book-server and liquidation-keeper).
-- Mainnet plumbing: viem `base` chain object in settler/keepers, `deployments/base.json`
+- ✅ Mainnet plumbing (2026-10-13 — code paths only, never run against 8453): viem `base` chain object in settler/keepers, `deployments/base.json`
   naming convention, foundry.toml `[rpc_endpoints]`/`[etherscan]` `base` entries,
   `deploy-mainnet` Makefile target with a chain-id guard and mainnet USDC constant,
   frontend 8453 entries in `lib/contracts.ts` / `lib/wagmi.ts` / `lib/constants.ts`.
+  Still open for mainnet: RPC provider choice, a fork rehearsal of `Deploy.s.sol` on 8453,
+  and explicit ops addresses — `Deploy.s.sol` defaults KEEPER to the Sepolia keeper EOA and
+  PAUSER/attester/team to the deployer EOA; make them required on 8453 (ties into the Safe
+  role ceremony — see HANDOVER "Before any Base MAINNET deploy").
 - **Deliberately skipped**: structured logging/metrics stack, subgraph, private relay
   for liquidation MEV (documented-acceptable MVP limitation).
 
 ### Phase 3 — Security & governance (~1–2 weeks build + audit lead time)
 
 - Requirements 2 and 3 (role ceremony, invariant suite, Slither, audit).
-- **`setMark` bound** (contract change): on-chain max-Δ-per-update so a compromised
+- ✅ **`setMark` bound** (contract change, batch-1 2026-10-01: ≤ 5 points per update, ≥ 1h
+  apart, plus an admin override): on-chain max-Δ-per-update so a compromised
   keeper key can't teleport the mark; document the off-chain policy (TWAP of CLOB mid).
-- **`depositCap`** (contract change): admin-settable cap enforced in
-  `CreditMarket.mint`, launch value ~$25–50k TVL.
+- ✅ **`depositCap`** (contract change, batch-1 2026-10-01): admin-settable cap enforced in
+  `CreditMarket.mint`; 50,000 USDC per market.
 - Size and fund the InsuranceFund (it backstops tail-case liquidations).
 - **Legal/regulatory read (external, start day one)**: the product is economically a
   CDS on a named US corporate — CFTC swap-definition exposure needs a real opinion
@@ -100,8 +123,9 @@ from `Transfer` events (requirement 1 below).
 
 ### Phase 4 — Mainnet launch (~1 week)
 
-- Deploy + verify via the hardened pipeline; run the role ceremony; dress rehearsal
-  sign-off (requirement 4) already done on Sepolia.
+- Deploy + verify via the hardened pipeline; run the role ceremony. Gate: the dress
+  rehearsal (requirement 4) must be signed off on Sepolia first — **not yet done**; it
+  depends on the Safe from requirement 2.
 - Seed liquidity: simple two-sided quoting bot for the team wallet (adapt the demo
   market-maker) — without it there is no market.
 - Write the two missing runbooks: deploy/rollback, and incident response (keeper down,

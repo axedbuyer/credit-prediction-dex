@@ -34,6 +34,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import { ClobYesSeller } from './clob-seller'
 import type { Address, Hash, LocalAccount } from 'viem'
 import { createMarketHolderIndex, HolderIndexManager, aggregateHolderStatus } from './holder-index'
@@ -1253,8 +1254,8 @@ export class DirectoryBotMarkets implements BotMarketsProvider {
 }
 
 async function main(): Promise<void> {
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('RPC_URL (or BASE_SEPOLIA_RPC_URL) env var is required')
 
   const privateKey = process.env.LIQUIDATOR_PRIVATE_KEY
   if (!privateKey) throw new Error('LIQUIDATOR_PRIVATE_KEY env var is required')
@@ -1267,14 +1268,7 @@ async function main(): Promise<void> {
 
   const chainId   = parseInt(process.env.CHAIN_ID ?? '84532')
   const transport = viemHttp(rpcUrl)
-  const chain     = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id:             chainId,
-        name:           'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls:        { default: { http: [rpcUrl] } },
-      })
+  const chain     = chainFor(chainId, rpcUrl)
 
   const account = privateKeyToAccount(parsePrivateKey(privateKey, 'LIQUIDATOR_PRIVATE_KEY'))
 

@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import { createPublicClient, createWalletClient, defineChain, http, BaseError, ContractFunctionRevertedError } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import type { Address, Hash } from 'viem'
 import type { StoredOrder } from './types'
 import type { MatchingEngine } from './engine'
@@ -398,9 +399,13 @@ class Settler extends EventEmitter {
       return
     }
 
-    // ── 4. Remove both orders from the order book store ───────────────────────
-    await this.removeBoth(maker, taker)
+    // ── 4. Remove both (now filled) orders from the order book store ──────────
+    await Promise.all([
+      this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)),
+      this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)),
+    ])
 
+    this.bumpStat(orderMarketSlug(maker), 'settled', 1)
     console.log(`[settler] settled ${txHash}`)
     this.emit('settled', txHash)
   }
@@ -424,7 +429,7 @@ class Settler extends EventEmitter {
       `[settler] FundingShortfall — removing seller order ${sellerOrder.id} ` +
       `(maker=${maker.id} taker=${taker.id})`,
     )
-    await this.orderRemover.removeOrder(sellerOrder.id, sellerOrder.side, orderMarketSlug(sellerOrder))
+    await this.pruneOrder(sellerOrder)
     // The other (buyer-side) order was untouched — it's still in the book,
     // so release it back into pendingSettlement or it can never match again.
     const otherOrder = sellerOrder.id === maker.id ? taker : maker
@@ -467,8 +472,8 @@ class Settler extends EventEmitter {
       `taker=${taker.id}(flagged=${takerFlagged})`,
     )
     const removals: Array<Promise<void>> = []
-    if (makerFlagged) removals.push(this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)))
-    if (takerFlagged) removals.push(this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)))
+    if (makerFlagged) removals.push(this.pruneOrder(maker))
+    if (takerFlagged) removals.push(this.pruneOrder(taker))
     await Promise.all(removals)
     // Exactly one side flagged (the !makerFlagged && !takerFlagged case
     // already returned above): the other order is untouched and still in
@@ -518,8 +523,8 @@ class Settler extends EventEmitter {
       `taker=${taker.id}(spent=${takerSpent})`,
     )
     const removals: Array<Promise<void>> = []
-    if (makerSpent) removals.push(this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)))
-    if (takerSpent) removals.push(this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)))
+    if (makerSpent) removals.push(this.pruneOrder(maker))
+    if (takerSpent) removals.push(this.pruneOrder(taker))
     await Promise.all(removals)
     if (!makerSpent) this.engine.releasePendingSettlement(maker.id)
     if (!takerSpent) this.engine.releasePendingSettlement(taker.id)
@@ -563,11 +568,28 @@ class Settler extends EventEmitter {
     return `maker=${makerId} taker=${takerId}` + (txHash ? ` tx=${txHash}` : ' (tx not yet submitted)')
   }
 
+  // Per-market counters since boot, for the /health endpoint (never persisted).
+  private readonly stats = new Map<string, { settled: number; pruned: number }>()
+
+  private bumpStat(slug: string, key: 'settled' | 'pruned', n: number): void {
+    const cur = this.stats.get(slug) ?? { settled: 0, pruned: 0 }
+    cur[key] += n
+    this.stats.set(slug, cur)
+  }
+
+  /** Settled pairs / pruned orders since boot, keyed by market slug. */
+  getStats(): Record<string, { settled: number; pruned: number }> {
+    return Object.fromEntries([...this.stats].map(([k, v]) => [k, { ...v }]))
+  }
+
+  /** Remove an order from the book as a prune (not a fill) and count it. */
+  private pruneOrder(order: StoredOrder): Promise<void> {
+    this.bumpStat(orderMarketSlug(order), 'pruned', 1)
+    return this.orderRemover.removeOrder(order.id, order.side, orderMarketSlug(order))
+  }
+
   private async removeBoth(maker: StoredOrder, taker: StoredOrder): Promise<void> {
-    await Promise.all([
-      this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)),
-      this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)),
-    ])
+    await Promise.all([this.pruneOrder(maker), this.pruneOrder(taker)])
   }
 }
 
@@ -706,28 +728,24 @@ export class RedisOrderRemover implements OrderRemover {
 export interface CreatedSettler {
   settler: Settler
   redis: { quit(): Promise<unknown> }
+  /** Settler wallet address + a balance reader, for the /health endpoint. */
+  address: Address
+  getBalance: () => Promise<bigint>
 }
 
 export function createSettler(engine: MatchingEngine, directory: MarketDirectory, usdcAddress: Address): CreatedSettler {
   const privateKey = process.env.SETTLER_PRIVATE_KEY
   if (!privateKey) throw new Error('SETTLER_PRIVATE_KEY env var is required')
 
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('RPC_URL (or BASE_SEPOLIA_RPC_URL) env var is required')
 
   const account = privateKeyToAccount(privateKey as `0x${string}`)
   const transport = http(rpcUrl)
 
   // CHAIN_ID env override lets a local anvil node (31337) work; default Base Sepolia.
   const chainId = parseInt(process.env.CHAIN_ID ?? String(baseSepolia.id))
-  const chain = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id: chainId,
-        name: 'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls: { default: { http: [rpcUrl] } },
-      })
+  const chain = chainFor(chainId, rpcUrl)
   const publicClient = createPublicClient({ chain, transport })
   const walletClient = createWalletClient({ account, chain, transport })
 
@@ -749,7 +767,7 @@ export function createSettler(engine: MatchingEngine, directory: MarketDirectory
     new RedisOrderRemover(redis),
   )
 
-  return { settler, redis }
+  return { settler, redis, address: account.address, getBalance: () => publicClient.getBalance({ address: account.address }) }
 }
 
 export { Settler }

@@ -32,6 +32,17 @@ class MatchingEngine extends EventEmitter {
    * emitting 'matched' for the current book before the process exits.
    */
   private activeCycles = 0
+
+  /** Health tracking (see health.ts): last completed runOnce() sweep, per-market. */
+  private lastCycleAtMs: number | null = null
+  private readonly marketHealth = new Map<string, { lastCycleAt: number | null; lastError: string | null }>()
+
+  /** Time of the last completed runOnce() sweep (even if a market's fetch failed). */
+  getLastCycleAt(): number | null { return this.lastCycleAtMs }
+
+  getMarketHealth(): Record<string, { lastCycleAt: number | null; lastError: string | null }> {
+    return Object.fromEntries([...this.marketHealth].map(([k, v]) => [k, { ...v }]))
+  }
   private idleWaiters: Array<() => void> = []
 
   /**
@@ -101,13 +112,19 @@ class MatchingEngine extends EventEmitter {
     // not starve the others; the first error is rethrown after the sweep.
     let firstErr: unknown
     for (const m of this.activeMarkets()) {
+      const h = this.marketHealth.get(m.slug) ?? { lastCycleAt: null, lastError: null }
       try {
         const book = await this.client.fetchOrderBook(m.slug)
         this.matchBook(m, book)
+        h.lastCycleAt = Date.now()
+        h.lastError = null
       } catch (err) {
         firstErr ??= err
+        h.lastError = err instanceof Error ? err.message : String(err)
       }
+      this.marketHealth.set(m.slug, h)
     }
+    this.lastCycleAtMs = Date.now()
     if (firstErr !== undefined) throw firstErr
   }
 

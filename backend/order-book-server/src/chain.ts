@@ -1,5 +1,5 @@
-import { createPublicClient, defineChain, http } from 'viem'
-import { baseSepolia } from 'viem/chains'
+import { createPublicClient, http } from 'viem'
+import { chainFor } from './chains'
 import type { Address } from 'viem'
 
 // ─── CreditMarket ABI (minimal — read-only pre-filter surface) ───────────────
@@ -58,14 +58,7 @@ export interface IPublicClient {
 // work without code changes in either reader) ─────────────────────────────
 
 export function resolveViemChain(chainId: number, rpcUrl: string) {
-  return chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id:             chainId,
-        name:           'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls:        { default: { http: [rpcUrl] } },
-      })
+  return chainFor(chainId, rpcUrl)
 }
 
 // ─── IChainReader — injectable interface consumed by server.ts ───────────────

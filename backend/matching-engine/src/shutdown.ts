@@ -26,6 +26,8 @@ export interface ShutdownDeps {
   drainSettler?: () => Promise<void>
   /** Settler.describePending() — for timeout logging only. Omit if no settler is wired. */
   describePending?: () => string | null
+  /** Closes the /health HTTP server. Omit if none. */
+  closeHealth?: () => Promise<void>
   /** Redis#quit() — omit if no Redis connection was opened. */
   closeRedis?: () => Promise<void>
   /** Defaults to process.exit; injectable for tests. */
@@ -75,6 +77,7 @@ export async function gracefulShutdown(signal: string, deps: ShutdownDeps): Prom
 
   const drainPromise = (async () => {
     try {
+      if (deps.closeHealth) await deps.closeHealth()
       await deps.stopEngine()
       if (deps.drainSettler) await deps.drainSettler()
       if (settled) return  // timed out while we were awaiting — already exited(1)
