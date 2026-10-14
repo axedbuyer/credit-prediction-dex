@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query'
 import { waitForTransactionReceipt } from '@wagmi/core'
 import { parseUnits, formatUnits } from 'viem'
 import { wagmiConfig } from '@/lib/wagmi'
+import { ACTIVE_CHAIN_ID } from '@/lib/chainConfig'
 import type { Market } from '@/lib/markets'
 import { ORDER_BOOK_URL } from '@/lib/constants'
 import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
@@ -394,7 +395,7 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       const domain = {
         name: 'CLOBSettlement',
         version: '1',
-        chainId: 84532,
+        chainId: ACTIVE_CHAIN_ID,
         verifyingContract: contracts.clobSettlement,
       } as const
 

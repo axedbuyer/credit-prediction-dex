@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs'
 import { createPublicClient, defineChain, http as viemHttp } from 'viem'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import type { Address } from 'viem'
 import { createMarketHolderIndex, HolderIndexManager, aggregateHolderStatus } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
@@ -565,8 +566,8 @@ export function parseCorsOrigins(raw: string | undefined): string[] | undefined 
 // ─── Production entry point ───────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('RPC_URL (or BASE_SEPOLIA_RPC_URL) env var is required')
 
   // Legacy mode (no MARKET_REGISTRY_ADDRESS) keeps today's requirement: the single
   // market's addresses must resolve (env, or the local deployments file).
@@ -576,14 +577,7 @@ async function main(): Promise<void> {
 
   const chainId   = parseInt(process.env.CHAIN_ID ?? '84532')
   const transport = viemHttp(rpcUrl)
-  const chain     = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({
-        id:             chainId,
-        name:           'Local',
-        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls:        { default: { http: [rpcUrl] } },
-      })
+  const chain     = chainFor(chainId, rpcUrl)
 
   const publicClient = createPublicClient({ chain, transport })
 

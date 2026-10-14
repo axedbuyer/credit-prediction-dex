@@ -5,6 +5,7 @@ import cron from 'node-cron'
 import { createPublicClient, createWalletClient, defineChain, http as viemHttp } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
+import { chainFor, rpcUrlFromEnv } from './chains'
 import type { Address, Hash } from 'viem'
 import { createMarketHolderIndex, HolderIndexManager, aggregateHolderStatus } from './holder-index'
 import type { ILogClient, HolderIndexStatus } from './holder-index'
@@ -21,6 +22,13 @@ export const CREDIT_MARKET_ABI = [
     stateMutability: 'nonpayable' as const,
     inputs: [],
     outputs: [],
+  },
+  {
+    name: 'lastFundingTime',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
   },
   {
     name: 'cumulativeFundingPerYES',
@@ -85,6 +93,8 @@ export interface IPublicClient {
     functionName: string
     args?: readonly unknown[]
   }): Promise<unknown>
+  /** Optional — only needed by the low-ETH-balance alert (viem's PublicClient has it). */
+  getBalance?(args: { address: Address }): Promise<bigint>
 }
 
 export interface IWalletClient {
@@ -112,6 +122,135 @@ export interface KeeperConfig {
   creditMarketAddress: Address
   /** Market slug — log prefix only (multi-market). */
   label?: string
+  /** Retry tuning; defaults to retryConfigFromEnv(). Tests inject a no-op sleep / tiny base. */
+  retry?: Partial<RetryConfig>
+}
+
+// ─── Retry + alert helpers ────────────────────────────────────────────────────
+
+export interface RetryConfig {
+  /** Total attempts per operation (1 = no retry). */
+  maxAttempts: number
+  /** Backoff base in ms: delay before retry n = base * 2^(n-1) + jitter(0..25% of that). */
+  baseMs: number
+  sleep: (ms: number) => Promise<void>
+}
+
+function positiveIntEnv(raw: string | undefined, fallback: number, min: number): number {
+  const n = Number.parseInt((raw ?? '').trim(), 10)
+  return Number.isFinite(n) && n >= min ? n : fallback
+}
+
+export function retryConfigFromEnv(env: NodeJS.ProcessEnv = process.env): RetryConfig {
+  return {
+    maxAttempts: positiveIntEnv(env.ACCRUE_MAX_ATTEMPTS, 4, 1),
+    baseMs:      positiveIntEnv(env.ACCRUE_RETRY_BASE_MS, 2000, 0),
+    sleep:       ms => new Promise(r => setTimeout(r, ms)),
+  }
+}
+
+export function backoffDelayMs(baseMs: number, retryNumber: number, random: () => number = Math.random): number {
+  const d = baseMs * 2 ** (retryNumber - 1)
+  return Math.round(d + random() * d * 0.25)
+}
+
+const TRANSIENT_RE = new RegExp([
+  'timeout', 'timed out', 'etimedout', 'econnreset', 'econnrefused', 'enotfound', 'eai_again',
+  'epipe', 'socket', 'fetch failed', 'network', 'http request failed', 'httprequesterror',
+  'rate limit', 'too many requests', '\\b429\\b', '\\b50[234]\\b', 'bad gateway',
+  'service unavailable', 'gateway', 'internal error', 'missing response', 'header not found',
+  'nonce too low', 'nonce has already been used', 'replacement transaction underpriced',
+  'replacement fee too low', 'transaction underpriced', 'already known',
+].join('|'), 'i')
+
+/**
+ * True only for errors worth retrying: RPC/network/timeouts and nonce/replacement races.
+ * A contract revert (viem ContractFunctionRevertedError anywhere in the cause chain, or an
+ * "execution reverted" message) is deterministic and NEVER transient — same decoding idea
+ * as matching-engine/src/settler.ts decodeSettlementError.
+ */
+export function isTransientError(err: unknown): boolean {
+  const seen = new Set<unknown>()
+  let cur: unknown = err
+  const texts: string[] = []
+  for (let i = 0; i < 8 && cur && typeof cur === 'object' && !seen.has(cur); i++) {
+    seen.add(cur)
+    const e = cur as { name?: unknown; message?: unknown; shortMessage?: unknown; details?: unknown; code?: unknown; cause?: unknown }
+    if (e.name === 'ContractFunctionRevertedError') return false
+    for (const t of [e.name, e.message, e.shortMessage, e.details, e.code]) {
+      if (typeof t === 'string') texts.push(t)
+    }
+    cur = e.cause
+  }
+  if (typeof err === 'string') texts.push(err)
+  const all = texts.join(' | ')
+  if (/execution reverted|reverted with/i.test(all)) return false
+  return TRANSIENT_RE.test(all)
+}
+
+function briefError(err: unknown): string {
+  const e = err as { shortMessage?: unknown; message?: unknown } | null
+  const m = typeof e?.shortMessage === 'string' ? e.shortMessage : typeof e?.message === 'string' ? e.message : String(err)
+  return m.split('\n')[0].slice(0, 300)
+}
+
+
+export interface AccrualState {
+  consecutiveFailures: number
+  lastSuccessAt: string | null
+  lastError: string | null
+}
+
+/**
+ * Low keeper-wallet ETH alert, shared by all markets (one wallet). Emits at most one
+ * `[ALERT]` line per `intervalMs` (default 1h) while the balance stays below the threshold.
+ */
+export class LowBalanceMonitor {
+  private lastAlertAt: number | null = null
+  private lastBalance: bigint | null = null
+
+  constructor(
+    private readonly client: Pick<IPublicClient, 'getBalance'>,
+    private readonly address: Address,
+    private readonly minWei: bigint,
+    private readonly intervalMs: number = 3_600_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async check(): Promise<void> {
+    if (!this.client.getBalance) return
+    let bal: bigint
+    try {
+      bal = await this.client.getBalance({ address: this.address })
+    } catch (err) {
+      console.error('[keeper] could not read keeper wallet ETH balance:', briefError(err))
+      return
+    }
+    this.lastBalance = bal
+    if (bal >= this.minWei) { this.lastAlertAt = null; return }
+    const t = this.now()
+    if (this.lastAlertAt !== null && t - this.lastAlertAt < this.intervalMs) return
+    this.lastAlertAt = t
+    console.error(
+      `[ALERT] funding-keeper wallet low on ETH address=${this.address} ` +
+      `balanceWei=${bal} minWei=${this.minWei} — accrueFunding/flagClaimable txs will fail; top up gas`,
+    )
+  }
+
+  state(): { lowBalance: boolean; balanceWei: string | null; minWei: string } {
+    return {
+      lowBalance: this.lastBalance !== null && this.lastBalance < this.minWei,
+      balanceWei: this.lastBalance?.toString() ?? null,
+      minWei: this.minWei.toString(),
+    }
+  }
+}
+
+export function minEthWeiFromEnv(env: NodeJS.ProcessEnv = process.env): bigint {
+  const raw = (env.KEEPER_MIN_ETH ?? '').trim()
+  const eth = raw === '' ? 0.0005 : Number(raw)
+  if (!Number.isFinite(eth) || eth < 0) return 500_000_000_000_000n
+  return BigInt(Math.round(eth * 1e18))
 }
 
 // ─── Scheduler interface (injected for testability) ───────────────────────────
@@ -132,6 +271,10 @@ export class FundingKeeper {
   private stopped = false
   private inFlightRun: Promise<void> | null = null
   private readonly tag: string
+  private readonly retry: RetryConfig
+  private consecutiveFailures = 0
+  private lastSuccessAt: Date | null = null
+  private lastError: string | null = null
 
   constructor(
     private readonly publicClient: IPublicClient,
@@ -140,6 +283,47 @@ export class FundingKeeper {
     private readonly config: KeeperConfig,
   ) {
     this.tag = config.label ? `[keeper:${config.label}]` : '[keeper]'
+    this.retry = { ...retryConfigFromEnv(), ...config.retry }
+  }
+
+  getAccrualState(): AccrualState {
+    return {
+      consecutiveFailures: this.consecutiveFailures,
+      lastSuccessAt: this.lastSuccessAt?.toISOString() ?? null,
+      lastError: this.lastError,
+    }
+  }
+
+  private recordSuccess(): void {
+    this.consecutiveFailures = 0
+    this.lastSuccessAt = new Date()
+    this.lastError = null
+  }
+
+  private async readLastFundingTime(): Promise<bigint> {
+    return await this.publicClient.readContract({
+      address:      this.config.creditMarketAddress,
+      abi:          CREDIT_MARKET_ABI,
+      functionName: 'lastFundingTime',
+      args:         [],
+    }) as bigint
+  }
+
+  private async recordAccrualFailure(err: unknown, attempts: number): Promise<void> {
+    this.consecutiveFailures++
+    this.lastError = briefError(err)
+    let behind = 'unknown'
+    try {
+      const last = await this.readLastFundingTime()
+      const ageSec = Math.max(0, Math.floor(Date.now() / 1000) - Number(last))
+      // Hours, not "epochs": on-chain epochLength (1 day) differs from the keeper's 8h cron.
+      behind = (ageSec / 3600).toFixed(1) + 'h'
+    } catch { /* RPC may be the very thing that is down */ }
+    console.error(
+      `[ALERT] funding-keeper accrual failed market=${this.config.label ?? 'default'} ` +
+      `attempts=${attempts} sinceLastAccrual=${behind} consecutiveFailures=${this.consecutiveFailures} ` +
+      `error=${this.lastError}`,
+    )
   }
 
   /** Kick off holder-index discovery now (fire-and-forget); used by FundingKeeperService at boot. */
@@ -250,54 +434,74 @@ export class FundingKeeper {
   private async accrue(account: Address, ts: string): Promise<boolean> {
     console.log(`${this.tag} ${ts} — accruing funding…`)
 
-    // 1. Gas estimate
-    let gasEstimate: bigint
-    try {
-      gasEstimate = await this.publicClient.estimateContractGas({
-        address:      this.config.creditMarketAddress,
-        abi:          CREDIT_MARKET_ABI,
-        functionName: 'accrueFunding',
-        args:         [],
-        account,
-      })
-    } catch (err) {
-      console.error(`${this.tag} ${ts} — gas estimation failed:`, err)
-      return false
+    const { maxAttempts } = this.retry
+    // Snapshot BEFORE the first submission: a later lastFundingTime > t0 proves some
+    // attempt (ours, even one whose receipt we lost) already accrued — never re-submit then.
+    let t0: bigint | null = null
+    try { t0 = await this.readLastFundingTime() } catch { /* re-read inside the attempt loop */ }
+
+    let pendingHash: Hash | undefined
+    let lastErr: unknown = new Error('no attempt made')
+    let attempts = 0
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      attempts = attempt
+      try {
+        if (attempt > 1) {
+          const lf = await this.readLastFundingTime()
+          if (t0 !== null && lf > t0) {
+            console.log(`${this.tag} ${ts} — earlier attempt already landed (lastFundingTime ${t0} -> ${lf}); not re-submitting`)
+            await this.logIndices(ts, pendingHash)
+            this.recordSuccess()
+            this.lastRunAt = new Date()
+            return true
+          }
+          if (t0 === null) t0 = lf
+        }
+
+        if (!pendingHash) {
+          const gasEstimate = await this.publicClient.estimateContractGas({
+            address:      this.config.creditMarketAddress,
+            abi:          CREDIT_MARKET_ABI,
+            functionName: 'accrueFunding',
+            args:         [],
+            account,
+          })
+          const gas = (gasEstimate * 120n) / 100n  // +20% buffer
+          pendingHash = await this.walletClient.writeContract({
+            address:      this.config.creditMarketAddress,
+            abi:          CREDIT_MARKET_ABI,
+            functionName: 'accrueFunding',
+            gas,
+          })
+          console.log(`${this.tag} ${ts} — submitted ${pendingHash}`)
+        }
+
+        const receipt = await this.publicClient.waitForTransactionReceipt({ hash: pendingHash })
+        if (receipt.status !== 'success') {
+          lastErr = new Error(`accrueFunding REVERTED: ${pendingHash}`)
+          console.error(`${this.tag} ${ts} — accrueFunding REVERTED: ${pendingHash}`)
+          break  // deterministic
+        }
+        await this.logIndices(ts, pendingHash)
+        this.recordSuccess()
+        this.lastRunAt = new Date()
+        return true
+      } catch (err) {
+        lastErr = err
+        const transient = isTransientError(err)
+        console.error(
+          `${this.tag} ${ts} — accrueFunding attempt ${attempt}/${maxAttempts} failed` +
+          `${transient ? ' (transient)' : ' (not retryable)'}:`, briefError(err),
+        )
+        if (!transient) break
+        if (attempt < maxAttempts) await this.retry.sleep(backoffDelayMs(this.retry.baseMs, attempt))
+      }
     }
+    await this.recordAccrualFailure(lastErr, attempts)
+    return false
+  }
 
-    const gas = (gasEstimate * 120n) / 100n  // +20% buffer
-
-    // 2. Submit tx
-    let txHash: Hash
-    try {
-      txHash = await this.walletClient.writeContract({
-        address:      this.config.creditMarketAddress,
-        abi:          CREDIT_MARKET_ABI,
-        functionName: 'accrueFunding',
-        gas,
-      })
-    } catch (err) {
-      console.error(`${this.tag} ${ts} — accrueFunding tx failed:`, err)
-      return false
-    }
-
-    console.log(`${this.tag} ${ts} — submitted ${txHash}`)
-
-    // 3. Wait for receipt
-    let receipt: { status: 'success' | 'reverted' }
-    try {
-      receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash })
-    } catch (err) {
-      console.error(`${this.tag} ${ts} — receipt wait failed for ${txHash}:`, err)
-      return false
-    }
-
-    if (receipt.status !== 'success') {
-      console.error(`${this.tag} ${ts} — accrueFunding REVERTED: ${txHash}`)
-      return false
-    }
-
-    // 4. Read updated indices
+  private async logIndices(ts: string, txHash: Hash | undefined): Promise<void> {
     try {
       const cumFundingYES = await this.publicClient.readContract({
         address:      this.config.creditMarketAddress,
@@ -314,18 +518,14 @@ export class FundingKeeper {
       }) as bigint
 
       console.log(
-        `${this.tag} ${ts} — accrueFunding OK  tx=${txHash}` +
+        `${this.tag} ${ts} — accrueFunding OK  tx=${txHash ?? 'n/a'}` +
         `  cumulativeFundingPerYES=${cumFundingYES.toString()}` +
         `  cumFundingPerNO=${cumFundingNO.toString()}`,
       )
     } catch (err) {
-      // Non-fatal: tx succeeded, just couldn't read the updated value
+      // Non-fatal: accrual succeeded, just couldn't read the updated value
       console.error(`${this.tag} ${ts} — could not read funding indices:`, err)
     }
-
-    // 5. Record last successful run
-    this.lastRunAt = new Date()
-    return true
   }
 
   /**
@@ -380,43 +580,57 @@ export class FundingKeeper {
 
       if (!seizable) return
 
-      // Flag claimable (freezes f_now for this holder)
+      // Flag claimable (locks this holder). Transient RPC/nonce errors are retried;
+      // before each retry claimable() is re-read so a flag that already landed is never re-sent.
       console.log(`${this.tag} ${ts} — ${holder}: seizable — flagging claimable…`)
 
       const account = this.walletClient.account!.address
-      let flagGas: bigint
-      try {
-        flagGas = await this.publicClient.estimateContractGas({
-          address:      this.config.creditMarketAddress,
-          abi:          CREDIT_MARKET_ABI,
-          functionName: 'flagClaimable',
-          args:         [holder],
-          account,
-        })
-      } catch (err) {
-        console.error(`${this.tag} ${ts} — gas estimation for flagClaimable(${holder}) failed:`, err)
-        return
+      let flagHash: Hash | undefined
+      for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt++) {
+        try {
+          if (attempt > 1 && !flagHash) {
+            const done = await this.publicClient.readContract({
+              address: this.config.creditMarketAddress, abi: CREDIT_MARKET_ABI,
+              functionName: 'claimable', args: [holder],
+            }) as boolean
+            if (done) {
+              console.log(`${this.tag} ${ts} — flagClaimable(${holder}) already landed; not re-sending`)
+              return
+            }
+          }
+          if (!flagHash) {
+            const flagGas = await this.publicClient.estimateContractGas({
+              address:      this.config.creditMarketAddress,
+              abi:          CREDIT_MARKET_ABI,
+              functionName: 'flagClaimable',
+              args:         [holder],
+              account,
+            })
+            flagHash = await this.walletClient.writeContract({
+              address:      this.config.creditMarketAddress,
+              abi:          CREDIT_MARKET_ABI,
+              functionName: 'flagClaimable',
+              args:         [holder],
+              gas:          (flagGas * 120n) / 100n,
+            })
+          }
+          const flagReceipt = await this.publicClient.waitForTransactionReceipt({ hash: flagHash })
+          if (flagReceipt.status !== 'success') {
+            console.error(`${this.tag} ${ts} — flagClaimable(${holder}) REVERTED: ${flagHash}`)
+            return
+          }
+          break
+        } catch (err) {
+          const last = attempt >= this.retry.maxAttempts
+          if (!isTransientError(err) || last) {
+            console.error(`${this.tag} ${ts} — flagClaimable(${holder}) failed (attempt ${attempt}/${this.retry.maxAttempts}):`, err)
+            return
+          }
+          console.error(`${this.tag} ${ts} — flagClaimable(${holder}) attempt ${attempt} transient failure, retrying:`, briefError(err))
+          await this.retry.sleep(backoffDelayMs(this.retry.baseMs, attempt))
+        }
       }
-
-      let flagHash: Hash
-      try {
-        flagHash = await this.walletClient.writeContract({
-          address:      this.config.creditMarketAddress,
-          abi:          CREDIT_MARKET_ABI,
-          functionName: 'flagClaimable',
-          args:         [holder],
-          gas:          (flagGas * 120n) / 100n,
-        })
-      } catch (err) {
-        console.error(`${this.tag} ${ts} — flagClaimable(${holder}) tx failed:`, err)
-        return
-      }
-
-      const flagReceipt = await this.publicClient.waitForTransactionReceipt({ hash: flagHash })
-      if (flagReceipt.status !== 'success') {
-        console.error(`${this.tag} ${ts} — flagClaimable(${holder}) REVERTED: ${flagHash}`)
-        return
-      }
+      if (!flagHash) return
 
       // Log the live funding obligation after successful flag. There is no freeze —
       // owed() keeps growing after this point until the position is claimed, cured,
@@ -470,6 +684,7 @@ export interface IMarketWorker {
   warmHolderIndex(): void
   getLastRunAt(): Date | null
   getHolderIndexStatus(): HolderIndexStatus
+  getAccrualState?(): AccrualState
 }
 
 export interface IMarketDirectory {
@@ -482,11 +697,17 @@ export interface IMarketDirectory {
 export interface MarketHealth {
   lastRunAt: string | null
   holderIndex: HolderIndexStatus
+  accrual?: AccrualState
 }
 
 export interface FundingHealthExtras {
   registry: MarketDirectoryStatus
   markets: Record<string, MarketHealth>
+  alerts: {
+    /** Markets whose last accrual cycle failed (consecutiveFailures > 0). */
+    accrualFailing: Record<string, AccrualState>
+    keeperBalance: ReturnType<LowBalanceMonitor['state']> | null
+  }
 }
 
 export class FundingKeeperService {
@@ -498,6 +719,7 @@ export class FundingKeeperService {
   constructor(
     private readonly directory: IMarketDirectory,
     private readonly makeWorker: (market: MarketInfo) => IMarketWorker,
+    private readonly balanceMonitor?: Pick<LowBalanceMonitor, 'check' | 'state'>,
   ) {}
 
   /** Create workers for any active market that doesn't have one yet (new registry entries). */
@@ -535,6 +757,9 @@ export class FundingKeeperService {
 
   private async runAllInner(): Promise<void> {
     const markets = this.ensureWorkers()
+    try { await this.balanceMonitor?.check() } catch (err) {
+      console.error('[keeper] balance check failed:', err)
+    }
     for (const m of markets) {
       if (this.stopped) break
       const worker = this.workers.get(m.slug)!
@@ -580,13 +805,21 @@ export class FundingKeeperService {
 
   getHealthExtras(): FundingHealthExtras {
     const markets: Record<string, MarketHealth> = {}
+    const accrualFailing: Record<string, AccrualState> = {}
     for (const [slug, w] of this.activeWorkers()) {
+      const accrual = w.getAccrualState?.()
       markets[slug] = {
         lastRunAt: w.getLastRunAt()?.toISOString() ?? null,
         holderIndex: w.getHolderIndexStatus(),
+        ...(accrual ? { accrual } : {}),
       }
+      if (accrual && accrual.consecutiveFailures > 0) accrualFailing[slug] = accrual
     }
-    return { registry: this.directory.status(), markets }
+    return {
+      registry: this.directory.status(),
+      markets,
+      alerts: { accrualFailing, keeperBalance: this.balanceMonitor?.state() ?? null },
+    }
   }
 }
 
@@ -685,8 +918,8 @@ async function main(): Promise<void> {
   const privateKey = process.env.KEEPER_PRIVATE_KEY
   if (!privateKey) throw new Error('KEEPER_PRIVATE_KEY env var is required')
 
-  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL
-  if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL env var is required')
+  const rpcUrl = rpcUrlFromEnv()
+  if (!rpcUrl) throw new Error('RPC_URL (or BASE_SEPOLIA_RPC_URL) env var is required')
 
   // Legacy mode (no MARKET_REGISTRY_ADDRESS) keeps today's requirement: the single
   // market's addresses must resolve (env, or the local deployments file).
@@ -698,9 +931,7 @@ async function main(): Promise<void> {
 
   // CHAIN_ID env var lets local Anvil (31337) work without code changes
   const chainId = parseInt(process.env.CHAIN_ID ?? '84532')
-  const chain = chainId === baseSepolia.id
-    ? baseSepolia
-    : defineChain({ id: chainId, name: 'Local', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } })
+  const chain = chainFor(chainId, rpcUrl)
 
   const publicClient  = createPublicClient({ chain, transport })
   const walletClient  = createWalletClient({ account, chain, transport })
@@ -717,7 +948,7 @@ async function main(): Promise<void> {
     walletClient  as unknown as IWalletClient,
     indexes.get(market),
     { creditMarketAddress: market.creditMarket, label: market.slug },
-  ))
+  ), new LowBalanceMonitor(publicClient as unknown as IPublicClient, account.address, minEthWeiFromEnv()))
 
   keeper.start()
   const healthServer = startHealthServer(keeper, parseInt(process.env.HEALTH_PORT ?? '3002'))

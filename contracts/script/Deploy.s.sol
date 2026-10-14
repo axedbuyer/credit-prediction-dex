@@ -24,6 +24,10 @@ contract Deploy is Script {
 
     // Circle's USDC on Base Sepolia
     address constant BASE_SEPOLIA_USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
+    // Circle's native USDC on Base mainnet
+    address constant BASE_MAINNET_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    uint256 constant BASE_MAINNET_CHAIN_ID = 8453;
+    uint256 constant BASE_SEPOLIA_CHAIN_ID = 84532;
 
     // 23% initial mark — team-set reference to MSTR CDS spread
     uint256 constant INITIAL_MARK = 0.23e18;
@@ -79,7 +83,17 @@ contract Deploy is Script {
         _deployer            = vm.addr(deployerKey);
 
         // Override USDC address for local-fork testing; falls back to Base Sepolia address.
-        _usdc = vm.envOr("USDC_ADDRESS", BASE_SEPOLIA_USDC);
+        // Per-chain pinning: mainnet (8453) may ONLY use mainnet USDC, Base Sepolia (84532)
+        // may never use mainnet USDC. Other chains (anvil / forks) keep the env override.
+        if (block.chainid == BASE_MAINNET_CHAIN_ID) {
+            _usdc = vm.envOr("USDC_ADDRESS", BASE_MAINNET_USDC);
+            require(_usdc == BASE_MAINNET_USDC, "Deploy: chain 8453 requires mainnet USDC");
+        } else {
+            _usdc = vm.envOr("USDC_ADDRESS", BASE_SEPOLIA_USDC);
+            if (block.chainid == BASE_SEPOLIA_CHAIN_ID) {
+                require(_usdc != BASE_MAINNET_USDC, "Deploy: mainnet USDC on Base Sepolia");
+            }
+        }
 
         // Ops addresses — all env-overridable, defaults matching today's live setup
         // (docs/HANDOVER.md "Ops wallets and secrets").
@@ -94,7 +108,12 @@ contract Deploy is Script {
         _minMarkInterval = vm.envOr("MIN_MARK_INTERVAL", DEFAULT_MIN_MARK_INTERVAL);
 
         // Output path — overridable so fork rehearsals never touch the tracked file.
-        _deploymentsOut = vm.envOr("DEPLOYMENTS_OUT", string("deployments/base-sepolia.json"));
+        _deploymentsOut = vm.envOr(
+            "DEPLOYMENTS_OUT",
+            block.chainid == BASE_MAINNET_CHAIN_ID
+                ? string("deployments/base.json")
+                : string("deployments/base-sepolia.json")
+        );
 
         console.log("=== Credit Prediction DEX Deployment ===");
         console.log("Deployer :", _deployer);

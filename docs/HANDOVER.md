@@ -1,6 +1,6 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Written 2026-07-07, updated 2026-07-19, 2026-09-25 and 2026-10-01, at the point of handing the
+*Written 2026-07-07, updated 2026-07-19, 2026-09-25, 2026-10-01 and 2026-10-13, at the point of handing the
 project to the next engineer. This doc captures state and tribal knowledge that is NOT
 derivable from the code or the other docs. Read it alongside — not instead of — the
 canonical references below.*
@@ -101,13 +101,16 @@ canonical references below.*
   `docs/security/invariant-findings-2026-09-26.md`. **All three fixed (unified `owed()`)
   and deployed in the 2026-10-01 batch-1 redeploy.**
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
-- **Multi-market built, NOT deployed (2026-10-02):** branch `feat/multi-market-contracts` —
-  MarketRegistry + `AddMarket.s.sol` (per-market contract sets, shared InsuranceFund,
-  per-market CLOB), all backends and the frontend multi-market, launch markets MSTR (live,
-  becomes market #1 with no redeploy), CoreWeave 10%, Turkey 2%. Everything runs in
-  legacy single-market mode until the registry env vars are set. Design + decisions:
-  `docs/multi-market-design.md`; rollout: `docs/multi-market-cutover.md` (stages A code /
-  B chain / C env flip).
+- **Multi-market LIVE (cutover complete 2026-10-03):** MarketRegistry
+  `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` + `AddMarket.s.sol` (per-market contract sets,
+  shared InsuranceFund, per-market CLOB); markets MSTR (batch-1 set = market #1, no
+  redeploy), CoreWeave 10%, Turkey 2% — addresses in `contracts/deployments/base-sepolia/`.
+  All five Railway services and the Vercel frontend run in registry mode. Design +
+  decisions: `docs/multi-market-design.md`; rollout record: `docs/multi-market-cutover.md`.
+- **Liquidator bot live** on Railway since 2026-09-29 (multi-market since 2026-10-03). It
+  logs only when it claims — use its public read-only
+  `https://liquidator-bot-production-1939.up.railway.app/health`, not the logs, for
+  liveness. The hourly uptime workflow checks it plus hot-wallet gas (2026-10-13).
 
 ## Ops wallets and secrets
 
@@ -119,10 +122,11 @@ Keys live only in gitignored `.env` files (`.gitignore` now ignores all `.env*` 
 | Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN, PAUSER, OracleRouter ORACLE_ROLE (attester), team wallet |
 | Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE |
 | Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | (none needed) |
-| Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only (owner holds it) | (none needed — claim() is permissionless); funded 0.0005 ETH + 10 USDC float 2026-09-29 |
+| Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only (owner holds it) | (none needed — claim() is permissionless); funded 0.0005 ETH + 10 USDC float 2026-09-29, topped up to 0.0015 ETH 2026-10-13 |
 
-RPC is public `https://sepolia.base.org`. Each wallet holds only dust ETH (~0.00015);
-top up before heavy tx activity. Everything runs off raw EOAs — moving admin to a Safe
+RPC is public `https://sepolia.base.org`. Wallets hold only small amounts of ETH; the
+hourly uptime workflow fails (email) when keeper < 0.0005, settler < 0.0001 or
+liquidator < 0.0002 ETH — top up then. A settlement costs ≈2e-6 ETH, an accrual less. Everything runs off raw EOAs — moving admin to a Safe
 is a production-plan phase, not done.
 
 **Roles:** since batch 1, `Deploy.s.sol` grants `KEEPER_ROLE` (`KEEPER_ADDRESS`),
@@ -277,10 +281,33 @@ list.
    raw EOAs — see "Ops wallets and secrets" above), invariant/fuzz suite + audit (audit
    still deliberately deferred by the owner, not forgotten), credit-event dress
    rehearsal on Sepolia.
-2. ~~Liquidator bot~~ — live on Railway since 2026-09-29 (`liquidator-bot`, internal).
-   Keep its USDC float ≥ the largest position it may claim (a claim costs ≤ m×Q) and watch
-   its logs for `ALERT` lines (float / InsuranceFund short).
-3. Optional ops polish (log aggregation, alerting, etc. — nothing blocking).
+2. ~~Liquidator bot~~ — live on Railway since 2026-09-29 (`liquidator-bot`). Keep its USDC
+   float ≥ the largest position it may claim (a claim costs ≤ m×Q). Since 2026-10-13 the
+   hourly uptime workflow fails (email) on a stale claim loop, a float/InsuranceFund
+   shortfall, or low hot-wallet gas — no need to watch logs.
+3. ~~Ops polish~~ — done 2026-10-13 (matching-engine /health, funding-keeper retry +
+   `[ALERT]`, uptime coverage). Remaining: a public domain for matching-engine port 3005 +
+   its uptime step.
+
+### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
+
+Mainnet *plumbing* exists (`CHAIN_ID=8453`, `RPC_URL`, `NEXT_PUBLIC_CHAIN_ID`,
+`make deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, USDC pinned per chain in
+`Deploy.s.sol`) but has **never been run against 8453**. Open items, in order:
+
+- **`Deploy.s.sol` ops-address defaults are unsafe for mainnet.** `KEEPER_ADDRESS` falls
+  back to `DEFAULT_KEEPER` = the **Sepolia keeper EOA** (its key sits in local `.env` files),
+  and `PAUSER_ADDRESS`, `ORACLE_ATTESTER_ADDRESS` and `TEAM_WALLET` fall back to whichever raw
+  deployer EOA runs the script (not a Safe). A mainnet run that forgets the env vars would
+  grant KEEPER_ROLE to a testnet key and leave pause/attest power on a hot EOA. Fix before
+  mainnet: make all four REQUIRED (no default) when `block.chainid == 8453`, the same way
+  USDC is pinned — as part of the Safe role ceremony, since pauser/attester/admin should
+  land on the Safe anyway. Give `AddMarket.s.sol` the same review.
+- Fresh mainnet hot wallets (keeper, settler, liquidator) — never reuse testnet keys.
+- Safe role ceremony + credit-event dress rehearsal on Sepolia (production-plan
+  requirements 2 and 4); audit + legal read (requirement 3 / Phase 3).
+- Pick a mainnet RPC provider; fork-rehearse `Deploy.s.sol` + `AddMarket.s.sol` on a Base
+  mainnet fork (`anvil --fork-url $BASE_RPC_URL`) before broadcasting.
 
 For redeploying contracts or services after a code change, use `docs/redeploy-guide.md`
 — it captures the dry-run and EIP-712 domain-invalidation gotchas above in runbook form.

@@ -108,8 +108,18 @@ ORDER_BOOK_URL=http://<order-book-server private domain>:<port>   # Railway priv
 SETTLER_PRIVATE_KEY=<SECRET — backend/matching-engine/.env>
 BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 REDIS_URL=${{Redis.REDIS_URL}}
+HEALTH_PORT=3005          # optional, default 3005
+HEALTH_STALE_MS=          # optional, default max(5 x POLL_INTERVAL_MS, 30000)
+SETTLER_MIN_ETH=0.0001    # optional, default 0.0001
 ```
-No public domain, no HTTP health check (no server in this process).
+`GET :3005/health` (bound 0.0.0.0): 200 JSON, or 503 `status: "stale"` when the last
+completed match cycle is older than `HEALTH_STALE_MS`. Body has per-market
+`lastCycleAt`/`lastError`/`settledPairs`/`prunedOrders` (since boot), `registry` status,
+`settlerWired`, `settlerBalanceEth` (cached, refreshed <= every 60s; null if unknown) and
+`settlerLowBalance` (balance < `SETTLER_MIN_ETH`; reported in the body only, no 503).
+For external monitoring, Railway needs a public domain targeting `HEALTH_PORT` (set up
+by the orchestrator, not in this repo); without one the endpoint is only reachable on the
+private network.
 
 ## Railway — funding-keeper (root dir `backend/keepers`, internal-only)
 
@@ -123,9 +133,22 @@ YES_TOKEN_ADDRESS=0x9ED5A4c6B1B5334645Ec47e7ce087e281fcEC59D
 HOLDER_INDEX_FROM_BLOCK=47528136
 REDIS_URL=${{Redis.REDIS_URL}}
 HEALTH_PORT=3002
+# optional retry/alert tuning (defaults shown)
+ACCRUE_MAX_ATTEMPTS=4
+ACCRUE_RETRY_BASE_MS=2000
+KEEPER_MIN_ETH=0.0005
 ```
-Health check `GET :3002/health` (includes `holderIndex` discovery status). (No CLOB
-address needed.)
+Health check `GET :3002/health` (includes `holderIndex` discovery status, per-market
+`accrual {consecutiveFailures,lastSuccessAt,lastError}` and an `alerts` object listing failing
+markets + keeper ETH balance state). (No CLOB address needed.)
+
+**Retry/alert (funding-keeper):** transient RPC/network/nonce errors on `accrueFunding`
+(submit + receipt) and `flagClaimable` are retried up to `ACCRUE_MAX_ATTEMPTS` with
+exponential backoff from `ACCRUE_RETRY_BASE_MS`; contract reverts are not retried, and
+`lastFundingTime` is re-read before any retry so a landed attempt is never re-submitted. When a
+market exhausts its attempts the log gets one `[ALERT] funding-keeper accrual failed market=<slug>
+attempts=N sinceLastAccrual=<hours>h ...` line; `[ALERT] funding-keeper wallet low on ETH` fires (max once
+per hour) when the wallet is under `KEEPER_MIN_ETH`. Grep Railway logs for `[ALERT]`.
 
 **Holder discovery (both keepers):** holders are discovered from YES `Transfer` events
 (`backend/keepers/holder-index.ts`). `HOLDER_INDEX_FROM_BLOCK` is REQUIRED — the YES
@@ -176,7 +199,13 @@ RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30
 Root Directory must be `backend/keepers` (Settings → Source; the CLI's
 `environment edit … source.rootDirectory` only sticks once a source is connected).
 Optional: `AUTO_SELL` (true), `SELL_MAX_DISCOUNT_BPS` (300), `SELL_ORDER_TTL_SEC` (86400),
-`HEALTH_PORT` (3004). The wallet needs Base Sepolia ETH for gas and a USDC float ≥ the
+`HEALTH_PORT` (3004). **Public health URL (2026-10-13):**
+`https://liquidator-bot-production-1939.up.railway.app/health` — a Railway domain on port 3004;
+the bot's HTTP server answers only `GET /health` (read-only status, everything else 404), so the
+service is still not a public API. Monitored hourly by `.github/workflows/uptime.yml` (HTTP 200,
+`lastCycleAt` < 10 min, `alerts.floatShortfall` and `alerts.insuranceFundShortfall` both `"0"`);
+the same workflow alerts on keeper/settler/liquidator ETH below 0.0005 / 0.0001 / 0.0002. The bot
+logs only when it claims, so an empty Railway log is normal — use /health, not logs, for liveness. The wallet needs Base Sepolia ETH for gas and a USDC float ≥ the
 largest position it may claim (a claim costs ≤ m×Q); `/health` → `skippedByReason`
 shows `insufficientFloat` / `insuranceFundShortfall` when it can't claim. Update the
 contract addresses here after any CreditMarket-family redeploy.
@@ -200,3 +229,19 @@ NEXT_PUBLIC_LIQUIDATION_KEEPER_URL=https://<liquidation-keeper Railway PUBLIC do
 The two Railway public domains must exist before the Vercel deploy is useful (the app
 builds without them but the market page can't load a book). `NEXT_PUBLIC_FEE_BPS` is only the preview
 fallback while the live on-chain fee rate loads; Downbet buys can't be signed until it has.
+
+## Mainnet plumbing (Base 8453) — code-ready, NOT deployed
+
+Nothing runs on mainnet yet; with none of these set, everything stays on Base Sepolia (84532).
+
+| Var | Where | Meaning |
+|---|---|---|
+| `CHAIN_ID` | all Railway services | `8453` = Base mainnet, `84532` = Base Sepolia (default), anything else = local anvil. |
+| `RPC_URL` | all Railway services | Generic RPC endpoint; takes precedence over `BASE_SEPOLIA_RPC_URL` (which keeps working). |
+| `NEXT_PUBLIC_CHAIN_ID` | Vercel | `84532` (default) or `8453`. With `8453` the app throws a config error at boot unless `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` (or all legacy address vars) is set — it never falls back to testnet addresses. USDC is fixed to `0x8335…2913` on 8453. |
+| `BASE_RPC_URL` | contracts (forge/make) | Mainnet RPC for `foundry.toml` `base` endpoint and `make deploy-mainnet`. |
+| `CONFIRM_MAINNET` | contracts (make) | Must be `yes`; `make deploy-mainnet` also refuses unless `cast chain-id` returns 8453. |
+
+Mainnet deployment outputs go to `contracts/deployments/base.json` and `base/<slug>.json`
+(see `contracts/deployments/README.md`); `Deploy.s.sol` pins mainnet USDC on chain 8453 and
+rejects it on 84532. Explorer verification uses Blockscout (`https://base.blockscout.com/api`).
