@@ -111,6 +111,8 @@ canonical references below.*
   logs only when it claims — use its public read-only
   `https://liquidator-bot-production-1939.up.railway.app/health`, not the logs, for
   liveness. The hourly uptime workflow checks it plus hot-wallet gas (2026-10-13).
+- **Matching engine** has a public read-only `https://matching-engine-production-f04c.up.railway.app/health`
+  (2026-10-14), also checked hourly by the uptime workflow.
 
 ## Ops wallets and secrets
 
