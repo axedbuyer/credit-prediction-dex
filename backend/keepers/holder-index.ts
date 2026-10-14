@@ -118,7 +118,8 @@ export interface HolderIndexConfig {
   tokenAddress: Address
   /** First block to scan — the token's deploy block. */
   fromBlock: bigint
-  /** Blocks per eth_getLogs call. Public Base RPC caps a call at a 1,000-block range. */
+  /** Blocks per eth_getLogs call. Public Base Sepolia RPC caps a call at a 200-block range
+   *  (tightened from 1,000 by 2026-10-14). */
   chunkSize?: bigint
   /** eth_getLogs calls in flight per batch; the cursor is committed once per batch. */
   concurrency?: number
@@ -160,7 +161,7 @@ export class HolderIndex {
     private readonly store: HolderStore,
     private readonly config: HolderIndexConfig,
   ) {
-    this.chunkSize    = config.chunkSize ?? 1000n
+    this.chunkSize    = config.chunkSize ?? 200n
     this.concurrency  = config.concurrency ?? 4
     this.reorgOverlap = config.reorgOverlap ?? 64n
     this.backfillRetryMs = config.backfillRetryMs ?? 0
@@ -313,7 +314,7 @@ export class HolderIndex {
 /**
  * Build a HolderIndex from env:
  *   HOLDER_INDEX_FROM_BLOCK   REQUIRED — the YES token's deploy block (0 on a fresh anvil)
- *   HOLDER_INDEX_CHUNK_SIZE   blocks per eth_getLogs call (default 1000)
+ *   HOLDER_INDEX_CHUNK_SIZE   blocks per eth_getLogs call (default 200 — public RPC cap)
  *   HOLDER_INDEX_CONCURRENCY  calls in flight per batch (default 4)
  *   REDIS_URL                 optional — persist progress so a restart doesn't re-backfill
  *   TRACKED_HOLDERS           optional — comma-separated seed addresses
@@ -345,7 +346,7 @@ export function createHolderIndex(
   }
   if (!/^\d+$/.test(rawFrom)) throw new Error(`HOLDER_INDEX_FROM_BLOCK must be a block number, got "${rawFrom}"`)
 
-  const chunkSize   = BigInt(env.HOLDER_INDEX_CHUNK_SIZE ?? '1000')
+  const chunkSize   = BigInt(env.HOLDER_INDEX_CHUNK_SIZE ?? '200')
   const concurrency = parseInt(env.HOLDER_INDEX_CONCURRENCY ?? '4')
 
   const seedHolders = (opts.seedFromEnv === false ? '' : env.TRACKED_HOLDERS ?? '')
