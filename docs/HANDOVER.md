@@ -208,7 +208,7 @@ unreachable from WSL — the owner pushes from outside WSL.
   both keepers; the cursor only moves forward and is written after the holders. Every
   sync re-scans 64 blocks below the cursor for reorg safety. `HOLDER_INDEX_FROM_BLOCK`
   is required (Sepolia YES deploy block 43766743) — scanning from genesis on the public
-  RPC (1,000-block `eth_getLogs` cap) would be ~47k calls. Keepers call `refresh()`,
+  RPC (then a 1,000-block `eth_getLogs` cap; 200 since ~2026-10-14) would be ~47k calls. Keepers call `refresh()`,
   which never blocks a cycle on the initial backfill: until it completes they check the
   holders found so far (plus any `TRACKED_HOLDERS` seeds), and a failed backfill retries
   itself every 30s. Both `/health` endpoints report `holderIndex` status
