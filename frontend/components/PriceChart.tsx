@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { usePublicClient, useChainId } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
-import { parseAbiItem } from 'viem'
+import { createPublicClient, http, parseAbiItem } from 'viem'
 import type { Market } from '@/lib/markets'
 import { CREDIT_MARKET_ABI } from '@/lib/creditMarketAbi'
+import { ACTIVE_CHAIN } from '@/lib/chainConfig'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,8 +28,16 @@ const RANGE_SECONDS: Partial<Record<TimeRange, number>> = {
   '1M': 2_592_000,
 }
 
-// ~27h at 2s/block on Base — keeps within public RPC limits
+// ~27h at 2s/block on Base — the widest eth_getLogs range the chart asks for
 const BLOCK_RANGE_CAP = 50_000n
+
+// sepolia.base.org caps eth_getLogs at 200 blocks, so the chart's log queries can go to
+// a separate RPC that allows BLOCK_RANGE_CAP (e.g. https://base-sepolia-rpc.publicnode.com).
+// Unset = the app's normal RPC (local anvil stacks, which have no cap).
+const LOGS_RPC_URL = process.env.NEXT_PUBLIC_LOGS_RPC_URL
+const logsClient = LOGS_RPC_URL
+  ? createPublicClient({ chain: ACTIVE_CHAIN, transport: http(LOGS_RPC_URL) })
+  : undefined
 
 const MARK_UPDATED = parseAbiItem(
   'event MarkUpdated(uint256 oldMark, uint256 newMark, bool adminOverride)'
@@ -84,9 +93,16 @@ export function PriceChart({ market }: PriceChartProps) {
       // Never scan before this market existed (registry startBlock; 0 in legacy mode).
       const fromBlock = capped > market.startBlock ? capped : market.startBlock
 
+      // A failed log query (e.g. an RPC range cap) must not blank the chart: fall back
+      // to no history, so it still shows the live price from the tail point below.
+      const logs = logsClient ?? publicClient
+      const noLogs = (err: unknown) => {
+        console.warn('PriceChart: eth_getLogs failed — showing the live price only', err)
+        return []
+      }
       const [markLogs, accrualLogs] = await Promise.all([
-        publicClient.getLogs({ address: market.creditMarket, event: MARK_UPDATED, fromBlock, toBlock: 'latest' }),
-        publicClient.getLogs({ address: market.creditMarket, event: FUNDING_ACCRUED, fromBlock, toBlock: 'latest' }),
+        logs.getLogs({ address: market.creditMarket, event: MARK_UPDATED, fromBlock, toBlock: 'latest' }).catch(noLogs),
+        logs.getLogs({ address: market.creditMarket, event: FUNDING_ACCRUED, fromBlock, toBlock: 'latest' }).catch(noLogs),
       ])
 
       const blockTs = new Map<bigint, number>()

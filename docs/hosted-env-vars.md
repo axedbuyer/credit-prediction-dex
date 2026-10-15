@@ -224,6 +224,7 @@ contract addresses here after any CreditMarket-family redeploy.
 ```
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=<from frontend/.env.local — required, build throws without it>
 NEXT_PUBLIC_RPC_URL=https://sepolia.base.org
+NEXT_PUBLIC_LOGS_RPC_URL=https://base-sepolia-rpc.publicnode.com   # chart history; sepolia.base.org caps eth_getLogs at 200 blocks
 NEXT_PUBLIC_CREDIT_MARKET_ADDRESS=0xe8D0448Fb825875AE2CEFfEdA561Ea98508F8369
 NEXT_PUBLIC_YES_TOKEN_ADDRESS=0x9ED5A4c6B1B5334645Ec47e7ce087e281fcEC59D
 NEXT_PUBLIC_NO_TOKEN_ADDRESS=0xFcFf6488677A852D724B7659649176115D5f296e

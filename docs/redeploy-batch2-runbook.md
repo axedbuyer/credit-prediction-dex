@@ -141,7 +141,8 @@ TRY 0.5–3.5¢ on the Upbet side).
   each `startBlock`.
 - Frontend: home shows 3 markets with "Daily carry" below the price (e.g. MSTR 0.055%/day at
   23%); market page chart, ticker "20.1% a year"; docs carry page live.
-- One small trade per market settles on-chain; next funding-keeper tick accrues on the new
+- One small trade per market settles on-chain (`scripts/demo/sepolia-test-trade.ts --market <slug>`
+  with `TEST_TAKER_PRIVATE_KEY`; it fills a WHOLE resting ask — CLOBSettlement has no partial fills); next funding-keeper tick accrues on the new
   markets; uptime workflow (manual run) green.
 
 ## 7. After
