@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
 
 export const metadata: Metadata = {
   title: 'Core concepts — Pari Docs',
@@ -28,9 +29,15 @@ export default function CoreConceptsPage() {
 
       <h2>Price = probability</h2>
       <p>
-        The Upbet price <em>is</em> the market&rsquo;s implied annual probability of a
-        credit event (&ldquo;23¢&rdquo; ⇔ &ldquo;23% annual probability&rdquo;). This
-        probability-per-year is what&rsquo;s called a <em>hazard rate</em> in TradFi.
+        The Upbet price <em>is</em> the market&rsquo;s chance of a credit event in the next
+        12 months: &ldquo;23¢&rdquo; ⇔ &ldquo;23% chance&rdquo;. Because the market never
+        expires, &ldquo;the next 12 months&rdquo; always means the 12 months from today.
+      </p>
+      <p>
+        Daily carry is set so this holds exactly. Holding an Upbet at a steady price, what
+        you expect to win from a credit event equals the carry you pay. See{' '}
+        <Link href="/docs/mark-to-market-and-carry">Mark-to-market &amp; carry</Link> for
+        how that works.
       </p>
 
       <h2>Directions</h2>

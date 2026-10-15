@@ -19,10 +19,22 @@ function MarketCard({ market }: { market: Market }) {
     query: { refetchInterval: 15_000 },
   })
 
+  // Carry is its own on-chain number (−(1 − m)·ln(1 − m) a year), not the price.
+  const { data: carryRate } = useReadContract({
+    address: market.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'currentCarryRate',
+    query: { refetchInterval: 15_000 },
+  })
+
   const mark = isLoading || isError ? undefined : (currentMark as bigint | undefined)
   const pct = mark !== undefined ? pctNumber(mark) : undefined
+  const carryPct = carryRate !== undefined ? pctNumber(carryRate as bigint) : undefined
   const chance = pct !== undefined ? `${pct.toFixed(1)}% chance` : '—'
-  const daily = pct !== undefined ? `${(pct / 365).toFixed(3)}%/day` : '—'
+  const daily = carryPct !== undefined ? `${(carryPct / 365).toFixed(3)}%/day` : '—'
+  // A Downbet costs (1 − m) and earns the carry, so its carry yield on cost is
+  // carry / (1 − m) a year (= −ln(1 − m)).
+  const downbetYield = pct !== undefined && carryPct !== undefined && pct < 100 ? (carryPct / (100 - pct)) * 100 : undefined
 
   return (
     <Link href={`/market/${market.slug}`} className="block">
@@ -38,8 +50,8 @@ function MarketCard({ market }: { market: Market }) {
         <p className="pari-a-card__meta">{market.title}</p>
         <p className="pari-a-card__meta">Daily carry {daily}</p>
         {!market.active && <p className="pari-a-card__meta text-warning">Closed to new orders</p>}
-        {market.active && pct !== undefined && (
-          <p className="pari-a-card__meta text-teal">Downbet earns ≈{pct.toFixed(1)}% annualized</p>
+        {market.active && downbetYield !== undefined && (
+          <p className="pari-a-card__meta text-teal">Downbet earns ≈{downbetYield.toFixed(1)}% a year in carry on its price</p>
         )}
       </div>
     </Link>

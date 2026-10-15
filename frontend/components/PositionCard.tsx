@@ -164,7 +164,7 @@ export function PositionCard({
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'claimable',      args: [userAddress] },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'owed',           args: [userAddress] },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'fundingDebt',    args: [userAddress] },
-      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'currentMark' },
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'currentCarryRate' },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'cumFundingPerNO' },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'lastFundingTime' },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'snapNO',         args: [userAddress] },
@@ -183,7 +183,7 @@ export function PositionCard({
   const isClaimable    = (_dev?.claimable      ?? data?.[8]?.result) as boolean | undefined
   const owed           = data?.[9]?.result as bigint | undefined
   const fundingDebt    = data?.[10]?.result as bigint | undefined
-  const currentMark    = data?.[11]?.result as bigint | undefined
+  const carryRate      = data?.[11]?.result as bigint | undefined // −(1 − m)·ln(1 − m) a year — NOT the mark
   const cumFundingPerNO = data?.[12]?.result as bigint | undefined
   const lastFundingTime = data?.[13]?.result as bigint | undefined
   const snapNO         = data?.[14]?.result as bigint | undefined
@@ -215,8 +215,8 @@ export function PositionCard({
   const nowSec = BigInt(Math.floor(Date.now() / 1000))
   const elapsed = lastFundingTime !== undefined && nowSec > lastFundingTime ? nowSec - lastFundingTime : 0n
   const projectedCumFundingPerNO =
-    cumFundingPerNO !== undefined && currentMark !== undefined
-      ? cumFundingPerNO + (currentMark * elapsed) / YEAR_SECONDS
+    cumFundingPerNO !== undefined && carryRate !== undefined
+      ? cumFundingPerNO + (carryRate * elapsed) / YEAR_SECONDS
       : undefined
 
   const pendingNOCredit =

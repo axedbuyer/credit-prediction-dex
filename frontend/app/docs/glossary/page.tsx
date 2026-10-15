@@ -18,13 +18,14 @@ const TERMS: { term: string; meaning: string; tradfi: string }[] = [
     tradfi: 'Short credit risk / providing default protection (NO share)',
   },
   {
-    term: 'Annual probability',
-    meaning: 'The price; market-implied chance of a credit event within 12 months.',
-    tradfi: 'Hazard rate',
+    term: 'Probability (12-month chance)',
+    meaning: 'The price; the market-implied chance of a credit event within the next 12 months.',
+    tradfi: '1-year probability of default (PD)',
   },
   {
     term: 'Daily carry',
-    meaning: 'The daily cashflow from Upbet holders to Downbet holders, m/365 per $1.',
+    meaning:
+      'The daily cashflow from Upbet holders to Downbet holders: the chance of a credit event, charged only on what an Upbet stands to win (≈20.1¢ per $1 a year at a 23% price).',
     tradfi: 'Funding (perpetuals) / premium (insurance)',
   },
   {

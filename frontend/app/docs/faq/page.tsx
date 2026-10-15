@@ -17,6 +17,15 @@ export default function FaqPage() {
         expiry payout.
       </p>
 
+      <h3>Why is my daily carry lower than the price?</h3>
+      <p>
+        Carry charges for the chance of a credit event, but only on what your Upbet stands to
+        win. At 23¢ an Upbet stands to win 77¢, so carry is about 20.1¢ per $1 a year, not
+        23¢. That&rsquo;s exactly the amount that makes 23¢ mean a 23% chance in the next 12
+        months — see{' '}
+        <Link href="/docs/mark-to-market-and-carry">Mark-to-market &amp; carry</Link>.
+      </p>
+
       <h3>Can I lose more than I deposit?</h3>
       <p>
         No. Everything is fully collateralized — no leverage, no margin calls. Worst case an

@@ -19,7 +19,7 @@ export default function LiquidationsAndCurePage() {
       </p>
 
       <h2>The trigger</h2>
-      <div className="docs-formula">{'f_next = f + m/365 × Δt        (carry owed after one more day)\nLiquidatable when:  m ≤ 1.03 × f_next'}</div>
+      <div className="docs-formula">{'f_next = f + carry/365 × Δt    (carry owed after one more day; carry per $1 a year, see Mark-to-market & carry)\nLiquidatable when:  m ≤ 1.03 × f_next'}</div>
       <p>
         In words: when your Upbet&rsquo;s price no longer exceeds the carry you&rsquo;d owe
         after one more day by at least 3%, the position becomes claimable. Two crucial
