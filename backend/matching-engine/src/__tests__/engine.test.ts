@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MatchingEngine } from '../engine'
 import type { OrderBook, StoredOrder } from '../types'
 import type { OrderBookClient } from '../client'
@@ -223,6 +223,103 @@ describe('NO market matching', () => {
     await engine.runOnce()
 
     expect(matches).toHaveLength(0)
+  })
+})
+
+// ─── Whole-order compatibility (CLOBSettlement has no partial fills) ──────────
+
+// Amounts are 6-decimal base units. A YES ask sells `tokens` for >= `usdc`; a YES
+// bid pays `usdc` for >= `tokens`.
+function sizedAsk(id: string, tokens: number, usdc: number, timestamp = Date.now()): StoredOrder {
+  return makeOrder({
+    id, price: usdc / tokens, timestamp, side: 'ask', tokenIn: YES, tokenOut: USDC,
+    amountIn: String(tokens * 1e6), minAmountOut: String(Math.round(usdc * 1e6)),
+  })
+}
+function sizedBid(id: string, tokens: number, usdc: number, timestamp = Date.now()): StoredOrder {
+  return makeOrder({
+    id, price: usdc / tokens, timestamp, side: 'bid', tokenIn: USDC, tokenOut: YES,
+    amountIn: String(Math.round(usdc * 1e6)), minAmountOut: String(tokens * 1e6),
+  })
+}
+
+describe('whole-order compatibility', () => {
+  beforeEach(resetIds)
+  afterEach(() => { vi.useRealTimers() })
+
+  it('a smaller crossing bid does not match (it would revert SlippageExceeded) and both keep resting', async () => {
+    const ask = sizedAsk('ask4', 4, 0.96)   // sells 4 @ 24¢
+    const bid = sizedBid('bid1', 1, 0.24)   // buys 1 @ 24¢ — crosses, can't settle whole
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
+    const matches = collectMatches(engine)
+
+    await engine.runOnce()
+    await engine.runOnce()
+
+    expect(matches).toHaveLength(0)
+  })
+
+  it('a larger crossing bid does not match a smaller ask', async () => {
+    const ask = sizedAsk('ask1', 1, 0.24)
+    const bid = sizedBid('bid4', 4, 0.96)
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
+    const matches = collectMatches(engine)
+
+    await engine.runOnce()
+
+    expect(matches).toHaveLength(0)
+  })
+
+  it('the griefing case: a tiny bid leaves the resting ask matchable by a whole-size bid', async () => {
+    const ask = sizedAsk('ask4', 4, 0.96, 1)
+    const tiny = sizedBid('tiny', 1, 0.24, 2)
+    const whole = sizedBid('whole', 4, 0.96, 3)
+    const engine = new MatchingEngine(staticClient({ bids: [tiny, whole], asks: [ask] }), CONFIG)
+    const matches = collectMatches(engine)
+
+    await engine.runOnce()
+
+    expect(matches.map(([m, t]) => [m.id, t.id])).toEqual([['ask4', 'whole']])
+  })
+
+  it('skips an incompatible best ask for the next compatible one', async () => {
+    const big = sizedAsk('big', 4, 0.80)     // 20¢, wrong size
+    const fit = sizedAsk('fit', 1, 0.22)     // 22¢, fits
+    const bid = sizedBid('bid1', 1, 0.24)
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [big, fit] }), CONFIG)
+    const matches = collectMatches(engine)
+
+    await engine.runOnce()
+
+    expect(matches.map(([m, t]) => [m.id, t.id])).toEqual([['fit', 'bid1']])
+  })
+
+  it('matches when the seller offers at least what the buyer wants and the buyer pays at least what the seller wants', async () => {
+    const ask = sizedAsk('ask5', 5, 1.00)    // sells 5 for >= $1.00
+    const bid = sizedBid('bid4', 4, 1.00)    // pays $1.00 for >= 4 — gets all 5
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
+    const matches = collectMatches(engine)
+
+    await engine.runOnce()
+
+    expect(matches).toHaveLength(1)
+  })
+
+  it('markIncompatible: the pair is skipped (both stay matchable elsewhere) until the TTL lapses', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    const ask = sizedAsk('ask', 1, 0.24)
+    const bid = sizedBid('bid', 1, 0.24)
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
+    const matches = collectMatches(engine)
+
+    engine.markIncompatible('ask', 'bid')
+    await engine.runOnce()
+    expect(matches).toHaveLength(0)
+
+    vi.setSystemTime(1_000_000 + 10 * 60_000 + 1)
+    await engine.runOnce()
+    expect(matches).toHaveLength(1)
   })
 })
 

@@ -191,6 +191,21 @@ The signature is passed alongside the order, not embedded in it: on-chain
 takerSig)` takes this 7-field `Order` plus two detached signatures (selector `0x538df8d8`).
 Off-chain callers must match this exact ABI shape.
 
+**No partial fills (current contracts):** `verifyAndSettle` moves both orders' FULL
+`amountIn` and spends both nonces, so a pair settles only if the seller's tokens cover the
+buyer's `minAmountOut` and the buyer's USDC covers the seller's `minAmountOut`. The matching
+engine pairs only such orders (`canSettleWhole` in `matching-engine/src/engine.ts`); a
+crossing pair of different sizes stays resting on both sides. Real partial fills are planned
+for the next contract batch: `docs/partial-fills-plan.md`.
+
+**Order removal policy:** the platform removes a user's resting order only (a) when it is
+filled or cancelled, or (b) for a published, objective reason about THAT order or its maker's
+own state — expired, nonce already spent, maker's position flagged (PositionFrozen), a YES
+sale that can't cover the maker's own carry debt (FundingShortfall), or legs that aren't
+{USDC, one market's YES/NO}. Never because of another trader's order or a guess: an
+incompatibility between two valid orders (SlippageExceeded) skips the pair, and an
+ambiguous or failed chain read releases both orders for a retry.
+
 ### Trading fee (CLOBSettlement)
 
 ```
@@ -221,8 +236,9 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
 - **Off-chain:** order-book-server stores NO bids at their NET price (sorting/crossing
   basis; the rate is read live from CLOBSettlement.feeBps() and refreshed every 60s —
   FEE_BPS env is only the RPC-outage fallback, surfaced on GET /health) and includes the fee in the YES-sell
-  FundingShortfall pre-filter + minSellProceeds hint. The matching-engine settler prunes
-  SlippageExceeded pairs (deterministic for static amounts) like FundingShortfall.
+  FundingShortfall pre-filter + minSellProceeds hint. A pair that still reverts
+  SlippageExceeded (the NO-sale net-of-fee check) is skipped by the matching engine,
+  never pruned — see "Order removal policy" below.
 
 ### Backend Services
 
@@ -245,9 +261,11 @@ from the old single-set env vars. Per-service multi-market detail: `backend/CLAU
                       error, on-chain check backstops.
 /matching-engine    — price-time priority matching; submits matched pairs via
                       CLOBSettlement.verifyAndSettle. Decodes FundingShortfall/
-                      PositionFrozen/SlippageExceeded/NonceUsed reverts at gas-estimation
-                      and prunes the offending order(s) instead of retrying (other reverts
-                      keep the retry behavior). Wires the settler when SETTLER_PRIVATE_KEY +
+                      PositionFrozen/NonceUsed reverts at gas-estimation and prunes
+                      ONLY the order whose own state caused it; SlippageExceeded marks the
+                      pair incompatible and keeps both resting (other reverts keep the
+                      retry behavior). Pairs only orders that can settle WHOLE —
+                      CLOBSettlement has no partial fills (see "Order removal policy"). Wires the settler when SETTLER_PRIVATE_KEY +
                       RPC_URL (or BASE_SEPOLIA_RPC_URL) are set (log-only fallback
                       otherwise). GET /health on HEALTH_PORT (3005): 503 "stale" when the
                       match loop hasn't completed a cycle in max(5×poll, 30s); per-market
