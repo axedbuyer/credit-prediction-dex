@@ -55,9 +55,14 @@ CI fails on drift).
 ### matching-engine
 - Each poll fetches `GET /orderbook?market=<slug>` for every ACTIVE market and matches each book
   independently (price-time priority unchanged). Orders from different markets are never crossed.
+  Only pairs that can settle as WHOLE orders are matched (`canSettleWhole`; CLOBSettlement has no
+  partial fills) — a crossing pair of different sizes keeps both orders resting.
 - Settler: one wallet for all markets; each pair goes to its market's `CLOBSettlement`. Revert
-  handling (FundingShortfall / PositionFrozen / SlippageExceeded / NonceUsed) is unchanged but reads
-  `claimable()` / `usedNonces()` on that market's contracts and prunes from that market's keys.
+  handling reads `claimable()` / `usedNonces()` on that market's contracts and prunes from that
+  market's keys: FundingShortfall / PositionFrozen / NonceUsed prune ONLY the order whose own state
+  caused the revert; SlippageExceeded never prunes (`engine.markIncompatible`, 10-min TTL, both
+  released); a failed or ambiguous chain read releases both for retry. Root CLAUDE.md "Order
+  removal policy".
 - **Defense in depth (CLOBSettlement does not validate order tokens):** before any gas estimate the
   settler requires both orders to be exactly {USDC, that market's YES or NO}, on the SAME outcome
   token, opposite sides, same market; otherwise it prunes both WITHOUT submitting and logs loudly.

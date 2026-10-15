@@ -49,9 +49,9 @@ export const CLOB_SETTLEMENT_ABI = [
     inputs: [],
   },
   // Order amounts are static, so a SlippageExceeded pair reverts identically
-  // forever too. It only arises when the server's FEE_BPS disagrees with
-  // CLOBSettlement.feeBps (a NO bid priced gross crosses, but the fee-free
-  // seller's net check fails on-chain) — prune rather than wedge the level.
+  // forever too. The engine only pairs orders that pass the contract's gross
+  // whole-order checks, so this is the NO-sale net-of-fee check (or a fee-config
+  // mismatch) — neither order is at fault, so the pair is skipped, not pruned.
   {
     name: 'SlippageExceeded',
     type: 'error' as const,
@@ -245,9 +245,11 @@ class Settler extends EventEmitter {
   // CLOBSettlement does not itself check that an order's tokens belong to its
   // market, so before spending gas we re-verify that BOTH orders are exactly
   // {USDC, this market's YES or NO}, are on opposite sides of the SAME outcome
-  // token, and that both belong to the same market. Anything else is pruned
-  // WITHOUT submitting (loud log). Returns the market to settle on, or null if
-  // the pair was dropped/released here.
+  // token, and that both belong to the same market. Anything else is refused
+  // WITHOUT submitting (loud log): an order whose OWN legs aren't {USDC, its
+  // market's YES/NO} is pruned (it can never settle with anyone); a valid order
+  // that was merely mis-paired is kept resting. Returns the market to settle
+  // on, or null if the pair was dropped/released here.
   private async validatePair(maker: StoredOrder, taker: StoredOrder): Promise<MarketInfo | null> {
     const makerSlug = orderMarketSlug(maker)
     const takerSlug = orderMarketSlug(taker)
@@ -263,11 +265,16 @@ class Settler extends EventEmitter {
     }
     const problem = pairProblem(maker, taker, makerSlug, takerSlug, market, this.config.usdcAddress)
     if (problem) {
+      const invalid = [maker, taker].filter(o => !this.ownLegsValid(o))
       console.error(
         `[settler] REFUSING to submit mismatched pair (${problem}) maker=${maker.id}[${makerSlug}] ` +
-        `taker=${taker.id}[${takerSlug}] market=${market.slug} — pruning both orders`,
+        `taker=${taker.id}[${takerSlug}] market=${market.slug} — pruning ` +
+        `${invalid.length ? invalid.map(o => o.id).join(', ') : 'nothing'}`,
       )
-      await this.removeBoth(maker, taker)
+      await Promise.all(invalid.map(o => this.pruneOrder(o)))
+      const valid = [maker, taker].filter(o => !invalid.includes(o))
+      if (valid.length === 2) this.engine.markIncompatible(maker.id, taker.id)
+      this.engine.releasePendingSettlement(...valid.map(o => o.id))
       return null
     }
     if (!market.active) {
@@ -315,15 +322,16 @@ class Settler extends EventEmitter {
         return
       }
       if (revertName === 'SlippageExceeded') {
-        // Deterministic for this pair (amounts are static; almost certainly a
-        // FEE_BPS ↔ on-chain feeBps mismatch). Either order might still match
-        // a different counterparty, but we can't tell which leg is "at fault"
-        // without re-deriving fee math here — remove both; makers can resubmit.
-        console.error(
-          `[settler] SlippageExceeded (fee-config mismatch?) — removing both ` +
-          `maker=${maker.id} taker=${taker.id}`,
+        // Deterministic for THIS pair (amounts are static), but both orders are
+        // valid and may match someone else: never prune a user's order for an
+        // incompatibility between two orders. Remember the pair so the engine
+        // stops re-pairing it, and release both back into matching.
+        console.warn(
+          `[settler] SlippageExceeded — pair can't settle as whole orders; ` +
+          `skipping it, both orders keep resting maker=${maker.id} taker=${taker.id}`,
         )
-        await this.removeBoth(maker, taker)
+        this.engine.markIncompatible(maker.id, taker.id)
+        this.engine.releasePendingSettlement(maker.id, taker.id)
         return
       }
       if (revertName === 'NonceUsed') {
@@ -437,8 +445,9 @@ class Settler extends EventEmitter {
   }
 
   // ── PositionFrozen: one (or both) makers are flagged claimable — prune the
-  // flagged party's order(s). If we can't determine who's flagged, remove both:
-  // makers can always resubmit, so over-pruning here is safe.
+  // flagged party's order(s) only. If we can't determine who's flagged, prune
+  // nobody: release both and let the next cycle re-estimate (a user's order is
+  // only ever removed for its own state, never on a guess).
   private async handlePositionFrozen(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
     let makerFlagged: boolean
     let takerFlagged: boolean
@@ -449,21 +458,21 @@ class Settler extends EventEmitter {
       ])
     } catch (err) {
       console.error(
-        `[settler] PositionFrozen — claimable() read failed, removing both orders ` +
+        `[settler] PositionFrozen — claimable() read failed, releasing both for retry ` +
         `maker=${maker.id} taker=${taker.id}:`, err,
       )
-      await this.removeBoth(maker, taker)
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
 
     if (!makerFlagged && !takerFlagged) {
       // Read succeeded but neither reports flagged (e.g. cured between the
-      // revert and this check) — fall back to removing both.
+      // revert and this check) — nothing to prune; retry next cycle.
       console.error(
         `[settler] PositionFrozen but claimable() reports neither party flagged — ` +
-        `removing both maker=${maker.id} taker=${taker.id}`,
+        `releasing both for retry maker=${maker.id} taker=${taker.id}`,
       )
-      await this.removeBoth(maker, taker)
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
 
@@ -491,7 +500,7 @@ class Settler extends EventEmitter {
   // so read usedNonces for both and prune ONLY the spent one(s): removing an
   // innocent counterparty's valid resting order would let anyone knock orders
   // off the book by crossing them with a spent-nonce order. If the read fails
-  // or shows neither spent, fall back to removing both (over-pruning is safe).
+  // or shows neither spent, prune nobody: release both for a retry.
   private async handleNonceUsed(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
     let makerSpent: boolean
     let takerSpent: boolean
@@ -502,19 +511,19 @@ class Settler extends EventEmitter {
       ])
     } catch (err) {
       console.error(
-        `[settler] NonceUsed — usedNonces() read failed, removing both orders ` +
+        `[settler] NonceUsed — usedNonces() read failed, releasing both for retry ` +
         `maker=${maker.id} taker=${taker.id}:`, err,
       )
-      await this.removeBoth(maker, taker)
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
 
     if (!makerSpent && !takerSpent) {
       console.error(
         `[settler] NonceUsed but usedNonces() reports neither nonce spent — ` +
-        `removing both maker=${maker.id} taker=${taker.id}`,
+        `releasing both for retry maker=${maker.id} taker=${taker.id}`,
       )
-      await this.removeBoth(maker, taker)
+      this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
 
@@ -582,15 +591,18 @@ class Settler extends EventEmitter {
     return Object.fromEntries([...this.stats].map(([k, v]) => [k, { ...v }]))
   }
 
+  /** An order's own legs are {USDC, its market's YES or NO}. Unknown market → true (can't judge; never prune on a guess). */
+  private ownLegsValid(order: StoredOrder): boolean {
+    const market = this.config.directory.bySlug(orderMarketSlug(order))
+    return !market || outcomeToken(order, market, this.config.usdcAddress) !== null
+  }
+
   /** Remove an order from the book as a prune (not a fill) and count it. */
   private pruneOrder(order: StoredOrder): Promise<void> {
     this.bumpStat(orderMarketSlug(order), 'pruned', 1)
     return this.orderRemover.removeOrder(order.id, order.side, orderMarketSlug(order))
   }
 
-  private async removeBoth(maker: StoredOrder, taker: StoredOrder): Promise<void> {
-    await Promise.all([this.pruneOrder(maker), this.pruneOrder(taker)])
-  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -632,17 +644,8 @@ function pairProblem(
 ): string | null {
   if (makerSlug !== takerSlug) return `orders belong to different markets`
   const usdc = usdcAddress.toLowerCase()
-  const yes = market.yesToken.toLowerCase()
-  const no = market.noToken.toLowerCase()
-  const outcomeOf = (o: StoredOrder): string | null => {
-    const tin = o.tokenIn.toLowerCase()
-    const tout = o.tokenOut.toLowerCase()
-    const tok = tin === usdc ? tout : tout === usdc ? tin : null
-    if (tok === null || tok === usdc) return null
-    return tok === yes || tok === no ? tok : null
-  }
-  const mo = outcomeOf(maker)
-  const to = outcomeOf(taker)
+  const mo = outcomeToken(maker, market, usdcAddress)
+  const to = outcomeToken(taker, market, usdcAddress)
   if (mo === null) return `maker order tokens are not {USDC, ${market.slug} YES/NO}`
   if (to === null) return `taker order tokens are not {USDC, ${market.slug} YES/NO}`
   if (mo !== to) return `orders trade different outcome tokens`
@@ -650,6 +653,17 @@ function pairProblem(
   const takerBuys = taker.tokenIn.toLowerCase() === usdc
   if (makerBuys === takerBuys) return `orders are on the same side`
   return null
+}
+
+// The order's outcome token (lower-cased) if its legs are exactly {USDC, this
+// market's YES or NO}; otherwise null.
+function outcomeToken(o: StoredOrder, market: MarketInfo, usdcAddress: string): string | null {
+  const usdc = usdcAddress.toLowerCase()
+  const tin = o.tokenIn.toLowerCase()
+  const tout = o.tokenOut.toLowerCase()
+  const tok = tin === usdc ? tout : tout === usdc ? tin : null
+  if (tok === null || tok === usdc) return null
+  return tok === market.yesToken.toLowerCase() || tok === market.noToken.toLowerCase() ? tok : null
 }
 
 // The seller-side order is whichever leg sends YES/NO tokens in for USDC

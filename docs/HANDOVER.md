@@ -296,6 +296,10 @@ list.
 3. ~~Ops polish~~ — done 2026-10-13 (matching-engine /health, funding-keeper retry +
    `[ALERT]`, uptime coverage). Remaining: a public domain for matching-engine port 3005 +
    its uptime step.
+4. **Partial fills + on-chain cancel (batch 3)** — `docs/partial-fills-plan.md`. Since
+   2026-10-15 the matching engine only pairs orders that settle WHOLE and never deletes an
+   order over a size mismatch (stopgap); real trading needs partial fills. Also fixes
+   `DELETE /order` not being binding on-chain. Owner decisions A–D in the plan first.
 
 ### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
 
