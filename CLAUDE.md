@@ -34,8 +34,12 @@ Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 202
 (2026-10-03); its contracts are DEPLOYED to Base Sepolia and the Railway services
 and frontend run in registry mode since 2026-10-03** — 210 contract tests (incl. a 2-market invariant suite), 440
 off-chain tests (2026-10-13), 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
-MarketRegistry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` (addresses per market in
-`contracts/deployments/base-sepolia/`). Without `MARKET_REGISTRY_ADDRESS` /
+**Batch 2 (2026-10-15):** the carry-formula change (carry = −(1 − m)·ln(1 − m), see
+"Carry rate") shipped as a fresh contract set for every market under a NEW MarketRegistry
+`0xF650221216c76Bb775cd42211aFcb7a3c99f99A0` (addresses per market in
+`contracts/deployments/base-sepolia/`; runbook `docs/redeploy-batch2-runbook.md`). The batch-1
+markets and registry `0xdF1A…5720` are paused and inactive (archived in
+`deployments/base-sepolia/archive/batch1/`). Without `MARKET_REGISTRY_ADDRESS` /
 `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` every service falls back to legacy single-market
 (`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Ops hardening
 (2026-10-13):** matching-engine `GET /health`, funding-keeper retry + `[ALERT]` logs, hourly
@@ -75,7 +79,7 @@ this doc unchanged, and **all 10 hard invariants hold per market**. Design + pha
 
 | Slug | Entity (UI name) | Type | Ticker | Credit events covered | Initial mark |
 |---|---|---|---|---|---|
-| `mstr` | MicroStrategy (MicroStrategy Incorporated) | corporate | MSTR | Bankruptcy, Failure to Pay | 23% (live, batch-1 contracts = market #1) |
+| `mstr` | MicroStrategy (MicroStrategy Incorporated) | corporate | MSTR | Bankruptcy, Failure to Pay | 23% (batch-2 contracts since 2026-10-15) |
 | `crwv` | CoreWeave (CoreWeave, Inc.) | corporate | CRWV | Bankruptcy, Failure to Pay | 10% |
 | `try` | Turkey (Republic of Turkey) | sovereign | TRY | Failure to Pay, Repudiation/Moratorium, Restructuring | 2% |
 

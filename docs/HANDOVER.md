@@ -1,6 +1,6 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Written 2026-07-07, updated 2026-07-19, 2026-09-25, 2026-10-01 and 2026-10-13, at the point of handing the
+*Written 2026-07-07, updated 2026-07-19, 2026-09-25, 2026-10-01, 2026-10-13 and 2026-10-15, at the point of handing the
 project to the next engineer. This doc captures state and tribal knowledge that is NOT
 derivable from the code or the other docs. Read it alongside — not instead of — the
 canonical references below.*
@@ -101,8 +101,14 @@ canonical references below.*
   `docs/security/invariant-findings-2026-09-26.md`. **All three fixed (unified `owed()`)
   and deployed in the 2026-10-01 batch-1 redeploy.**
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
+- **Batch 2 LIVE (2026-10-15):** carry = −(1 − m)·ln(1 − m) instead of m, so the price is
+  exactly the 12-month default probability (`docs/carry-formula.md`). Every market got a new
+  contract set under a NEW MarketRegistry `0xF650221216c76Bb775cd42211aFcb7a3c99f99A0`; the
+  batch-1 sets are paused + inactive. Seeds unchanged (23/10/2%) — placeholders until the
+  owner supplies ISDA CDS marks (seed with `m = 1 − exp(−s/(1−R))`). Record:
+  `docs/redeploy-batch2-runbook.md`.
 - **Multi-market LIVE (cutover complete 2026-10-03):** MarketRegistry
-  `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` + `AddMarket.s.sol` (per-market contract sets,
+  `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` (superseded by batch 2) + `AddMarket.s.sol` (per-market contract sets,
   shared InsuranceFund, per-market CLOB); markets MSTR (batch-1 set = market #1, no
   redeploy), CoreWeave 10%, Turkey 2% — addresses in `contracts/deployments/base-sepolia/`.
   All five Railway services and the Vercel frontend run in registry mode. Design +
