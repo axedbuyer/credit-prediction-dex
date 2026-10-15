@@ -3,7 +3,8 @@
 Parent spec: see root CLAUDE.md
 
 ## Stack
-- Solidity 0.8.24, Foundry, OpenZeppelin v5
+- Solidity 0.8.24, Foundry, OpenZeppelin v5; Solady v0.1.26 (`FixedPointMathLib.lnWad` only —
+  the carry rate, see docs/carry-formula.md)
 - Chain: Base (chainId 8453), testnet: Base Sepolia (chainId 84532)
 
 ## File layout

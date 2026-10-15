@@ -6,6 +6,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 
 interface IRestrictedToken {
     function mint(address to, uint256 amount) external;
@@ -25,6 +26,9 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     address public yesToken;
     address public noToken;
     uint256 public currentMark;
+    // Annual carry per unit of YES (1e18-scaled) at currentMark: carryRateFor(currentMark).
+    // Recomputed only when the mark changes; every accrual uses it, never the mark.
+    uint256 public currentCarryRate;
     bool public creditEventConfirmed;
     bool public motionPending; // true while a credit-event determination is in progress
 
@@ -92,6 +96,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         yesToken = _yesToken;
         noToken = _noToken;
         currentMark = _initialMark;
+        currentCarryRate = carryRateFor(_initialMark);
         epochLength = _epochLength;
         lastFundingTime = block.timestamp;
         lastMarkUpdate  = block.timestamp;
@@ -99,10 +104,26 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
 
     // ─── funding ────────────────────────────────────────────────────────────────
 
+    // Fair annual carry for a YES priced at `mark` (the 12-month default probability):
+    //   carry = h × (1 − m), with hazard h = −ln(1 − m)
+    // h is the hazard implied by a 12-month probability of m; (1 − m) is what a YES
+    // holder actually stands to gain on a credit event (the token jumps from m to $1),
+    // so it is the notional the NO side really protects. At this rate a YES held at a
+    // steady mark has zero expected P&L, which is what makes "price = probability"
+    // exact (constant hazard, zero rates). Always m(1 − m) <= carry <= m; it peaks at
+    // 1/e when m = 1 − 1/e. Derivation: docs/carry-formula.md.
+    function carryRateFor(uint256 mark) public pure returns (uint256) {
+        if (mark == 0 || mark >= 1e18) revert InvalidMark();
+        int256 lnOneMinusM = FixedPointMathLib.lnWad(int256(1e18 - mark));
+        if (lnOneMinusM >= 0) return 0; // dust marks round ln(1 − m) to 0
+        uint256 carry = (1e18 - mark) * uint256(-lnOneMinusM) / 1e18;
+        return carry > mark ? mark : carry; // rounding guard: carry never exceeds m
+    }
+
     function _accrueFunding() internal {
         uint256 elapsed = block.timestamp - lastFundingTime;
         if (elapsed == 0) return;
-        cumulativeFundingPerYES += currentMark * elapsed / 365 days;
+        cumulativeFundingPerYES += currentCarryRate * elapsed / 365 days;
         cumFundingPerNO = cumulativeFundingPerYES; // exact equality; YES.totalSupply()==NO.totalSupply() always
         lastFundingTime = block.timestamp;
         emit FundingAccrued(cumulativeFundingPerYES, cumFundingPerNO, block.timestamp);
@@ -110,7 +131,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
 
     // Index value as of now, without writing it (views project accrual forward).
     function _projectedCumYES() internal view returns (uint256) {
-        return cumulativeFundingPerYES + currentMark * (block.timestamp - lastFundingTime) / 365 days;
+        return cumulativeFundingPerYES + currentCarryRate * (block.timestamp - lastFundingTime) / 365 days;
     }
 
     // THE single measure of a holder's YES-side funding obligation, used by the
@@ -238,7 +259,8 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         return costBasis[user] + _owedPerUnit(user, yesBal);
     }
 
-    // Epochs of runway before the seizure trigger fires, holding mark constant.
+    // Epochs of runway before the seizure trigger fires, holding mark constant. Each
+    // epoch adds currentCarryRate × epoch / year of owed per unit.
     // Returns type(uint256).max when already at/past trigger (UI should show "0" / warning).
     function epochsToExpire(address user) public view returns (uint256) {
         uint256 yesBal = IERC20(yesToken).balanceOf(user);
@@ -248,7 +270,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 mDiv103 = currentMark * 100 / 103;
         if (fPerUnit >= mDiv103) return type(uint256).max;
         uint256 numerator = mDiv103 - fPerUnit;
-        uint256 deltaF = currentMark * epochLength / 365 days;
+        uint256 deltaF = currentCarryRate * epochLength / 365 days;
         if (deltaF == 0) return type(uint256).max;
         return numerator / deltaF;
     }
@@ -256,7 +278,8 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // ─── v1b: seizure trigger ────────────────────────────────────────────────────
 
     // Returns true when equity is thin enough to warrant seizure.
-    // Trigger: m <= 1.03 * f_next, where f_next = f_now + one epoch of accrual and
+    // Trigger: m <= 1.03 * f_next, where f_next = f_now + one epoch of accrual (at
+    // currentCarryRate) and
     // f_now = owed() per unit — the ledger debt INCLUDED (a trade resets the snapshot
     // but moves the accrued debit into fundingDebt; ignoring it let any trade reset
     // the clock). Evaluated in totals (m×Q vs 1.03×(owed + Q×Δf)) to avoid dividing
@@ -267,7 +290,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         if (yesBal == 0) return false;
         uint256 m          = currentMark;
         uint256 value      = yesBal * m / 1e18;
-        uint256 nextEpoch  = yesBal * (m * epochLength / 365 days) / 1e18;
+        uint256 nextEpoch  = yesBal * (currentCarryRate * epochLength / 365 days) / 1e18;
         return value * 100 <= (owed(user) + nextEpoch) * 103;
     }
 
@@ -346,8 +369,9 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     function _setMark(uint256 newMark, bool adminOverride) internal {
         _accrueFunding();
         emit MarkUpdated(currentMark, newMark, adminOverride);
-        currentMark    = newMark;
-        lastMarkUpdate = block.timestamp;
+        currentMark      = newMark;
+        currentCarryRate = carryRateFor(newMark);
+        lastMarkUpdate   = block.timestamp;
     }
 
     function setMarkBounds(uint256 _maxMarkStep, uint256 _minMarkInterval) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -453,7 +477,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // (isYes) against the user's ACTUAL balance on the other, offsetting side.
     function previewFunding(address user, uint256 amount, bool isYes) external view returns (int256 delta) {
         uint256 elapsed         = block.timestamp - lastFundingTime;
-        uint256 projectedCumYES = cumulativeFundingPerYES + currentMark * elapsed / 365 days;
+        uint256 projectedCumYES = cumulativeFundingPerYES + currentCarryRate * elapsed / 365 days;
         uint256 projectedCumNO  = projectedCumYES; // mirrored, always equal
 
         uint256 yesBal = isYes ? amount : IERC20(yesToken).balanceOf(user);
