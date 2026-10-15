@@ -14,7 +14,9 @@ Base mainnet chainId: 8453
 Product name is **Pari**. Never show "YES/NO", "token", "hazard rate", "bps", "notional"
 in UI — YES/NO are internal names only (code, ABIs, API fields keep yes/no).
 Use: "Upbet" (= YES, color --color-danger), "Downbet" (= NO, color --color-teal),
-"X% annual probability", "Daily carry".
+"X% chance" (of a credit event in the next 12 months), "Daily carry". Carry figures
+always read `currentCarryRate` (−(1 − m)·ln(1 − m) a year) — never derive carry from the mark;
+the price chart plots `MarkUpdated` events.
 Design system: frontend/styles/pari/{tokens,components}.css — use CSS tokens or the
 Tailwind bridge (bg-surface-1, text-text-2, border-brand…); never hardcode hex, never
 use Inter/Roboto/emoji. Direction A (.pari-a-*) = nav/landing/portfolio; Direction B
