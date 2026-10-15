@@ -247,8 +247,9 @@ contract CLOBSettlementTest is Test {
 
         clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
 
-        // After 1 year at 23% mark: cumulativeFundingPerYES = 0.23e18 (exact).
-        uint256 expectedCumulative = uint256(0.23e18) * 365 days / 365 days;
+        // After 1 year at a 23% mark: cumulativeFundingPerYES = one year of carry at
+        // carryRateFor(0.23e18) ≈ 0.2013e18 (exact over a whole year).
+        uint256 expectedCumulative = market.currentCarryRate() * 365 days / 365 days;
         assertEq(market.cumulativeFundingPerYES(), expectedCumulative, "cumulative accrued");
         assertEq(market.cumFundingPerNO(), expectedCumulative, "mirrored NO index accrued");
 
@@ -308,9 +309,11 @@ contract CLOBSettlementTest is Test {
 
         clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
 
-        // credit = 1000e18 * 0.03e18 / 1e18 = 30e18; tradePrice = 950e18.
-        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 950e18 + 30e18,
-            "seller nets tradePrice ($0.95/token) plus funding credit ($0.03/token) = $0.98/token");
+        // credit = one year of carry at a 3% mark = 1000e18 * carryRateFor(0.03e18) / 1e18
+        // ≈ 29.55e18; tradePrice = 950e18.
+        uint256 credit = 1_000e18 * market.currentCarryRate() / 1e18;
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 950e18 + credit,
+            "seller nets tradePrice ($0.95/token) plus funding credit (~$0.0295/token)");
     }
 
     // Pure YES holder: settleFunding reports a debit which is collected out of
@@ -335,9 +338,10 @@ contract CLOBSettlementTest is Test {
 
         clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
 
-        // owed = 1000e18 * 0.03e18 / 1e18 = 30e18; tradePrice = 50e18.
-        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - 30e18,
-            "seller nets tradePrice ($0.05/token) minus funding owed ($0.03/token) = $0.02/token");
+        // owed = one year of carry at a 3% mark ≈ 29.55e18; tradePrice = 50e18.
+        uint256 owed = 1_000e18 * market.currentCarryRate() / 1e18;
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - owed,
+            "seller nets tradePrice ($0.05/token) minus funding owed (~$0.0295/token)");
     }
 
     function test_YESSale_BelowOwed_Reverts_PositionUnchanged() public {
@@ -349,7 +353,7 @@ contract CLOBSettlementTest is Test {
         vm.warp(block.timestamp + 365 days);
 
         uint256 expiry = block.timestamp + 1 hours;
-        // owed = 30e18; priced at 20e18 < owed.
+        // owed ≈ 29.55e18 (one year of carry at 3%); priced at 20e18 < owed.
         CLOBSettlement.Order memory mo = _order(
             maker, address(usdc), address(yesToken), 20e18, 1_000e18, expiry, 0
         );
@@ -423,7 +427,7 @@ contract CLOBSettlementTest is Test {
     function test_Lockout_FlaggedSeller_Reverts() public {
         _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
 
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 410 days); // past the ~404-day runway at a 23% mark
         market.accrueFunding();
         market.grantRole(market.KEEPER_ROLE(), admin);
         assertTrue(market.isSeizable(taker), "must be seizable before flag");
@@ -452,7 +456,7 @@ contract CLOBSettlementTest is Test {
         // Give maker a separate flaggable YES position (independent of the trade below).
         yesToken.mint(maker, 1_000e18); // admin holds MINTER_ROLE from setUp
 
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 410 days); // past the ~404-day runway at a 23% mark
         market.accrueFunding();
         market.grantRole(market.KEEPER_ROLE(), admin);
         assertTrue(market.isSeizable(maker), "maker must be seizable before flag");
@@ -590,12 +594,16 @@ contract CLOBSettlementTest is Test {
         vm.warp(block.timestamp + 365 days);
 
         uint256 expiry = block.timestamp + 1 hours;
-        // owed = 30e18; fee at tradePrice 30.1e18 = 0.1505e18; 30.1 < 30.2505 → revert.
+        // owed ≈ 29.55e18 (one year of carry at 3%); priced 0.1e18 above it, the fee
+        // (≈0.148e18) pushes debit + fee past the price → revert.
+        uint256 owed = 1_000e18 * market.currentCarryRate() / 1e18;
+        uint256 tradePrice = owed + 0.1e18;
+        assertLt(tradePrice, owed + clob.tradeFee(1_000e18, tradePrice), "price sits between debit and debit + fee");
         CLOBSettlement.Order memory mo = _order(
-            maker, address(usdc), address(yesToken), 30.1e18, 1_000e18, expiry, 0
+            maker, address(usdc), address(yesToken), tradePrice, 1_000e18, expiry, 0
         );
         CLOBSettlement.Order memory to_ = _order(
-            taker, address(yesToken), address(usdc), 1_000e18, 30.1e18, expiry, 0
+            taker, address(yesToken), address(usdc), 1_000e18, tradePrice, expiry, 0
         );
         bytes memory ms = _sign(makerKey, mo);
         bytes memory ts = _sign(takerKey, to_);
@@ -619,7 +627,8 @@ contract CLOBSettlementTest is Test {
         vm.warp(block.timestamp + 365 days);
 
         uint256 expiry = block.timestamp + 1 hours;
-        // owed = 30e18; tradePrice 50e18 → fee = 0.25e18; seller nets 19.75e18.
+        // owed ≈ 29.55e18 (one year of carry at 3%); tradePrice 50e18 → fee = 0.25e18.
+        uint256 owed = 1_000e18 * market.currentCarryRate() / 1e18;
         CLOBSettlement.Order memory mo = _order(
             maker, address(usdc), address(yesToken), 50e18, 1_000e18, expiry, 0
         );
@@ -631,7 +640,7 @@ contract CLOBSettlementTest is Test {
 
         clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
 
-        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - 30e18 - 0.25e18,
+        assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - owed - 0.25e18,
             "seller nets tradePrice minus debit minus fee");
         assertEq(market.fundingDebt(taker), 0, "debt collected via markDebtCollected");
     }
@@ -736,12 +745,12 @@ contract CLOBSettlementTest is Test {
         uint256 mark = bound(uint256(markRaw), 1, 0.01e18); // 0 is an invalid mark (setMark reverts InvalidMark)
         market.grantRole(market.KEEPER_ROLE(), admin);
         market.setMark(mark);                 // elapsed == 0: sets the rate, accrues nothing
-        vm.warp(block.timestamp + 365 days);  // → cumFundingPerYES == cumFundingPerNO == mark
+        vm.warp(block.timestamp + 365 days);  // → cumFundingPerYES == cumFundingPerNO == carryRateFor(mark)
 
         uint256 amount = bound(uint256(amountRaw), 100e18, 1_000e18);
         // settleFunding nets the seller's FULL balance, not the amount sold, so the
         // funding leg is sized off 1,000e18 regardless of trade size.
-        uint256 owed = 1_000e18 * mark / 1e18;
+        uint256 owed = 1_000e18 * market.currentCarryRate() / 1e18;
 
         // Floor the price above owed plus a 1% margin. The fee is at most 0.5% of the
         // min side, i.e. ≤0.25% of amount, so every draw clears owed + fee without
