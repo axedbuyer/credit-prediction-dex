@@ -156,6 +156,16 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
     query: { enabled: !!address },
   })
 
+  // ── Live carry rate ─────────────────────────────────────────────────────────
+  // Carry follows the market's live price, not this order's limit price:
+  // currentCarryRate = −(1 − m)·ln(1 − m) a year at the current mark.
+  const { data: carryRateData } = useReadContract({
+    address: contracts.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'currentCarryRate',
+    query: { refetchInterval: 15_000 },
+  })
+
   // ── Freeze state (v1b1) — a flagged position locks mint/redeem/all CLOB trades ──
   const { data: claimableData } = useReadContract({
     address: contracts.creditMarket,
@@ -202,12 +212,16 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
   const tokenPrice = side === 'YES' ? limitPrice : 1 - limitPrice
   const tokenCostDisplay = `${sideLabel(side)} costs ${(tokenPrice * 100).toFixed(1)}¢ per $1`
 
-  const dailyCarryPct = (limitPrice / 365) * 100
+  // % of each $1 of payout per day (== ¢ per $1 per day).
+  const dailyCarryPct =
+    carryRateData !== undefined ? (Number((carryRateData as bigint) / 10n ** 10n) / 1e6 / 365) : undefined
   const dailyCarryDisplay =
-    direction === 'BUY' && side === 'YES'
-      ? `You pay ~${dailyCarryPct.toFixed(3)}% daily carry`
+    dailyCarryPct === undefined
+      ? null
+      : direction === 'BUY' && side === 'YES'
+      ? `You pay ~${dailyCarryPct.toFixed(3)}% daily carry at today's price`
       : direction === 'BUY' && side === 'NO'
-      ? `You earn ~${dailyCarryPct.toFixed(3)}% daily carry`
+      ? `You earn ~${dailyCarryPct.toFixed(3)}% daily carry at today's price`
       : null
 
   const tokenBalance =

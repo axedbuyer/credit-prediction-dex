@@ -632,7 +632,7 @@ token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
 - "Upbet" / "Downbet" (Upbet = YES internally = long default risk, pays carry;
   Downbet = NO internally = earns carry). Colors: Upbet = `--color-danger`,
   Downbet = `--color-teal`; positive P&L stays `--color-success`.
-- "X% annual probability"
+- "X% chance" (of a credit event in the next 12 months — never "annual probability")
 - "Daily carry" (not funding rate)
 - Market title: "Will [Entity] have a credit event in the next 12 months?" (e.g. "Will
   MicroStrategy have a credit event in the next 12 months?")

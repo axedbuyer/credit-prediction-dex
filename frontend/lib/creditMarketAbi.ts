@@ -116,6 +116,15 @@ export const CREDIT_MARKET_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  // Annual carry per Upbet at the current mark: −(1 − m)·ln(1 − m), 1e18-scaled.
+  // Every carry figure in the UI reads this — never derive carry from the mark.
+  {
+    name: 'currentCarryRate',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
   {
     name: 'creditEventConfirmed',
     type: 'function',

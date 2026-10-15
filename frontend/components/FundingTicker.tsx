@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useReadContract } from 'wagmi'
 import type { Market } from '@/lib/markets'
 import { CREDIT_MARKET_ABI } from '@/lib/creditMarketAbi'
@@ -16,13 +17,21 @@ function wadToPercent(wad: bigint | undefined): number | undefined {
 
 export function FundingTicker({ market }: { market: Market }) {
 
-  // Two individual reads rather than a single batched useReadContracts —
+  // Individual reads rather than a single batched useReadContracts —
   // batching goes through a multicall3 contract, which real Base Sepolia/
   // mainnet have at the canonical address but a bare local `anvil` chain
   // (as used by scripts/demo) does not predeploy. On such a chain the
   // multicall call reverts with no fallback, so both values would come
   // back silently undefined ("—" placeholders in the ticker) even though
   // the underlying contract reads are perfectly healthy individually.
+  // Carry is NOT the price: currentCarryRate = −(1 − m)·ln(1 − m) per year
+  // (docs/carry-formula.md), always a little below the mark.
+  const { data: carryRate } = useReadContract({
+    address: market.creditMarket,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'currentCarryRate',
+    query: { refetchInterval: 10_000 },
+  })
   const { data: currentMark } = useReadContract({
     address: market.creditMarket,
     abi: CREDIT_MARKET_ABI,
@@ -36,8 +45,9 @@ export function FundingTicker({ market }: { market: Market }) {
     query: { refetchInterval: 10_000 },
   })
 
-  const annualPct  = wadToPercent(currentMark)
+  const annualPct  = wadToPercent(carryRate)
   const dailyPct   = annualPct !== undefined ? annualPct / 365 : undefined
+  const markPct    = wadToPercent(currentMark)
   const cumCents   = wadToPercent(cumFunding)
 
   return (
@@ -50,7 +60,14 @@ export function FundingTicker({ market }: { market: Market }) {
 
       <p className="pari-b-card__sub uppercase tracking-wide">
         Upbet pays Downbet ·{' '}
-        {annualPct !== undefined ? `${annualPct.toFixed(1)}% annualized` : '— annualized'}
+        {annualPct !== undefined ? `${annualPct.toFixed(1)}% a year` : '— a year'}
+      </p>
+
+      <p className="pari-b-card__sub mt-1">
+        {markPct !== undefined
+          ? `Charged only on what an Upbet stands to win (${(100 - markPct).toFixed(1)}¢ per $1), so it sits below the ${markPct.toFixed(1)}% chance. `
+          : ''}
+        <Link href="/docs/mark-to-market-and-carry" className="underline">How carry works</Link>
       </p>
 
       <p className="pari-b-card__sub mt-1 uppercase tracking-wide">

@@ -41,6 +41,13 @@ const CREDIT_MARKET_ABI = [
     outputs: [{ name: '', type: 'uint256' }],
   },
   {
+    name: 'currentCarryRate',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
     name: 'creditEventConfirmed',
     type: 'function',
     stateMutability: 'view',
@@ -234,6 +241,8 @@ function AdminPanel({ market }: { market: Market }) {
         functionName: 'hasRole',
         args: [PAUSER_ROLE, userAddr],
       },
+      // [9] currentCarryRate — −(1 − m)·ln(1 − m) a year, set by the mark
+      { address: addrs.creditMarket, abi: CREDIT_MARKET_ABI, functionName: 'currentCarryRate' },
     ],
     query: { enabled: !!address },
   })
@@ -247,6 +256,7 @@ function AdminPanel({ market }: { market: Market }) {
   const cumulativeFunding    = data?.[6]?.result as bigint  | undefined
   const hasOracleRole        = data?.[7]?.result as boolean | undefined
   const hasPauserRole        = data?.[8]?.result as boolean | undefined
+  const carryRate            = data?.[9]?.result as bigint  | undefined
 
   // ── Transactions ──────────────────────────────────────────────────────────
 
@@ -359,6 +369,10 @@ function AdminPanel({ market }: { market: Market }) {
             <Stat
               label="Current probability"
               value={currentMark !== undefined ? pctDisplay(currentMark) : '—'}
+            />
+            <Stat
+              label="Carry (a year, per Upbet)"
+              value={carryRate !== undefined ? pctDisplay(carryRate) : '—'}
             />
             <Stat
               label="Upbet supply"
