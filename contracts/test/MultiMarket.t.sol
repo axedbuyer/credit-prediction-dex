@@ -178,7 +178,7 @@ contract MultiMarketTest is Test {
     function test_TailCaseClaimInA_ShortfallGoesToA_BCollateralUntouched() public {
         _mint(A, alice, AMT);
         _mint(B, alice, AMT);
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 365 days); // past the ~363-day runway at 5%
         A.market.accrueFunding();
         B.market.accrueFunding();
         assertTrue(A.market.isSeizable(alice));
@@ -315,7 +315,7 @@ contract MultiMarketTest is Test {
         assertEq(B.yes.totalSupply(), B.no.totalSupply());
 
         // B: liquidation lifecycle still works
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 365 days); // past the ~363-day runway at 5%
         B.market.accrueFunding();
         assertTrue(B.market.isSeizable(bob) || B.market.isSeizable(alice));
         address victim = B.market.isSeizable(alice) ? alice : bob;
@@ -344,8 +344,8 @@ contract MultiMarketTest is Test {
         uint256 owedB = B.market.owed(alice);
         uint256 span = 100 days;
         uint256 markB = 0.10e18;
-        assertEq(owedA, AMT * (MARK * span / 365 days) / 1e18);
-        assertEq(owedB, AMT * (markB * span / 365 days) / 1e18);
+        assertEq(owedA, AMT * (A.market.carryRateFor(MARK) * span / 365 days) / 1e18);
+        assertEq(owedB, AMT * (B.market.carryRateFor(markB) * span / 365 days) / 1e18);
         assertTrue(owedA != owedB);
 
         // alice sells her YES in A: only A's ledger/snapshots move
@@ -361,7 +361,7 @@ contract MultiMarketTest is Test {
         assertEq(usdc.balanceOf(address(B.market)), collB, "B collateral untouched");
 
         // flagging alice in B locks B only: A still lets her mint/redeem (she has NO in A)
-        vm.warp(block.timestamp + 256 days);
+        vm.warp(block.timestamp + 280 days); // 380 days total: past B's ~373-day runway at 10%
         A.market.accrueFunding();
         B.market.accrueFunding();
         assertTrue(B.market.isSeizable(alice));

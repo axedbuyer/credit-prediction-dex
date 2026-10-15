@@ -186,8 +186,8 @@ contract IntegrationTest is Test {
         assertEq(usdc.balanceOf(alice),     770e18,   "alice USDC after buyback");
 
         // ── 5. verify funding debt was written by trade-2 sync ─────────────
-        // cumulative = 0.23e18 * 30 days / 365 days (integer math matches contract)
-        uint256 expectedCumulative = MARK * 30 days / 365 days;
+        // cumulative = carryRateFor(0.23e18) * 30 days / 365 days (integer math matches contract)
+        uint256 expectedCumulative = market.carryRateFor(MARK) * 30 days / 365 days;
         uint256 expectedDebt       = 230e18 * expectedCumulative / 1e18;
 
         assertEq(market.cumulativeFundingPerYES(), expectedCumulative,
@@ -279,8 +279,8 @@ contract IntegrationTest is Test {
         market.redeem(1e18);
 
         // ── 6. alice settleYES(230) → notional minus accrued YES debit ─────
-        // 60 days at 23% mark: cumulativeFundingPerYES = 0.23e18 * 60d / 365d.
-        uint256 expectedCum  = uint256(0.23e18) * 60 days / 365 days;
+        // 60 days at 23% mark: cumulativeFundingPerYES = carryRateFor(0.23e18) * 60d / 365d.
+        uint256 expectedCum  = market.carryRateFor(0.23e18) * 60 days / 365 days;
         uint256 expectedOwed = 230e18 * expectedCum / 1e18;
 
         uint256 aliceUsdcBefore = usdc.balanceOf(alice); // 1 000 + 1 from test setup above
@@ -382,7 +382,7 @@ contract IntegrationV1bTest is Test {
         // ── fund actors ────────────────────────────────────────────────────
         usdc.mint(alice, 1_000e18);
         usdc.mint(bob,   1_000e18);
-        usdc.mint(carol, 10e18);                     // covers P ≈ 4.85 USDC at 5%/354d
+        usdc.mint(carol, 10e18);                     // covers P ≈ 4.85 USDC at 5%/363d
         usdc.mint(address(insuranceFund), 1_000e18); // pre-funded for tail-case coverage
 
         // ── approvals ──────────────────────────────────────────────────────
@@ -434,10 +434,10 @@ contract IntegrationV1bTest is Test {
 
     // Liquidation lifecycle at the 5% worked example.
     //
-    // Acceleration: warp 354 days in one vm.warp + one accrueFunding() call.
+    // Acceleration: warp 363 days in one vm.warp + one accrueFunding() call.
     // _accrueFunding() integrates elapsed time, so a single call is identical to
-    // 354 daily calls. At m=5%, 354 days crosses the seizure threshold
-    // (m/1.03 − Δf ≈ 4.840e−2 per unit; 354d accrual ≈ 4.849e−2).
+    // 363 daily calls. At m=5% (carry ≈ 4.873%), 363 days crosses the seizure
+    // threshold (m/1.03 − Δf ≈ 4.841e−2 per unit; 363d accrual ≈ 4.846e−2).
     function test_v1b_FullLifecycle_LiquidationPath() public {
         // ── 1. Alice mints $100 at 5% mark → 100 YES + 100 NO ─────────────
         vm.prank(alice);
@@ -462,11 +462,11 @@ contract IntegrationV1bTest is Test {
         assertEq(noToken.balanceOf(bob),    NOTIONAL, "bob holds 100 NO");
         assertEq(yesToken.balanceOf(alice), NOTIONAL, "alice holds 100 YES");
 
-        // ── 3. Warp 354 days; accumulate all carry in one call ─────────────
-        vm.warp(block.timestamp + 354 days);
+        // ── 3. Warp 363 days; accumulate all carry in one call ─────────────
+        vm.warp(block.timestamp + 363 days);
         market.accrueFunding();
 
-        assertTrue(market.isSeizable(alice), "alice seizable after 354 days bleed at 5%");
+        assertTrue(market.isSeizable(alice), "alice seizable after 363 days bleed at 5%");
         assertFalse(market.isSeizable(bob),  "bob (NO holder, zero YES balance) never seizable");
 
         // ── 4. Keeper flags Alice's position ───────────────────────────────
@@ -477,10 +477,10 @@ contract IntegrationV1bTest is Test {
 
         // No freeze (F1 fix): owed() is live, but no time has elapsed since the
         // flag yet (no intermediate sync before it either), so it still equals
-        // the full 354-day cumulative x balance here.
+        // the full 363-day cumulative x balance here.
         uint256 owedAtFlag = market.owed(alice);
         assertEq(owedAtFlag, market.cumulativeFundingPerYES() * NOTIONAL / 1e18,
-            "owed() == 354-day cumulative x balance (fundingSnapshot was 0 at mint, no mid-sync)");
+            "owed() == 363-day cumulative x balance (fundingSnapshot was 0 at mint, no mid-sync)");
         assertGt(owedAtFlag, 0, "owed funding non-zero");
 
         // ── 5. Carol claims the flagged position ───────────────────────────
@@ -684,7 +684,7 @@ contract IntegrationV1bTest is Test {
         );
         clob.verifyAndSettle(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0));
 
-        // 300 days: not yet seizable at 5% mark (~354-day runway).
+        // 300 days: not yet seizable at 5% mark (~363-day runway).
         vm.warp(block.timestamp + 300 days);
         market.accrueFunding();
         assertFalse(market.isSeizable(alice), "not seizable yet at 300 days");
