@@ -1,17 +1,18 @@
-# Hosted env vars — Railway + Vercel (Base Sepolia, post batch-1 redeploy 2026-10-01)
+# Hosted env vars — Railway + Vercel (Base Sepolia, post batch-2 redeploy 2026-10-15)
 
-Single source of truth for what each hosted service needs, with the CURRENT addresses —
-the full batch-1 redeploy of 2026-10-01 (`docs/redeploy-batch1-runbook.md`; deploy start
+Single source of truth for what each hosted service needs. Services run in registry mode:
+the CURRENT addresses are the batch-2 registry below (2026-10-15). The single-set
+address sections further down are the batch-1 redeploy of 2026-10-01 (`docs/redeploy-batch1-runbook.md`; deploy start
 block 47528136). The 2026-07 contracts (CreditMarket `0x26C3…F51b`, CLOB `0xC317…cB8e`)
 are paused and empty.
 Companion to `docs/deploy-testnet.md` §3–4 (service topology) and
 `docs/deploy-followups.md` (incident fixes). Secrets are marked — pull them from the
 local gitignored `.env` files, never from this doc.
 
-## Multi-market (built 2026-10-02, cutover PENDING — `docs/multi-market-cutover.md`)
+## Multi-market (registry mode since 2026-10-03 — `docs/multi-market-cutover.md`)
 
-Until stage C of the cutover, nothing below changes: every service runs in **legacy mode**
-(one market, `mstr`, from the single-set address vars on this page). New vars:
+Every service runs in **registry mode**; the single-set address vars on this page are
+ignored (legacy one-market `mstr` mode only). Registry vars:
 
 | Var | Services | Meaning |
 |---|---|---|
@@ -21,14 +22,20 @@ Until stage C of the cutover, nothing below changes: every service runs in **leg
 | `CHAIN_ID` | matching-engine | Optional, default 84532 (only for local anvil). |
 | `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` | Vercel | Set → frontend discovers markets on-chain; the `NEXT_PUBLIC_*_ADDRESS` market vars are then ignored (`NEXT_PUBLIC_USDC_ADDRESS` still used). |
 
-**MarketRegistry: `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`** (deployed 2026-10-03, stage B;
-`contracts/deployments/base-sepolia/core.json`). Markets: `mstr` (batch-1 set), `crwv`
-CreditMarket `0xA895a7d71f3CF6e9Ac9e6e00B86eaccc4C6F8dC0`, `try` CreditMarket
-`0x3F72DA6652C4a14984a6B94BA9EB1a2782ff40Ae` — full address sets in
-`contracts/deployments/base-sepolia/markets/<slug>.json`. **Set as `MARKET_REGISTRY_ADDRESS` on all
-five Railway services 2026-10-03 (stage C) — they now run in registry mode;** the old
-single-set address vars are still present (ignored) so rollback = delete this one var +
-redeploy. Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` set by the owner 2026-10-03 (frontend in registry mode).
+**MarketRegistry (batch 2, CURRENT): `0xF650221216c76Bb775cd42211aFcb7a3c99f99A0`** (deployed
+2026-10-15, start block 48140921; `docs/redeploy-batch2-runbook.md`; carry formula
+`docs/carry-formula.md`). CreditMarkets: `mstr` `0x7AF29bd2fE6CF3bE904A538f2e0217285A7da94c`,
+`crwv` `0xcD60CDe83f631A82f369BF7D6C03b91D2b25f5A0`, `try`
+`0xA891D433DEcEf0d35C40f93b86057411777Ca594` — full address sets in
+`contracts/deployments/base-sepolia/markets/<slug>.json`. Set as `MARKET_REGISTRY_ADDRESS` on
+all five Railway services and as Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`.
+
+**Previous registry (batch 1, wound down 2026-10-15):** `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`
+(deployed 2026-10-03) — its three markets are paused and inactive; address sets archived in
+`contracts/deployments/base-sepolia/archive/batch1/`. The single-set address vars below
+still point at the batch-1 MSTR contracts: they are ignored in registry mode, and unsetting
+`MARKET_REGISTRY_ADDRESS` would now fall back to a **paused** market — there is no
+legacy-mode rollback after batch 2.
 
 ## Every Railway service
 
