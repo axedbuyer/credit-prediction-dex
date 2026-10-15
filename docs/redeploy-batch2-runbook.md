@@ -91,6 +91,10 @@ the throwaway wallet's 4 pairs (≈4 USDC, unreachable; its 0.0345 USDC carry de
 ledger). Public-RPC nonce lag ("replacement transaction underpriced"): just re-run.
 Rollback: `unpause()` + `setActive(id, true)` on the old set.
 
+**Done 2026-10-15** (run by the owner): 8 pairs redeemed per market, all three paused,
+inactive, engine roles revoked. Old MSTR keeps 4 pairs / 3.965055 USDC collateral (4 − the
+throwaway's 0.0345 debt); CRWV and TRY are empty.
+
 ## 4. Flip (≈10 min)
 
 1. **Vercel** (owner): `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS = <new registry>`. Must be saved
@@ -111,6 +115,10 @@ Rollback: `unpause()` + `setActive(id, true)` on the old set.
    address) and PR #13 (after retargeting it to `main`; it also carries the new addresses
    for the frontend's contract-addresses page) → Railway + Vercel rebuild.
 
+**Done 2026-10-15:** Redis cleared by the owner (34 `orders:*`, 6 `orderbook:*`, 4
+`nonces:*`; 11 `holder-index:*` kept — the auto-mode classifier blocks the delete for
+Claude); Railway var set on all five, each `/health` in registry mode on the new markets.
+
 ## 5. Re-seed (downtime ends)
 
 ```bash
@@ -121,6 +129,9 @@ for m in mstr crwv try; do ORDER_BOOK_URL=https://order-book-server-production-9
 
 Mints 8 USDC of sets per market and rests a ladder around each live price. The shared
 InsuranceFund keeps its 2.0024 USDC — no new deposit needed.
+
+**Done 2026-10-15:** 8 USDC minted and 7 quotes resting per market (MSTR 20–26¢, CRWV 7–13¢,
+TRY 0.5–3.5¢ on the Upbet side).
 
 ## 6. Verify
 
