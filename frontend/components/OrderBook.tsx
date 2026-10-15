@@ -14,7 +14,7 @@ import type { Market } from '@/lib/markets'
 // since a NO price isn't comparable to a YES price on the same axis.
 type RawOrder = {
   side: 'bid' | 'ask'
-  price: number // 0–1 float, e.g. 0.234 = 23.4% annual probability
+  price: number // 0–1 float, e.g. 0.234 = 23.4% chance of a credit event in the next 12 months
   amountIn: string
   minAmountOut: string
   tokenIn: string

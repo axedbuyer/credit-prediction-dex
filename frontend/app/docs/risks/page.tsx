@@ -13,7 +13,8 @@ export default function RisksPage() {
       <ul>
         <li>
           <strong>Carry decay:</strong> at a constant price, an Upbet loses ≈ its entire
-          value to daily carry over ~a year. An Upbet is a decaying asset unless the
+          value to daily carry in a little over a year (358–404 days at today&rsquo;s launch
+          prices). An Upbet is a decaying asset unless a credit event happens or the
           probability rises. Watch{' '}
           <Link href="/docs/mark-to-market-and-carry">Epochs to Expire</Link>.
         </li>

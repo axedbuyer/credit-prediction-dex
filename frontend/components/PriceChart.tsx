@@ -30,8 +30,12 @@ const RANGE_SECONDS: Partial<Record<TimeRange, number>> = {
 // ~27h at 2s/block on Base — keeps within public RPC limits
 const BLOCK_RANGE_CAP = 50_000n
 
-const YEAR_SECONDS = 365n * 86_400n
-
+const MARK_UPDATED = parseAbiItem(
+  'event MarkUpdated(uint256 oldMark, uint256 newMark, bool adminOverride)'
+)
+// Only used as a block -> timestamp source: _setMark accrues first, so a
+// MarkUpdated almost always shares its block with a FundingAccrued that carries
+// block.timestamp — no per-block RPC lookup needed in the common case.
 const FUNDING_ACCRUED = parseAbiItem(
   'event FundingAccrued(uint256 cumulativeFundingPerYES, uint256 cumFundingPerNO, uint256 timestamp)'
 )
@@ -64,10 +68,11 @@ export function PriceChart({ market }: PriceChartProps) {
   const seriesRef = useRef<any>(null)
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
-  // Mark series derived from consecutive FundingAccrued events: between events
-  // i and i+1, mark_i = (cumYES_{i+1} - cumYES_i) * 365d / (t_{i+1} - t_i).
-  // A live tail point (via currentMark + latest block) keeps the chart moving
-  // between accrual epochs — e.g. during a demo time-warp.
+  // Mark series from MarkUpdated events, drawn as steps. It used to be
+  // reverse-engineered from FundingAccrued deltas, which only worked while carry
+  // == mark; carry is now −(1 − m)·ln(1 − m), so the accrual rate is no longer
+  // the price. A live tail point (via currentMark + latest block) keeps the
+  // chart moving between updates — e.g. during a demo time-warp.
 
   const { data: points = [], isLoading } = useQuery<PricePoint[]>({
     queryKey: ['price-history', chainId, market.creditMarket, marketId],
@@ -79,33 +84,37 @@ export function PriceChart({ market }: PriceChartProps) {
       // Never scan before this market existed (registry startBlock; 0 in legacy mode).
       const fromBlock = capped > market.startBlock ? capped : market.startBlock
 
-      const logs = await publicClient.getLogs({
-        address: market.creditMarket,
-        event: FUNDING_ACCRUED,
-        fromBlock,
-        toBlock: 'latest',
-      })
+      const [markLogs, accrualLogs] = await Promise.all([
+        publicClient.getLogs({ address: market.creditMarket, event: MARK_UPDATED, fromBlock, toBlock: 'latest' }),
+        publicClient.getLogs({ address: market.creditMarket, event: FUNDING_ACCRUED, fromBlock, toBlock: 'latest' }),
+      ])
 
-      // Chronological order (block, then log index tie-break). The event
-      // carries its own block.timestamp arg, so no per-block RPC lookup needed.
-      const sorted = [...logs].sort((a, b) => {
-        if (a.blockNumber !== b.blockNumber) return a.blockNumber! < b.blockNumber! ? -1 : 1
-        return (a.logIndex ?? 0) - (b.logIndex ?? 0)
-      })
+      const blockTs = new Map<bigint, number>()
+      for (const l of accrualLogs) blockTs.set(l.blockNumber!, Number(l.args.timestamp!))
+      // Rare: a mark change with no accrual in its block (elapsed == 0).
+      const missing = Array.from(new Set(markLogs.map((l) => l.blockNumber!).filter((b) => !blockTs.has(b))))
+      const blocks = await Promise.all(missing.map((blockNumber) => publicClient.getBlock({ blockNumber })))
+      for (const b of blocks) blockTs.set(b.number, Number(b.timestamp))
 
-      const events = sorted.map((l) => ({
-        cumYES: l.args.cumulativeFundingPerYES!,
-        ts: Number(l.args.timestamp!),
-      }))
+      // Chronological order (block, then log index tie-break).
+      const updates = [...markLogs]
+        .sort((a, b) => {
+          if (a.blockNumber !== b.blockNumber) return a.blockNumber! < b.blockNumber! ? -1 : 1
+          return (a.logIndex ?? 0) - (b.logIndex ?? 0)
+        })
+        .map((l) => ({ ts: blockTs.get(l.blockNumber!)!, oldMark: l.args.oldMark!, newMark: l.args.newMark! }))
 
       const derived: PricePoint[] = []
-      for (let i = 0; i < events.length - 1; i++) {
-        const dt = events[i + 1].ts - events[i].ts
-        if (dt === 0) continue // skip same-block duplicate accruals
-        const deltaCum = events[i + 1].cumYES - events[i].cumYES
-        const markWad = (deltaCum * YEAR_SECONDS) / BigInt(dt)
-        derived.push({ time: events[i].ts, value: wadToPercent(markWad) })
+      // Anchor the left edge at the earliest accrual in range, at the mark that
+      // was live then (the first update's oldMark, or — with no updates in
+      // range — the current mark, added by the tail point below).
+      const firstTs = accrualLogs.length ? Math.min(...accrualLogs.map((l) => Number(l.args.timestamp!))) : undefined
+      if (updates.length && firstTs !== undefined && firstTs < updates[0].ts) {
+        derived.push({ time: firstTs, value: wadToPercent(updates[0].oldMark) })
       }
+      // Each point holds until the next (the series draws steps).
+      for (const u of updates) derived.push({ time: u.ts, value: wadToPercent(u.newMark) })
+      const flatAnchor: number | undefined = updates.length ? undefined : firstTs
 
       // Live tail point at the current mark / latest block timestamp.
       try {
@@ -117,7 +126,9 @@ export function PriceChart({ market }: PriceChartProps) {
           }),
           publicClient.getBlock(),
         ])
-        derived.push({ time: Number(block.timestamp), value: wadToPercent(mark as bigint) })
+        const value = wadToPercent(mark as bigint)
+        if (flatAnchor !== undefined && flatAnchor < Number(block.timestamp)) derived.push({ time: flatAnchor, value })
+        derived.push({ time: Number(block.timestamp), value })
       } catch {
         // no-op — fall back to whatever derived history we have
       }
@@ -140,7 +151,7 @@ export function PriceChart({ market }: PriceChartProps) {
     let aborted = false
 
     // Dynamic import keeps the heavy LC bundle out of SSR
-    import('lightweight-charts').then(({ createChart, ColorType, AreaSeries }) => {
+    import('lightweight-charts').then(({ createChart, ColorType, AreaSeries, LineType }) => {
       if (aborted || !containerRef.current) return
 
       // Resolve token colors at mount — Lightweight Charts renders to canvas
@@ -188,6 +199,9 @@ export function PriceChart({ market }: PriceChartProps) {
         topColor: tealFill,
         bottomColor: 'rgba(0, 196, 180, 0.02)',
         lineWidth: 2 as const,
+        // The mark holds until the next MarkUpdated, so draw steps, not ramps (the
+        // time scale is index-spaced, so a plain line slopes across a whole bar).
+        lineType: LineType.WithSteps,
         priceLineVisible: false,
         lastValueVisible: false,
       })
@@ -260,7 +274,7 @@ export function PriceChart({ market }: PriceChartProps) {
             <p className="font-serif text-xl text-text-1 tabular">
               {latestPrice.toFixed(1)}%{' '}
               <span className="font-sans text-xs uppercase tracking-widest text-text-muted">
-                annual probability
+                chance · next 12 months
               </span>
             </p>
           ) : null}

@@ -12,6 +12,7 @@
  *   Table scroll    .docs-table-wrap
  *   Callout         .docs-callout (+ --info | --warning | --danger)
  *   Formula block   .docs-formula
+ *   Collapsible     .docs-details (<details> + <summary>)
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -253,4 +254,27 @@
   margin: var(--space-6) 0;
   overflow-x: auto;
   white-space: pre;
+}
+
+/* ── Collapsible detail (e.g. "the exact formula") ──────────────────────── */
+.docs-details {
+  margin: var(--space-6) 0;
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md-a);
+}
+
+.docs-details > summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--color-text-1);
+}
+
+.docs-details[open] > summary {
+  margin-bottom: var(--space-3);
+}
+
+.docs-details > .docs-formula:first-of-type {
+  margin-top: var(--space-3);
 }
