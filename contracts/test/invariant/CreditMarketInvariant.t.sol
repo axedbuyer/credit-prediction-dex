@@ -400,7 +400,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
                 uint256 accruedPerUnit = cumYES - market.fundingSnapshot(u);
                 uint256 owedTotal = market.fundingDebt(u) + yesBal * accruedPerUnit / 1e18;
                 uint256 value = yesBal * m / 1e18;
-                uint256 nextEpoch = yesBal * (m * epochLength / 365 days) / 1e18;
+                uint256 nextEpoch = yesBal * (market.currentCarryRate() * epochLength / 365 days) / 1e18;
                 // Evaluated in totals (value vs owed+nextEpoch) rather than
                 // per-unit, to avoid dividing by the balance -- equivalent to the
                 // spec's per-unit "m <= 1.03 * f_next" scaled by yesBal on both sides.
@@ -474,7 +474,9 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             5e17 // 50% price fraction
         );
 
-        handler.warpAndAccrue(37680);
+        // Warp chosen so the per-actor floors land on the gap at the 5% mark's carry
+        // rate (carryRateFor(0.05e18)); was 37680 when carry accrued at the mark itself.
+        handler.warpAndAccrue(37600);
 
         uint256 cumYES = market.cumulativeFundingPerYES();
         uint256 actor0Yes = yesToken.balanceOf(actor0);
@@ -610,12 +612,12 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         // 1. Alice mints $1000, sells all NO to Bob -> alice pure YES, bob pure NO.
         _reproMintAndSplit(a);
 
-        // 2. Warp 354 days (the CLAUDE.md worked example) so alice is seizable
+        // 2. Warp 363 days (the CLAUDE.md worked example) so alice is seizable
         //    at the 5% initial mark, then flag her -- post-fix this is a pure
         //    LOCK, not an accounting freeze.
-        vm.warp(block.timestamp + 354 days);
+        vm.warp(block.timestamp + 363 days);
         market.accrueFunding();
-        assertTrue(market.isSeizable(a.alice), "alice should be seizable after 354 days at 5% mark");
+        assertTrue(market.isSeizable(a.alice), "alice should be seizable after 363 days at 5% mark");
         market.flagClaimable(a.alice);
 
         // 3. MORE time passes while alice sits flagged (unclaimed/uncured) --
@@ -697,7 +699,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
         // Step in 1-day increments (== epochLength) so the boundary crossing is
         // caught tightly, with alice doing the tiny F4 buy from bob every 60 days
-        // (well inside the ~353-day natural trigger window on its own -- only the
+        // (well inside the ~362-day natural trigger window on its own -- only the
         // ACCUMULATED ledger debt across repeated resets should ever trip it).
         uint256 nonce = 10;
         bool becameSeizable;
@@ -729,7 +731,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         // value with isSeizable() permanently false. Allow slack for the
         // trigger's own one-epoch look-ahead plus this test's 1-day step
         // granularity (two epochs' worth of accrual, generously).
-        uint256 oneEpochAccrual = yesBal * (m * 1 days / 365 days) / 1e18;
+        uint256 oneEpochAccrual = yesBal * (market.currentCarryRate() * 1 days / 365 days) / 1e18;
         assertLe(
             debtAtTrigger,
             positionValue + 2 * oneEpochAccrual + 1,
@@ -767,9 +769,9 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
         // Warp so alice is seizable; bob's paired NO accrues a large, entirely
         // unsynced credit alongside it (he performs no other action here).
-        vm.warp(block.timestamp + 354 days);
+        vm.warp(block.timestamp + 363 days);
         market.accrueFunding();
-        assertTrue(market.isSeizable(a.alice), "alice should be seizable after 354 days at 5% mark");
+        assertTrue(market.isSeizable(a.alice), "alice should be seizable after 363 days at 5% mark");
         market.flagClaimable(a.alice);
 
         uint256 bobNoBal = noToken.balanceOf(a.bob);

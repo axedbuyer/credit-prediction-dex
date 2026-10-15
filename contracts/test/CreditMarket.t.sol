@@ -8,6 +8,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {YESToken} from "../src/YESToken.sol";
 import {NOToken} from "../src/NOToken.sol";
 import {CreditMarket} from "../src/CreditMarket.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 
 // 18-decimal mock so YES/NO/USDC units are all identical in tests.
 contract MockUSDC is ERC20 {
@@ -152,8 +153,8 @@ contract CreditMarketTest is Test {
         vm.warp(block.timestamp + 1 days);
         market.accrueFunding();
 
-        // mark = 0.23e18, elapsed = 1 days, period = 365 days
-        uint256 expected = uint256(0.23e18) * 1 days / 365 days;
+        // mark = 0.23e18 → carry = carryRateFor(0.23e18) ≈ 0.2013e18; elapsed = 1 days
+        uint256 expected = market.currentCarryRate() * 1 days / 365 days;
         assertEq(market.cumulativeFundingPerYES(), expected, "cumulative after 1 day");
     }
 
@@ -174,7 +175,7 @@ contract CreditMarketTest is Test {
         vm.warp(block.timestamp + T2);
         market.accrueFunding(); // accrues at mark2
 
-        uint256 expected = mark1 * T1 / 365 days + mark2 * T2 / 365 days;
+        uint256 expected = market.carryRateFor(mark1) * T1 / 365 days + market.carryRateFor(mark2) * T2 / 365 days;
         assertEq(market.cumulativeFundingPerYES(), expected, "two-leg cumulative");
     }
 
@@ -355,8 +356,9 @@ contract CreditMarketTest is Test {
         assertEq(market.breakevenMark(alice), expected, "breakeven = costBasis + f_now");
     }
 
-    // Worked example: entry at 5% mark, daily epoch, f_now=0 → ≈354 epochs (±2).
-    // Δf = 0.05e18/365 ≈ 136986301369863; m/1.03 ≈ 48543689320388349; epochs ≈ 354.
+    // Worked example: entry at 5% mark, daily epoch, f_now=0 → ≈363 epochs.
+    // carry = carryRateFor(0.05e18) ≈ 0.04873e18; Δf = carry/365 ≈ 133503094981296;
+    // m/1.03 ≈ 48543689320388349; epochs = floor(363.6) = 363.
     function test_EpochsToExpire_MatchesWorkedExample() public {
         CreditMarket m5 = _marketAt(0.05e18);
 
@@ -369,8 +371,7 @@ contract CreditMarketTest is Test {
         m5.mint(100e18); // f_now = 0 at entry
 
         uint256 epochs = m5.epochsToExpire(bob);
-        assertGe(epochs, 352, "epochs >= 352");
-        assertLe(epochs, 356, "epochs <= 356");
+        assertEq(epochs, 363, "epochs == 363");
     }
 
     // ─── v1b: seizure trigger tests ───────────────────────────────────────────
@@ -384,7 +385,7 @@ contract CreditMarketTest is Test {
     // (totals, not per-unit) must match the contract's new implementation.
     function test_IsSeizable_FiresAtBoundary(uint256 markPct, uint256 warpSecs) public {
         markPct  = bound(markPct,  1,  99);
-        warpSecs = bound(warpSecs, 1,  180 days);
+        warpSecs = bound(warpSecs, 1,  500 days); // spans the ~1-year runway, so both outcomes occur
 
         uint256 m   = markPct * 1e16;
         CreditMarket mkt = _marketAt(m);
@@ -401,7 +402,7 @@ contract CreditMarketTest is Test {
 
         uint256 yesBal    = yesToken.balanceOf(bob);
         uint256 value     = yesBal * m / 1e18;
-        uint256 nextEpoch = yesBal * (m * 1 days / 365 days) / 1e18; // epochLength == 1 days
+        uint256 nextEpoch = yesBal * (mkt.carryRateFor(m) * 1 days / 365 days) / 1e18; // epochLength == 1 days
         bool expected     = value * 100 <= (mkt.owed(bob) + nextEpoch) * 103;
 
         assertEq(mkt.isSeizable(bob), expected, "isSeizable matches manual owed()-based boundary formula");
@@ -434,7 +435,7 @@ contract CreditMarketTest is Test {
         assertFalse(mkt.costBasis(alice) == mkt.costBasis(bob), "cost bases must differ");
         assertEq(mkt.fundingSnapshot(alice), mkt.fundingSnapshot(bob), "snapshots equal (both 0)");
 
-        // warp past seizure threshold (5% mark, daily epoch: ~354 day runway)
+        // warp past seizure threshold (5% mark, daily epoch: ~363 day runway)
         vm.warp(block.timestamp + 358 days);
         mkt.accrueFunding();
 
@@ -482,8 +483,8 @@ contract CreditMarketTest is Test {
         vm.prank(bob);
         mkt.mint(100e18);
 
-        // 5% mark, daily epoch: seizure fires at ~354 days; 356 days is safely past it
-        vm.warp(block.timestamp + 356 days);
+        // 5% mark, daily epoch: seizure fires at ~363 days; 365 days is safely past it
+        vm.warp(block.timestamp + 365 days);
         mkt.accrueFunding();
         assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
 
@@ -571,7 +572,7 @@ contract CreditMarketTest is Test {
 
         vm.warp(block.timestamp + 30 days);
 
-        uint256 expectedCum    = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedCum    = market.currentCarryRate() * 30 days / 365 days;
         uint256 expectedCredit = 1000e18 * expectedCum / 1e18;
 
         uint256 bobUsdcBefore = mockUsdc.balanceOf(bob);
@@ -596,7 +597,7 @@ contract CreditMarketTest is Test {
 
         vm.warp(block.timestamp + 30 days);
 
-        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedCum  = market.currentCarryRate() * 30 days / 365 days;
         uint256 expectedOwed = 1000e18 * expectedCum / 1e18;
 
         uint256 aliceUsdcBefore = mockUsdc.balanceOf(alice);
@@ -684,7 +685,7 @@ contract CreditMarketTest is Test {
 
         vm.warp(block.timestamp + 30 days);
 
-        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedCum  = market.currentCarryRate() * 30 days / 365 days;
         uint256 expectedOwed = (1000e18 - 600e18) * expectedCum / 1e18; // net debit over held balance
 
         uint256 redeemAmount = 600e18; // capped by alice's remaining NO balance
@@ -734,7 +735,7 @@ contract CreditMarketTest is Test {
 
         vm.warp(block.timestamp + 30 days);
 
-        uint256 expectedCum  = uint256(0.23e18) * 30 days / 365 days;
+        uint256 expectedCum  = market.currentCarryRate() * 30 days / 365 days;
         uint256 expectedOwed = 1000e18 * expectedCum / 1e18;
 
         vm.prank(oracle);
@@ -774,7 +775,7 @@ contract CreditMarketTest is Test {
         vm.prank(bob);
         noToken.transfer(sink, 100e18);
 
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 365 days); // past the ~363-day runway at 5%
         mkt.accrueFunding();
         assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
 
@@ -798,7 +799,7 @@ contract CreditMarketTest is Test {
         mkt.settleYES(100e18);
 
         assertEq(mockUsdc.balanceOf(bob), bobUsdcBefore + 100e18 - owedBeforeSettle,
-            "payout deducts the FULL live-accrued debt (356+30 days), not a frozen 356-day snapshot");
+            "payout deducts the FULL live-accrued debt (365+30 days), not a frozen 365-day snapshot");
         assertFalse(mkt.claimable(bob), "claimable auto-cleared after settleYES");
     }
 
@@ -819,7 +820,7 @@ contract CreditMarketTest is Test {
         vm.prank(bob);
         noToken.transfer(sink, 100e18); // bob: pure YES holder
 
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 365 days); // past the ~363-day runway at 5%
         mkt.accrueFunding();
         mkt.flagClaimable(bob);
         assertTrue(mkt.claimable(bob), "flagged");
@@ -837,7 +838,7 @@ contract CreditMarketTest is Test {
     // not a frozen flag-time snapshot. This test flags, then lets 30 MORE days pass
     // (still flagged, still accruing — no freeze) before curing, so the payment
     // must include that post-flag window. Under the old freeze semantics bob would
-    // have paid only the 356-day frozen amount; here he must pay the full 386 days.
+    // have paid only the 365-day frozen amount; here he must pay the full 395 days.
     function test_Cure_PaysLiveOwedIncludingPostFlagAccrual() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
@@ -856,7 +857,7 @@ contract CreditMarketTest is Test {
         vm.prank(bob);
         noToken.transfer(sink, 60e18); // bob: 100 YES, 40 NO
 
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 365 days); // past the ~363-day runway at 5%
         mkt.accrueFunding();
         assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
         mkt.flagClaimable(bob);
@@ -874,7 +875,7 @@ contract CreditMarketTest is Test {
         uint256 expectedNet      = expectedYesOwed - expectedNoCredit;
 
         assertEq(mkt.owed(bob), expectedYesOwed,
-            "owed() == full live accrual over 386 days (356 pre-flag + 30 flagged, no freeze)");
+            "owed() == full live accrual over 395 days (365 pre-flag + 30 flagged, no freeze)");
 
         uint256 bobUsdcBefore    = mockUsdc.balanceOf(bob);
         uint256 marketUsdcBefore = mockUsdc.balanceOf(address(mkt));
@@ -883,7 +884,7 @@ contract CreditMarketTest is Test {
         mkt.cure();
 
         assertEq(bobUsdcBefore - mockUsdc.balanceOf(bob), expectedNet,
-            "bob pays the FULL live owed (386 days), net of NO credit -- no freeze discount");
+            "bob pays the FULL live owed (395 days), net of NO credit -- no freeze discount");
         assertEq(mockUsdc.balanceOf(address(mkt)), marketUsdcBefore + expectedNet,
             "USDC conservation: bob's payment lands in market collateral");
         assertFalse(mkt.claimable(bob), "flag cleared");
@@ -895,7 +896,7 @@ contract CreditMarketTest is Test {
         vm.warp(block.timestamp + 1 days);
         mkt.accrueFunding();
         uint256 fNowAfterCure = mkt.cumulativeFundingPerYES() - mkt.fundingSnapshot(bob);
-        assertEq(fNowAfterCure, mkt.currentMark() * 1 days / 365 days,
+        assertEq(fNowAfterCure, mkt.currentCarryRate() * 1 days / 365 days,
             "post-cure accrual counts only from the cure time");
     }
 
@@ -934,7 +935,7 @@ contract CreditMarketTest is Test {
         vm.prank(bob);
         noToken.transfer(sink, 1000e18);
 
-        // 300 days: not yet seizable at 5% mark (~354-day runway).
+        // 300 days: not yet seizable at 5% mark (~363-day runway).
         vm.warp(block.timestamp + 300 days);
         mkt.accrueFunding();
         assertFalse(mkt.isSeizable(bob), "not seizable yet at 300 days");
@@ -1124,7 +1125,7 @@ contract CreditMarketTest is Test {
 
         uint256 oldMark = market.currentMark(); // 0.23e18
         uint256 newMark = oldMark + 0.03e18;     // within the 0.05e18 step bound
-        uint256 expectedCum = oldMark * 2 hours / 365 days; // accrual at the OLD mark, over the 2h just warped
+        uint256 expectedCum = market.carryRateFor(oldMark) * 2 hours / 365 days; // accrual at the OLD mark's carry, over the 2h just warped
 
         vm.expectEmit(true, true, true, true, address(market));
         emit CreditMarket.MarkUpdated(oldMark, newMark, false);
@@ -1274,5 +1275,88 @@ contract CreditMarketTest is Test {
         market.setMarkBounds(0.05e18, 1 hours);
         assertEq(market.maxMarkStep(), 0.05e18);
         assertEq(market.minMarkInterval(), 1 hours);
+    }
+
+    // ─── carry rate: carry = −(1 − m)·ln(1 − m) (docs/carry-formula.md) ─────────
+
+    // Reference values computed independently at 50-digit precision; lnWad is
+    // accurate to a couple of wei at these magnitudes.
+    function test_CarryRate_KnownValues() public view {
+        assertApproxEqAbs(market.carryRateFor(0.02e18), 19798653171169059, 2, "2%");
+        assertApproxEqAbs(market.carryRateFor(0.05e18), 48728629668173006, 2, "5%");
+        assertApproxEqAbs(market.carryRateFor(0.10e18), 94824464092043671, 2, "10%");
+        assertApproxEqAbs(market.carryRateFor(0.23e18), 201250868383493789, 2, "23%");
+        assertApproxEqAbs(market.carryRateFor(0.40e18), 306495374259594409, 2, "40%");
+    }
+
+    // Carry peaks at 1/e when m = 1 − 1/e (≈63.2%) and falls on either side.
+    function test_CarryRate_PeaksAtOneMinusInverseE() public view {
+        uint256 peakMark = 632120558828557678; // 1 − 1/e
+        uint256 peak = market.carryRateFor(peakMark);
+        assertApproxEqAbs(peak, 367879441171442321, 2, "peak carry == 1/e");
+        assertGt(peak, market.carryRateFor(peakMark - 0.01e18), "rising below the peak");
+        assertGt(peak, market.carryRateFor(peakMark + 0.01e18), "falling above the peak");
+    }
+
+    function test_CarryRate_InvalidMark_Reverts() public {
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.carryRateFor(0);
+        vm.expectRevert(CreditMarket.InvalidMark.selector);
+        market.carryRateFor(1e18);
+    }
+
+    // Dust marks: ln(1 − m) rounds to 0 at 1 wei, so carry is 0 rather than
+    // underflowing; at the top of the range carry is tiny but positive.
+    function test_CarryRate_Extremes() public view {
+        assertEq(market.carryRateFor(1), 0, "1-wei mark carries nothing");
+        assertLe(market.carryRateFor(1e18 - 1), 1e3, "near-certain default: almost nothing left to protect");
+    }
+
+    // m(1 − m) <= carry <= m: carry never exceeds the old carry-equals-mark
+    // rate, and never falls below the first-order (1 − m) haircut of it.
+    function testFuzz_CarryRate_Bounds(uint256 m) public view {
+        m = bound(m, 1e9, 1e18 - 1);
+        uint256 carry = market.carryRateFor(m);
+        assertLe(carry, m, "carry <= m");
+        assertGe(carry + 2, m * (1e18 - m) / 1e18, "carry >= m(1 - m)");
+    }
+
+    // Monotone below the peak, so a rising default probability always raises carry
+    // across every mark a launch market could plausibly trade at.
+    function testFuzz_CarryRate_MonotoneBelowPeak(uint256 a, uint256 b) public view {
+        a = bound(a, 1e9, 0.63e18);
+        b = bound(b, a, 0.63e18);
+        assertLe(market.carryRateFor(a), market.carryRateFor(b) + 2, "carry non-decreasing up to 63%");
+    }
+
+    // The point of the formula: with hazard h = carry / (1 − m), the 12-month
+    // default probability 1 − e^(−h) is the mark itself. Price == probability.
+    function testFuzz_CarryRate_PriceIsTwelveMonthProbability(uint256 m) public view {
+        m = bound(m, 0.001e18, 0.95e18);
+        uint256 carry = market.carryRateFor(m);
+        int256 h = int256(carry * 1e18 / (1e18 - m));
+        uint256 pd = 1e18 - uint256(FixedPointMathLib.expWad(-h));
+        assertApproxEqRel(pd, m, 1e9, "1 - exp(-carry / (1 - m)) == m (to 1e-9 relative)");
+    }
+
+    // currentCarryRate is fixed at construction and recomputed on every mark change.
+    function test_CarryRate_TracksMarkChanges() public {
+        assertEq(market.currentCarryRate(), market.carryRateFor(0.23e18), "constructor");
+
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.25e18);
+        assertEq(market.currentCarryRate(), market.carryRateFor(0.25e18), "keeper setMark");
+
+        market.adminSetMark(0.10e18);
+        assertEq(market.currentCarryRate(), market.carryRateFor(0.10e18), "adminSetMark");
+    }
+
+    // Accrual uses the carry rate, never the mark: one year at 23% accrues
+    // carryRateFor(0.23e18) ≈ 0.2013 per unit, not 0.23.
+    function test_CarryRate_DrivesAccrual() public {
+        vm.warp(block.timestamp + 365 days);
+        market.accrueFunding();
+        assertEq(market.cumulativeFundingPerYES(), market.carryRateFor(0.23e18), "one year == one year of carry");
+        assertLt(market.cumulativeFundingPerYES(), 0.23e18, "strictly below the mark");
     }
 }

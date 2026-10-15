@@ -30,7 +30,8 @@ contract LiquidationEngineTest is Test {
     address alice    = makeAddr("alice");   // position holder (gets liquidated)
     address bob      = makeAddr("bob");     // liquidator
 
-    // 5% mark — seizure fires at ~354 epochs (daily); 356 days is safely past it.
+    // 5% mark — seizure fires at ~363 epochs (daily); 365 days is safely past it
+    // (and short of the ~374.5-day point where owed would exceed m×Q).
     uint256 constant MARK_5PCT = 0.05e18;
     uint256 constant MINT_AMT  = 1_000e18; // 1000 YES + 1000 NO
 
@@ -90,8 +91,8 @@ contract LiquidationEngineTest is Test {
         vm.prank(holder);
         market.mint(mintAmt);
 
-        // 356 days at 5% mark puts us safely past the ~354-day seizure threshold.
-        vm.warp(block.timestamp + 356 days);
+        // 365 days at 5% mark puts us safely past the ~363-day seizure threshold.
+        vm.warp(block.timestamp + 365 days);
         market.accrueFunding();
         assertTrue(market.isSeizable(holder), "must be seizable before flag");
 
@@ -301,8 +302,8 @@ contract LiquidationEngineTest is Test {
         // Invariant holds at entry.
         assertEq(yesToken.totalSupply(), noToken.totalSupply(), "invariant at entry");
 
-        // Advance past seizure threshold (356 days @ 5% mark).
-        vm.warp(block.timestamp + 356 days);
+        // Advance past seizure threshold (365 days @ 5% mark).
+        vm.warp(block.timestamp + 365 days);
         market.accrueFunding();
 
         // Flag and claim alice.
@@ -359,7 +360,7 @@ contract LiquidationEngineTest is Test {
         vm.prank(charlie);
         noToken.transfer(alice, 500e18); // alice: 1000 YES, 1500 NO; charlie: 500 YES, 0 NO
 
-        vm.warp(block.timestamp + 356 days);
+        vm.warp(block.timestamp + 365 days);
         market.accrueFunding();
         assertTrue(market.isSeizable(alice), "must be seizable before flag");
 
@@ -415,7 +416,7 @@ contract LiquidationEngineTest is Test {
         vm.prank(bob);
         yesToken.transfer(sink, 500e18); // bob: 0 YES, 500 NO
 
-        uint256 Q = _mintAndFlag(alice, MINT_AMT); // mints alice, warps 356 days, flags
+        uint256 Q = _mintAndFlag(alice, MINT_AMT); // mints alice, warps 365 days, flags
 
         uint256 expectedNoCredit = 500e18 * (market.cumFundingPerNO() - market.snapNO(bob)) / 1e18;
         assertGt(expectedNoCredit, 0, "setup: bob must have nonzero accrued NO credit before claiming");
@@ -446,7 +447,7 @@ contract LiquidationEngineTest is Test {
         vm.prank(bob);
         market.mint(MINT_AMT);
 
-        _mintAndFlag(alice, MINT_AMT); // mints alice, warps 356 days, flags alice
+        _mintAndFlag(alice, MINT_AMT); // mints alice, warps 365 days, flags alice
 
         assertTrue(market.isSeizable(bob), "bob must independently be seizable");
         vm.prank(keeper);

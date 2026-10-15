@@ -102,7 +102,7 @@ contract V1bSmokeTest is Test {
     // ─── Smoke test 1: Normal case, steps 1-5 ────────────────────────────────
     //
     // 1. Alice mints at 5%; Bob mints the matching NO.
-    // 2. Warp time: verify isSeizable false at 353 d, true at 354 d (worked example).
+    // 2. Warp time: verify isSeizable false at 362 d, true at 363 d (worked example).
     // 3. flagClaimable(Alice): confirm owed() == yesFundingOwed at flag time.
     // 4. Carol calls LiquidationEngine.claim(Alice).
     // 5. Assert: Carol holds Alice's YES; Alice.YES=0; Alice USDC unchanged;
@@ -113,27 +113,27 @@ contract V1bSmokeTest is Test {
         vm.prank(bob);   market.mint(MINT_AMT);  // 1000 YES + 1000 NO to bob (holds NO)
 
         // ── Step 2: isSeizable false → true transition ────────────────────────
-        // Worked example (CLAUDE.md): daily epoch at 5% → ~354 epochs runway.
-        // Exact Solidity arithmetic:
-        //   deltaF  = 0.05e18 * 1 day / 365 days = 136_986_301_369_863
+        // Worked example (CLAUDE.md): daily epoch at 5% → ~363 epochs runway.
+        // Solidity arithmetic (carry = carryRateFor(0.05e18) ≈ 0.048729e18, ±1 wei from lnWad):
+        //   deltaF  = carry * 1 day / 365 days ≈ 133_503_094_981_295
         //   m/1.03  = 48_543_689_320_388_349
-        //   After 353 days: fNow = 48_356_164_383_561_643 → fNext*1.03 < m  (NOT seizable)
-        //   After 354 days: fNow = 48_493_150_684_931_506 → fNext*1.03 >= m (seizable)
+        //   After 362 days: fNow ≈ 48_328_120_383_229_118 → fNext*1.03 < m  (NOT seizable)
+        //   After 363 days: fNow ≈ 48_461_623_478_210_414 → fNext*1.03 >= m (seizable)
 
-        vm.warp(block.timestamp + 353 days);
+        vm.warp(block.timestamp + 362 days);
         market.accrueFunding();
-        assertFalse(market.isSeizable(alice), "isSeizable must be false at 353 days");
+        assertFalse(market.isSeizable(alice), "isSeizable must be false at 362 days");
 
         // epochsToExpire: 1 full epoch of runway left
-        uint256 ete353 = market.epochsToExpire(alice);
-        assertGt(ete353, 0,                  "epochsToExpire > 0 at 353 days");
-        assertLt(ete353, type(uint256).max,  "epochsToExpire < max at 353 days");
+        uint256 ete362 = market.epochsToExpire(alice);
+        assertGt(ete362, 0,                  "epochsToExpire > 0 at 362 days");
+        assertLt(ete362, type(uint256).max,  "epochsToExpire < max at 362 days");
 
-        vm.warp(block.timestamp + 1 days);   // now 354 days total
+        vm.warp(block.timestamp + 1 days);   // now 363 days total
         market.accrueFunding();
-        assertTrue(market.isSeizable(alice), "isSeizable must be true at 354 days");
+        assertTrue(market.isSeizable(alice), "isSeizable must be true at 363 days");
 
-        // At exactly 354 days the per-unit f_now is still just below m/1.03,
+        // At exactly 363 days the per-unit f_now is still just below m/1.03,
         // so the formula returns 0 (no full epochs remain) rather than max.
         assertEq(market.epochsToExpire(alice), 0, "epochsToExpire = 0 at trigger boundary");
 
@@ -210,18 +210,18 @@ contract V1bSmokeTest is Test {
     //
     // Steps 1-4 repeated but with a forced tail case: warp far enough that
     // owed() > tokenValue AT FLAG TIME (no post-flag mark manipulation).
-    // At 5% mark: after 365 days f_now ≈ m; after 370 days f_now > m → tail case.
+    // At 5% mark: f_now passes m after ~374.5 days (365 × m / carry); 380 days → tail case.
     // InsuranceFund must cover the shortfall; Bob's NO must still be fully made whole.
     function test_smoke_02_tailCase_owedExceedsTokenValueAtFlag() public {
         vm.prank(alice); market.mint(MINT_AMT);
         vm.prank(bob);   market.mint(MINT_AMT);
 
-        // 370 days at 5% mark:
-        //   f_now = 0.05e18 * 370 / 365 ≈ 0.05068e18 > m (0.05e18) → tail case at flag.
-        vm.warp(block.timestamp + 370 days);
+        // 380 days at 5% mark:
+        //   f_now = carry * 380 / 365 ≈ 0.05073e18 > m (0.05e18) → tail case at flag.
+        vm.warp(block.timestamp + 380 days);
         market.accrueFunding();
 
-        assertTrue(market.isSeizable(alice), "must be seizable at 370 days");
+        assertTrue(market.isSeizable(alice), "must be seizable at 380 days");
 
         vm.prank(keeper);
         market.flagClaimable(alice);
@@ -298,23 +298,23 @@ contract V1bSmokeTest is Test {
         // Alice is deeply underwater on MTM (paid 10¢, mark is 5¢) — verify negative P&L
         assertTrue(market.pnl(alice) < 0, "alice P&L must be negative (underwater on MTM)");
 
-        // 353 days: neither should be seizable — negative MTM alone must not trigger
-        vm.warp(block.timestamp + 353 days);
+        // 362 days: neither should be seizable — negative MTM alone must not trigger
+        vm.warp(block.timestamp + 362 days);
         market.accrueFunding();
 
         assertFalse(market.isSeizable(alice),
-            "alice must NOT be seizable at 353 days despite negative MTM");
+            "alice must NOT be seizable at 362 days despite negative MTM");
         assertFalse(market.isSeizable(dave),
-            "dave must NOT be seizable at 353 days");
+            "dave must NOT be seizable at 362 days");
 
-        // 354 days: both should trigger identically
-        vm.warp(block.timestamp + 1 days); // 354 days total
+        // 363 days: both should trigger identically
+        vm.warp(block.timestamp + 1 days); // 363 days total
         market.accrueFunding();
 
         assertTrue(market.isSeizable(alice),
-            "alice must be seizable at 354 days (cost basis irrelevant)");
+            "alice must be seizable at 363 days (cost basis irrelevant)");
         assertTrue(market.isSeizable(dave),
-            "dave must be seizable at 354 days");
+            "dave must be seizable at 363 days");
 
         // isSeizable result must be identical — cost basis has zero effect
         assertEq(market.isSeizable(alice), market.isSeizable(dave),

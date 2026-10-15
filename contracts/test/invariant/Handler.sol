@@ -229,9 +229,8 @@ contract Handler is Test {
         uint256 yesBal = yesToken.balanceOf(user);
         uint256 noBal = noToken.balanceOf(user);
 
-        uint256 mark = market.currentMark();
         uint256 elapsed = block.timestamp - market.lastFundingTime();
-        uint256 projectedCum = market.cumulativeFundingPerYES() + mark * elapsed / 365 days;
+        uint256 projectedCum = market.cumulativeFundingPerYES() + market.currentCarryRate() * elapsed / 365 days;
 
         uint256 yesOwed = yesBal * (projectedCum - market.fundingSnapshot(user)) / 1e18;
         uint256 noCredit = noBal * (projectedCum - market.snapNO(user)) / 1e18;
@@ -564,7 +563,7 @@ contract Handler is Test {
     // Bounded up to ~400 days in a single jump (vs warpAndAccrue's 30-day cap) so
     // a position sitting at a roughly-constant mark can actually cross the
     // seizure trigger within a run's depth budget -- CLAUDE.md's own worked
-    // example needs ~354 days of accrual at a constant 5% mark to do so, which
+    // example needs ~363 days of accrual at a constant 5% mark to do so, which
     // 8-9 draws of the small-step action would rarely stumble into by chance in
     // the same direction. Without this, flagClaimable/cure/liquidationClaim are
     // starved for eligible positions and the suite under-exercises invariants
@@ -737,12 +736,11 @@ contract Handler is Test {
         }
         uint256 owedPerUnit = market.owed(a) * 1e18 / yesBal;
         uint256 epochLength = market.epochLength();
-        uint256 denom = 100 * 365 days - 103 * epochLength;
-        if (denom == 0 || owedPerUnit == 0) {
+        if (owedPerUnit == 0) {
             _record("seekSeizureBoundary", false);
             return;
         }
-        uint256 boundaryMark = (103 * owedPerUnit * 365 days) / denom;
+        uint256 boundaryMark = _boundaryMark(owedPerUnit, epochLength);
 
         int256 nudgePct = int256(bound(nudgeSeed, 0, 400)) - 200; // -2.00% .. +2.00%
         uint256 newMark;
@@ -764,6 +762,22 @@ contract Handler is Test {
         } catch {
             _record("seekSeizureBoundary", false);
         }
+    }
+
+    // The mark m at which 100·m == 103·(f + carryRateFor(m)·epoch/365d), i.e. the
+    // seizure boundary for a holder owing f per unit. carry has no closed-form
+    // inverse, so bisect over the probe's [0.001, 0.65] range; the left side is
+    // strictly increasing in m there (carry' ≤ 1 and is scaled by epoch/365d).
+    function _boundaryMark(uint256 owedPerUnit, uint256 epochLength) internal view returns (uint256) {
+        uint256 lo = 0.001e18;
+        uint256 hi = 0.65e18;
+        for (uint256 i = 0; i < 64 && hi - lo > 1; i++) {
+            uint256 mid = (lo + hi) / 2;
+            uint256 fNext = owedPerUnit + market.carryRateFor(mid) * epochLength / 365 days;
+            if (mid * 100 <= fNext * 103) lo = mid; // still seizable at mid → boundary is higher
+            else hi = mid;
+        }
+        return lo;
     }
 
     // Directly re-probes invariant 10 (flagged-position lockout) on a KNOWN
@@ -848,7 +862,7 @@ contract Handler is Test {
 
             uint256 owedNow = market.owed(a);
             uint256 value = yesBal * m / 1e18;
-            uint256 nextEpoch = yesBal * (m * epochLength / 365 days) / 1e18;
+            uint256 nextEpoch = yesBal * (market.currentCarryRate() * epochLength / 365 days) / 1e18;
             bool shouldBeSeizable = value * 100 <= (owedNow + nextEpoch) * 103;
             if (!shouldBeSeizable) continue;
 

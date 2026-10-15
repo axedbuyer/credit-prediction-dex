@@ -7,7 +7,8 @@ probability. Users trade YES/NO tokens on the question:
 
 > "Will [Entity] have a credit event in the next 12 months?"
 
-The price of a YES token = implied annual default probability (%) = hazard rate.
+The price of a YES token = the market's probability of a credit event in the next 12
+months. The carry rate is set so this holds exactly (see "Carry rate" under Funding Model).
 Position economics are equivalent to a zero-recovery perpetual CDS, structured and
 presented as a prediction market.
 
@@ -31,7 +32,7 @@ Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 202
 `depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
 `contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built and merged to `main`
 (2026-10-03); its contracts are DEPLOYED to Base Sepolia and the Railway services
-and frontend run in registry mode since 2026-10-03** — 201 contract tests (incl. a 2-market invariant suite), 440
+and frontend run in registry mode since 2026-10-03** — 210 contract tests (incl. a 2-market invariant suite), 440
 off-chain tests (2026-10-13), 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
 MarketRegistry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` (addresses per market in
 `contracts/deployments/base-sepolia/`). Without `MARKET_REGISTRY_ADDRESS` /
@@ -54,7 +55,8 @@ uptime checks for the liquidator bot + hot-wallet gas, and mainnet *plumbing* on
 | Funding | cumFundingPerYES == cumFundingPerNO always (complete-set invariant); settled in USDC on close/redeem/settle/liquidation |
 | Seizure trigger | m ≤ 1.03 × f_next, evaluated one epoch ahead (3% buffer, cost-basis-independent) |
 | Liquidation | Formulaic price = funding owed; YES token TRANSFERS to liquidator (never burned); NO untouched |
-| Price primitive | Hazard rate displayed as annual default probability (%) |
+| Price primitive | 12-month default probability (%) — m = 1 − e^(−h) for hazard h |
+| Carry rate | carry = h × (1 − m) = −(1 − m)·ln(1 − m) per year (`CreditMarket.carryRateFor`); fair carry for a holder who stands to gain 1 − m on default, so price = probability exactly |
 | Liquidity mechanism | Polymarket-style off-chain CLOB, on-chain USDC settlement |
 | Trading fee | 50 bps × min(p, 1−p) × Q, charged ONLY on the carry-earning side (YES sells + NO buys); YES buys + NO sells are fee-free; split 50/50 team wallet / InsuranceFund, admin-editable via CLOBSettlement.setFeeConfig |
 | Protocol token | None |
@@ -318,6 +320,25 @@ to enforce a funding cap — it orphans NO tokens whose paired YES no longer exi
 credited funding no one pays. Retire a YES position only by transferring it to someone who
 keeps paying (a liquidator), never by burning it unilaterally.
 
+### Carry rate (changed 2026-10-15, batch-2 contracts)
+
+```
+h     = −ln(1 − m)                 // hazard implied by a 12-month probability m
+carry = h × (1 − m)                // = −(1 − m)·ln(1 − m), per year, per YES
+cumFundingPerYES += carry × Δt/365 // every accrual; carry recomputed only on setMark
+```
+
+Why `× (1 − m)`: an Upbet bought at m is m of the holder's own cash plus an unfunded
+CDS on (1 − m) of notional sold by the NO side — on default the token jumps from m to $1,
+so only 1 − m is protected. Carry h × (1 − m) gives a YES held at a steady mark zero
+expected P&L (constant hazard, zero rates), which is what makes "23¢ = 23% chance in the
+next 12 months" exact. Bounds: m(1 − m) ≤ carry ≤ m; carry peaks at 1/e when m = 1 − 1/e
+(≈63%) and falls above it. Carry is NOT the mark: the token's VALUE is still m (equity,
+the trigger's left side, the claim cap m×Q, cost basis); only accrual uses carry. Before
+batch 2, carry == m, which over-charged YES (−2.5¢ expected P&L per $1 at 23%) so the
+price understated the probability. Derivation + rejected alternative:
+`docs/carry-formula.md`.
+
 ### Display layer (per holder, shown in UI — does not move cash)
 
 ```
@@ -327,20 +348,21 @@ Equity (E)             = m − f_now              // m = current mark, f_now = o
                                                   // accrual since the snapshot
 P&L                    = E − c = (m − c) − f_now
 Breakeven Mark         = c + f_now               // mark needed for P&L = 0
-Epochs To Expire (YES) = floor( (m/1.03 − f_now) / Δf ),  Δf = m × Δt/365
+Epochs To Expire (YES) = floor( (m/1.03 − f_now) / Δf ),  Δf = carry(m) × Δt/365
                           // epochs of runway until seizure trigger, holding m constant
 ```
 
 `Epochs To Expire` is YES-only (NO never gets liquidated). Worked example at entry
-(c = m = 0.05, f_now = 0, daily epoch): Δf = 0.05/365 ≈ 0.000137, Epochs To Expire =
-(0.0485/0.000137) ≈ 354 days — consistent with "≈1 year of funding ≈ full token value."
+(c = m = 0.05, f_now = 0, daily epoch): carry = 0.04873, Δf = 0.04873/365 ≈ 0.0001335,
+Epochs To Expire = (0.0485/0.0001335) ≈ 363 days. Runway at a steady mark is
+365 × m / (1.03 × carry): ≈358 days at 2%, 363 at 5%, 373 at 10%, 404 at 23%.
 Implemented as `equity`, `pnl`, `breakevenMark`, `epochsToExpire` views on `CreditMarket.sol`.
 
 ### Seizure trigger (solvency-based, cost-basis-independent)
 
 ```
 f_now  = owed(user) / Q                      // owed = fundingDebt + Q × (cumYES − snapshot)
-f_next = f_now + m × Δt/365                  // funding owed after one more epoch
+f_next = f_now + carry(m) × Δt/365           // funding owed after one more epoch
 Seize when:  m ≤ 1.03 × f_next               // 3% buffer, evaluated one epoch ahead
 ```
 
@@ -394,8 +416,9 @@ Claim (anyone, first to call — no auction, no discount ramp): P = min(owed, m 
 
 **Stall economics:** the claimer's margin (`m×Q − owed`) starts at ≈3.2% of `m×Q` (the 3%
 buffer plus the one-epoch look-ahead, less keeper lag) and shrinks by one day of carry
-(`m×Q/365` ≈ 0.27% of `m×Q`) per day unclaimed, so at a constant mark a position crosses
-into the tail case ≈11–12 days after flagging; a falling mark gets there sooner. From then
+(`carry×Q/365` ≈ 0.27% × carry/m of `m×Q` — 0.27% at 2%, 0.24% at 23%) per day unclaimed,
+so at a constant mark a position crosses into the tail case ≈11–13 days after flagging; a
+falling mark gets there sooner. From then
 on every further day of stall costs the InsuranceFund one day of carry — paid only when
 someone finally claims. Stalls are an operational risk: run a claiming liquidator bot.
 
@@ -499,11 +522,11 @@ ignored the ledger), F1 (flag froze accounting), F2 (liquidator NO credit forfei
 - Complete-set invariant: 1 YES + 1 NO ← $1 collateral, redeemable for $1, resolves $1/$0.
 - Zero recovery. YES settles at full notional on credit event.
 - Off-chain CLOB, on-chain settlement.
-- Linear token mark (price = hazard rate). Funding model changes do not change the mark
-  function. (Known tradeoff: the true 12-month default probability is 1 − e^(−h), so a
-  linear mark overstates it by ≈ h²/2 and lacks curvature — ~0.02 pts at 2%, ~0.5 pts at
-  10%, ~2.5 pts at 23%. Acceptable for the launch markets; avoid listing entities far above
-  MSTR's level until the v2 non-linear mark.)
+- Price = 12-month default probability, made exact by the carry formula (carry = h(1 − m),
+  h = −ln(1 − m)) — the token itself stays linear ($1/$0 payoff, value m). Residual
+  modelling assumptions, disclosed rather than fixed: a perpetual prices one flat hazard,
+  and idle collateral earns nothing (at ~4% rates prices lean slightly; yield-bearing
+  collateral is a v2 topic). Carry falls above m ≈ 63%; keep listings well below that.
 
 ---
 
@@ -511,8 +534,9 @@ ignored the ledger), F1 (flag froze accounting), F2 (liquidator NO credit forfei
 
 Documented for the roadmap only. v2 would add a per-wallet prepaid USDC buffer (so YES
 holders get runway before liquidation, rather than relying solely on token-value headroom)
-and a Dutch-auction discount ramp (rather than a fixed formulaic price), plus a non-linear
-token mark V=(1−e^(−s)) for correct convexity at high hazard rates. Also a v2 candidate
+and a Dutch-auction discount ramp (rather than a fixed formulaic price). (The non-linear
+mark V = 1 − e^(−s) once listed here was delivered differently in batch 2: the price is
+already the 12-month probability via the carry formula.) Also a v2 candidate
 (decided 2026-07-11): `prepayFunding()` — voluntary cash settlement of accrued funding for
 UNFLAGGED holders (zeroes fundingDebt, resets snapshots, pushes the seizure trigger away);
 a mild precursor of the buffer. Explicitly NOT building a fee-only top-up for
@@ -586,7 +610,7 @@ NO token  → worth $0, no redemption
 ```
 Buying  YES: pay P USDC per YES token  (P = current market ask, 0 < P < 1)
 Selling YES: receive P USDC per YES token
-Price P represents the market-implied annual default probability
+Price P represents the market-implied probability of a credit event in the next 12 months
 ```
 
 ---
