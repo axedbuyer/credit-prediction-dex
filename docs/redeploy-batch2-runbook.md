@@ -62,6 +62,12 @@ in `deployments/base-sepolia/archive/batch1/`). The legacy flat `deployments/bas
 stays as-is (legacy-mode fallback only). If a run dies part-way, nothing live references
 the new contracts: fix and re-run that step (a half-registered slug needs a fresh registry).
 
+**Done 2026-10-15** (all four runs printed the assertions line): registry
+`0xF650221216c76Bb775cd42211aFcb7a3c99f99A0` (start block 48140921); CreditMarkets `mstr`
+`0x7AF29bd2fE6CF3bE904A538f2e0217285A7da94c`, `crwv` `0xcD60CDe83f631A82f369BF7D6C03b91D2b25f5A0`,
+`try` `0xA891D433DEcEf0d35C40f93b86057411777Ca594`; step-2 sanity matched the rehearsal
+exactly. Deployer ETH 0.00163 → 0.00146.
+
 Verify on Blockscout one contract at a time with backoff (Etherscan key is rejected):
 `forge verify-contract <addr> <Contract> --verifier blockscout --verifier-url
 https://base-sepolia.blockscout.com/api --constructor-args …` — registry + 3 × (YESToken,
