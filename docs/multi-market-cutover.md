@@ -1,5 +1,9 @@
 # Multi-market cutover — Base Sepolia runbook (phase 4)
 
+> **Superseded 2026-10-15:** the registry and market addresses below are batch 1. Batch 2
+> (carry formula) replaced every market under a new registry — see
+> `docs/redeploy-batch2-runbook.md`.
+
 *Written 2026-10-02. Status: **stage A done 2026-10-03** (PRs #2 + #3; live in legacy mode,
 sweep moved 6 orders + 2 nonce sets); **stage B done 2026-10-03** — fork rehearsal passed
 (whole stage cost 0.000049 ETH), registry `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`, crwv and
