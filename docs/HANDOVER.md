@@ -299,7 +299,7 @@ list.
 4. **Partial fills + on-chain cancel (batch 3)** — `docs/partial-fills-plan.md`. Since
    2026-10-15 the matching engine only pairs orders that settle WHOLE and never deletes an
    order over a size mismatch (stopgap); real trading needs partial fills. Also fixes
-   `DELETE /order` not being binding on-chain. Owner decisions A–D in the plan first.
+   `DELETE /order` not being binding on-chain. Owner decided A (pro-rata), C (both cancels), D (pair-only) 2026-10-16; B (min size) and E (operator-only fills) open.
 
 ### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
 
