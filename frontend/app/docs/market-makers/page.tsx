@@ -34,13 +34,20 @@ export default function MarketMakersPage() {
           (maker is flagged) or 400 <code>FundingShortfall</code> (a YES sell whose proceeds
           can&rsquo;t cover carry owed + fee; response includes{' '}
           <code>minSellProceeds</code>). These pre-checks fail open on RPC issues — the
-          on-chain settlement check is the backstop.
+          on-chain settlement check is the backstop. Orders below 1 Upbet/Downbet
+          (1,000,000 units) are rejected with 400 <code>BelowMinOrderSize</code>.
         </li>
         <li>
-          <code>DELETE /order/:id</code> — cancel.
+          <code>DELETE /order/:id</code> — remove from the book (signed CancelOrder message).
+          For a binding cancel, call <code>CLOBSettlement.cancelOrders([order])</code> or{' '}
+          <code>setMinNonce(n)</code> (retires every order of yours with nonce &lt; n) on-chain,
+          then <code>POST /orders/sync</code> with <code>{'{ market, maker }'}</code> — it drops
+          your orders whose <code>remaining()</code> is now 0.
         </li>
         <li>
-          <code>GET /orderbook</code> — bids (high→low) and asks (low→high).
+          <code>GET /orderbook</code> — bids (high→low) and asks (low→high). Orders fill in
+          pieces: each carries <code>filled</code> (outcome units already filled), so what
+          is left is size − filled.
         </li>
       </ul>
 
@@ -100,7 +107,16 @@ export default function MarketMakersPage() {
           unchanged). Size/price accordingly; use the server&rsquo;s{' '}
           <code>minSellProceeds</code> hint.
         </li>
-        <li>Nonces: any unique uint256 per order (the app uses timestamps).</li>
+        <li>
+          <strong>Partial fills:</strong> an order can fill across many trades, each at the
+          resting (earlier) order&rsquo;s price and pro rata to your limit. A YES sale repays
+          only its pro-rata share of your carry owed (owed × sold / held). Fills are
+          submitted only by the platform&rsquo;s matcher.
+        </li>
+        <li>
+          Nonces: unique per order; use millisecond timestamps (the app does) so{' '}
+          <code>setMinNonce(Date.now())</code> cancels everything you signed before now.
+        </li>
         <li>
           If CLOBSettlement is ever redeployed, the EIP-712 domain changes — all resting
           orders die and must be re-signed (watch announcements).
