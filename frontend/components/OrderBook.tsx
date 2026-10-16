@@ -19,6 +19,7 @@ type RawOrder = {
   minAmountOut: string
   tokenIn: string
   tokenOut: string
+  filled?: string // outcome tokens already filled (partial fills); absent = none
 }
 
 type Level = {
@@ -31,13 +32,16 @@ type OrderBookData = {
   asks: RawOrder[] // ascending price  (best ask first)
 }
 
-// USDC notional resting on this order: for a bid, tokenIn is USDC
-// (amountIn is the USDC offered); for an ask, tokenOut is USDC
-// (minAmountOut is the minimum USDC proceeds) — mirrors the price
-// derivation in order-book-server's derivePrice().
+// USDC still resting on this order: for a bid, tokenIn is USDC (amountIn is
+// the USDC offered for minAmountOut tokens); for an ask, tokenOut is USDC
+// (minAmountOut is the minimum USDC for amountIn tokens) — mirrors the price
+// derivation in order-book-server's derivePrice(). Orders fill in pieces, so
+// the USDC side is scaled by the share of tokens not yet filled.
 function toLevel(o: RawOrder): Level {
-  const raw = o.side === 'bid' ? o.amountIn : o.minAmountOut
-  return { price: o.price, size: Number(raw) / 1_000_000 }
+  const usdc = Number(o.side === 'bid' ? o.amountIn : o.minAmountOut)
+  const tokens = Number(o.side === 'bid' ? o.minAmountOut : o.amountIn)
+  const left = tokens > 0 ? Math.max(0, tokens - Number(o.filled ?? '0')) / tokens : 0
+  return { price: o.price, size: (usdc * left) / 1_000_000 }
 }
 
 const LEVELS = 8
@@ -91,8 +95,8 @@ export function OrderBook({ market }: OrderBookProps) {
   const isYes = (o: RawOrder) =>
     (o.side === 'bid' ? o.tokenOut : o.tokenIn).toLowerCase() === yesToken
 
-  const bids = (data?.bids ?? []).filter(isYes).slice(0, LEVELS).map(toLevel)
-  const asks = (data?.asks ?? []).filter(isYes).slice(0, LEVELS).map(toLevel)
+  const bids = (data?.bids ?? []).filter(isYes).map(toLevel).filter((l) => l.size > 0).slice(0, LEVELS)
+  const asks = (data?.asks ?? []).filter(isYes).map(toLevel).filter((l) => l.size > 0).slice(0, LEVELS)
   const isEmpty = !isLoading && bids.length === 0 && asks.length === 0
 
   const bestBid = bids[0]?.price

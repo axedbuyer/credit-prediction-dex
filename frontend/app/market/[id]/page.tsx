@@ -5,6 +5,7 @@ import { useMarket } from '@/lib/markets'
 import { entityTypeLabel } from '@/lib/marketCopy'
 import { OrderBook } from '@/components/OrderBook'
 import { TradePanel } from '@/components/TradePanel'
+import { OpenOrders } from '@/components/OpenOrders'
 import { PriceChart } from '@/components/PriceChart'
 import { FundingTicker } from '@/components/FundingTicker'
 
@@ -83,6 +84,12 @@ export default function MarketPage({ params }: { params: { id: string } }) {
         </div>
         <div className="pari-b-card">
           <TradePanel market={market} />
+        </div>
+
+        {/* Row 3: the wallet's resting orders (on-chain cancel) */}
+        <div className="col-start-3 pari-b-card">
+          <p className="pari-b-card__header">Your Open Orders</p>
+          <OpenOrders market={market} />
         </div>
       </div>
     </div>
