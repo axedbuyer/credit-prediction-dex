@@ -1,6 +1,6 @@
 # Partial fills + on-chain cancel — plan for the next contract batch (batch 3)
 
-*Written 2026-10-15. Status: **plan, not started; open decisions in §6 need the owner.**
+*Written 2026-10-15. Status: **plan, not started. Decisions A, C and D made 2026-10-16; B and E open (§6).**
 Read with root `CLAUDE.md` ("No partial fills", "Order removal policy", Funding Model).*
 
 ## 1. Why
@@ -130,33 +130,62 @@ Rehearse on an anvil fork first, as for batch 2. The rehearsal must check:
 - **Smoke:** a new check where a small taker partially fills a large resting ask, then a
   second taker fills the rest. The 11 existing checks must stay green.
 
-## 6. Decisions for the owner
+## 6. Decisions
 
-**A. Carry debt when a YES position is sold in pieces.** Today a YES sale must cover the
-seller's whole carry debt or it reverts (FundingShortfall, invariant 8). With partial
-fills, a small fill might not cover a large debt, and the engine would then prune a
-healthy seller's order because of a small counterparty: the same griefing pattern again.
-Options:
-1. **Pro-rata (recommended):** each fill collects `debt × tokens sold / YES held` and
-   must cover that share plus its fee. The debt per remaining token is unchanged, so the
-   seizure trigger and Epochs To Expire don't move. The final fill collects the rest.
-   Invariants 8 and 9 still hold per token.
-2. **Whole debt on the first fill:** keeps today's rule. Small fills against a seller
-   with debt revert, and those pairs must be skipped, not pruned.
-3. **Up to the fill's proceeds:** collect `min(debt, proceeds)`. Simplest, but a seller
-   could sell all their YES in pieces while debt is left on a position with no YES
-   behind it. Breaks invariant 9. Not recommended.
+Owner decisions of 2026-10-16: A, C and D decided; B and E still open.
 
-**B. Minimum fill size.** Tiny fills waste settler gas, and a 1-wei fill would round to
-zero USDC. Suggest a per-market minimum (e.g. 1 Upbet), with the last remainder of an order
-always allowed.
+**A. Carry debt when a YES position is sold in pieces: PRO-RATA (decided).** Today a
+YES sale must cover the seller's whole carry debt or it reverts (FundingShortfall,
+invariant 8). With partial fills, a small fill might not cover a large debt, and the
+engine would prune a healthy seller's order because of a small counterparty.
 
-**C. Cancel scope.** Per-order `cancelOrders` only, or also a per-maker
-`incrementMinNonce` "cancel everything" (useful for the market maker and the liquidator
-bot). Suggest both.
+Each fill instead collects `debt × tokens sold / YES held`. The fill's price must cover
+that share plus the fee, or the fill reverts and the position is unchanged (invariant 8,
+per fill). The debt per remaining token stays the same, so the seizure trigger and Epochs
+To Expire don't move. Selling the last YES collects the rest. Invariant 9 holds: no debt
+is erased without the matching USDC reaching collateral. The off-chain FundingShortfall
+pre-filter and `minSellProceeds` switch to the per-fill share.
 
-**D. Batch fills.** Ship the pair form only, or also one-taker-many-makers in a single
-transaction. Suggest pair-only first; batch later if settler gas matters.
+Rejected:
+- whole debt on the first fill (small fills against an indebted seller would revert);
+- `min(debt, proceeds)`, which can leave debt on a position with no YES behind it and
+  breaks invariant 9.
+
+**B. Minimum size: open (recommendation below).** For comparison, Polymarket's CTF
+Exchange has **no on-chain minimum fill**: `fillOrder`, `fillOrders` and `matchOrders`
+take any fill amount up to what remains of the order (`MakingGtRemaining` otherwise).
+The minimum is an off-chain rule applied when an order is placed: each market's book
+carries a `min_order_size` (and a `tick_size`). The clob-client types and the docs example
+use 5 shares. The remainder of a partly filled order may fall below the minimum and still
+fill.
+
+Dust fills aren't a problem for Polymarket because only its operator can call the fill
+functions (`onlyOperator`), so nobody else can submit 1-wei fills (see E).
+
+Recommendation: copy that.
+- A per-market minimum order size enforced by `POST /order` (suggest 5 Upbets, set per
+  market in the order-book-server).
+- No on-chain minimum. The contract only rejects a fill that rounds to 0 USDC.
+- Leftovers below the minimum still fill.
+
+**C. Cancel scope: BOTH (decided).** Per-order `cancelOrders(Order[])`, maker only, plus
+per-maker `incrementMinNonce()` "cancel everything". Polymarket has the same pair:
+`cancelOrders` and `incrementNonce`.
+
+**D. Batch fills: PAIR-ONLY first (decided).** `fillOrders(maker, taker, tokens)`.
+One-taker-many-makers comes later, if settler gas matters.
+
+**E. Who may submit fills: open (new).** Today `verifyAndSettle` is permissionless.
+Polymarket restricts every fill to an operator role. Doing the same, with an
+`OPERATOR_ROLE` held by the settler wallet:
+- stops anyone else choosing fill sizes, which removes dust griefing (B);
+- makes `DELETE /order` binding in practice, since only our operator settles and it
+  honours off-chain cancels;
+- costs nothing, because the matching engine's settler is already the only caller.
+
+The trade-off: if the operator is down, nothing settles. That's already true in practice.
+On-chain cancel (C) remains the guarantee that doesn't depend on trusting us.
+Recommendation: operator-only.
 
 ## 7. Size
 
