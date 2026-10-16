@@ -18,6 +18,9 @@ export interface StoredOrder {
   side: 'bid' | 'ask'
   price: number     // USDC-per-token float, used for CLOB ordering
   timestamp: number // ms since epoch, used for time-priority tie-breaking
+  // Outcome tokens already filled on-chain (decimal string; absent = '0'). Written
+  // by the settler after each confirmed partial fill; remaining = size − filled.
+  filled?: string
 }
 
 export const LEGACY_MARKET_SLUG = 'mstr'

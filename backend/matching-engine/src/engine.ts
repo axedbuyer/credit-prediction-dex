@@ -6,9 +6,9 @@ import type { OrderBookClient } from './client'
 // Declaration merging gives MatchingEngine typed event signatures without
 // losing the full EventEmitter interface inherited from the class side.
 declare interface MatchingEngine {
-  on(event: 'matched', listener: (maker: StoredOrder, taker: StoredOrder) => void): this
+  on(event: 'matched', listener: (maker: StoredOrder, taker: StoredOrder, tokens: bigint) => void): this
   on(event: string | symbol, listener: (...args: unknown[]) => void): this
-  emit(event: 'matched', maker: StoredOrder, taker: StoredOrder): boolean
+  emit(event: 'matched', maker: StoredOrder, taker: StoredOrder, tokens: bigint): boolean
   emit(event: string | symbol, ...args: unknown[]): boolean
 }
 
@@ -163,53 +163,56 @@ class MatchingEngine extends EventEmitter {
   }
 
   /**
-   * Price-time priority matching for a single token-pair market.
+   * Price-time priority matching for a single token-pair market, with partial
+   * fills (batch-3 CLOBSettlement.fillOrders).
    *
    * Sort order:
    *   bids — highest price first; equal prices: earliest timestamp first
    *   asks — lowest price first;  equal prices: earliest timestamp first
    *
-   * Each bid, best first, takes the best still-unmatched ask that it crosses
-   * (bid.price >= ask.price) AND that can settle with it as whole orders
-   * (canSettleWhole). CLOBSettlement has no partial fills, so a crossing pair of
-   * different sizes would only revert SlippageExceeded on-chain — it is skipped
-   * and both orders keep resting; neither did anything wrong. A bid whose price is
-   * below the best open ask ends the walk (no lower bid can cross either).
-   * Execution: ask = maker (limit), bid = taker.
+   * Walk both sides with two pointers while best bid >= best ask. Each crossing
+   * pair fills min(remaining bid, remaining ask) tokens; the EARLIER order is the
+   * maker (it was resting), and the contract prices the fill at the maker's limit.
+   * One fill per order per cycle: both orders go into pendingSettlement until the
+   * settler confirms the fill and updates `filled`, so a big order works through
+   * several counterparties over successive cycles. A pair the contract can't fill
+   * (markIncompatible) is skipped — the walk moves on and both orders keep resting.
    *
    * Matched IDs are added to pendingSettlement so they are not re-matched
-   * before the settler removes them from the book.
+   * before the settler records the fill.
    */
   private matchMarket(bids: StoredOrder[], asks: StoredOrder[]): void {
     const activeBids = bids
-      .filter(o => !this.pendingSettlement.has(o.id))
+      .filter(o => !this.pendingSettlement.has(o.id) && remainingTokens(o) > 0n)
       .sort((a, b) => b.price - a.price || a.timestamp - b.timestamp)
 
     const openAsks = asks
-      .filter(o => !this.pendingSettlement.has(o.id))
+      .filter(o => !this.pendingSettlement.has(o.id) && remainingTokens(o) > 0n)
       .sort((a, b) => a.price - b.price || a.timestamp - b.timestamp)
 
     for (const bid of activeBids) {
       if (openAsks.length === 0 || bid.price < openAsks[0].price) break
 
-      const i = openAsks.findIndex(ask =>
-        bid.price >= ask.price && canSettleWhole(ask, bid) && !this.isIncompatible(ask.id, bid.id))
+      const i = openAsks.findIndex(ask => bid.price >= ask.price && !this.isIncompatible(ask.id, bid.id))
       if (i < 0) continue
 
       const [ask] = openAsks.splice(i, 1)
+      const tokens = minBig(remainingTokens(bid), remainingTokens(ask))
+      const [maker, taker] = ask.timestamp <= bid.timestamp ? [ask, bid] : [bid, ask]
       this.pendingSettlement.add(bid.id)
       this.pendingSettlement.add(ask.id)
-      this.emit('matched', ask, bid)    // ask = maker (limit), bid = taker
+      this.emit('matched', maker, taker, tokens)
     }
   }
 
   /**
-   * Remember that this exact pair reverted SlippageExceeded at gas estimation
-   * even though it passed canSettleWhole — on a NO sale the fee-free seller's
-   * limit is checked NET of the buyer-paid fee, which this engine doesn't model.
-   * Amounts are static, so the pair would revert again; skip it (both orders keep
-   * resting and can match anyone else). Entries expire after INCOMPATIBLE_TTL_MS
-   * so a fee-config change gets a fresh try.
+   * Remember that this exact pair can't fill: it reverted SlippageExceeded (limits
+   * cross on the sort price but not after the contract's maker-price rounding /
+   * NO-sale net-of-fee check, which this engine doesn't model) or FillTooSmall (the
+   * fill prices at 0 USDC — dust). Neither order is at fault, so skip the pair (both
+   * keep resting and can match anyone else). Keys are order-id pairs in either
+   * role; entries expire after INCOMPATIBLE_TTL_MS so a fee-config change or a new
+   * remaining size gets a fresh try.
    */
   markIncompatible(makerId: string, takerId: string): void {
     const now = Date.now()
@@ -217,29 +220,31 @@ class MatchingEngine extends EventEmitter {
     this.incompatible.set(`${makerId}|${takerId}`, now)
   }
 
-  private isIncompatible(makerId: string, takerId: string): boolean {
-    const t = this.incompatible.get(`${makerId}|${takerId}`)
-    return t !== undefined && Date.now() - t <= INCOMPATIBLE_TTL_MS
+  private isIncompatible(a: string, b: string): boolean {
+    const fresh = (t: number | undefined) => t !== undefined && Date.now() - t <= INCOMPATIBLE_TTL_MS
+    return fresh(this.incompatible.get(`${a}|${b}`)) || fresh(this.incompatible.get(`${b}|${a}`))
   }
 }
 
 const INCOMPATIBLE_TTL_MS = 10 * 60_000
 
 /**
- * Mirrors CLOBSettlement.verifyAndSettle's whole-order slippage guards: the
- * seller's tokens must cover what the buyer asked for, and the buyer's USDC must
- * cover what the seller asked for. (The contract checks these maker/taker-wise;
- * with one seller and one buyer that is the same pair of conditions.) Settlement
- * moves the seller's FULL amountIn and the buyer's FULL amountIn, so a crossing
- * pair of different sizes fails one of these and can never settle.
+ * Tokens an order still offers (ask) or wants (bid): its size in outcome tokens
+ * (CLOBSettlement.tokenQuantity — a bid's minAmountOut, an ask's amountIn) minus
+ * `filled`, which the settler updates after each confirmed fill.
  */
-function canSettleWhole(ask: StoredOrder, bid: StoredOrder): boolean {
+export function remainingTokens(o: StoredOrder): bigint {
   try {
-    return BigInt(ask.amountIn) >= BigInt(bid.minAmountOut)
-        && BigInt(bid.amountIn) >= BigInt(ask.minAmountOut)
+    const qty = BigInt(o.side === 'bid' ? o.minAmountOut : o.amountIn)
+    const done = BigInt(o.filled ?? '0')
+    return qty > done ? qty - done : 0n
   } catch {
-    return false  // malformed amounts can't settle either
+    return 0n  // malformed amounts can't fill
   }
+}
+
+function minBig(a: bigint, b: bigint): bigint {
+  return a < b ? a : b
 }
 
 export { MatchingEngine }

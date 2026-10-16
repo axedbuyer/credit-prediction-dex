@@ -4,7 +4,7 @@ import type { StoredOrder } from './types'
 // ─── Redis key layout ─────────────────────────────────────────────────────────
 // Kept in lockstep with backend/matching-engine's RedisOrderRemover.
 // `orders:<id>` stays global — the order JSON itself carries `market`.
-// Nonces are per market: on-chain `usedNonces` lives on each CLOBSettlement.
+// Nonces are per market (an order is unique per maker + nonce on each CLOBSettlement).
 export const bidsKey = (market: string) => `orderbook:${market}:bids`
 export const asksKey = (market: string) => `orderbook:${market}:asks`
 export const nonceKey = (market: string, maker: string) => `nonces:${market}:${maker.toLowerCase()}`

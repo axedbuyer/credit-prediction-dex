@@ -1,6 +1,6 @@
 import path from 'path'
 import fs from 'fs'
-import { buildApp } from './server'
+import { buildApp, parseMinOrderTokens } from './server'
 import { RedisOrderStore, createRedisClient } from './orderbook'
 import { createPublicClient, http } from 'viem'
 import { createChainReader, resolveViemChain } from './chain'
@@ -80,6 +80,7 @@ async function main() {
     // TRUST_PROXY=2 on Railway (two proxy hops, measured) — see parseTrustProxy's
     // doc comment for why a hop count beats bare "true".
     trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
+    minOrderTokens: parseMinOrderTokens(process.env.MIN_ORDER_TOKENS),
   }
 
   const redis = createRedisClient(

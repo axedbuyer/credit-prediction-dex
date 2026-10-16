@@ -57,6 +57,8 @@ cd "$REPO_ROOT/contracts"
 OUT=cache/smoke            # must live under contracts/ (fs_permissions "./"); gitignored
 rm -rf "$OUT"; mkdir -p "$OUT"
 export DEPLOYER_PRIVATE_KEY=$K0 KEEPER_ADDRESS=$KEEPER_ADDR
+# The matching engine settles with $K2 — it must hold CLOBSettlement OPERATOR_ROLE.
+export OPERATOR_ADDRESS=$("$CAST" wallet address --private-key "$K2")
 log "mock USDC"
 USDC=$("$FORGE" create script/DeployLocal.s.sol:MockUSDC --rpc-url "$RPC_URL" --private-key "$K0" --broadcast 2>"$RUN_DIR/deploy-usdc.err" | awk '/Deployed to:/{print $3}')
 [[ -n "$USDC" ]] || { cat "$RUN_DIR/deploy-usdc.err"; fail "mock USDC deploy failed"; }
