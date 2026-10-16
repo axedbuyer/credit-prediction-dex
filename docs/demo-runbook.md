@@ -80,7 +80,7 @@ there's something to look at even before the live trade).
 **4:00 — Buy Upbet, live.** On the market page, place a small buy that crosses
 one of the Market Maker's resting asks. Walk through: sign the EIP-712 order
 in MetaMask (no gas — it's off-chain until matched) → the matching engine
-picks it up within ~500ms → `CLOBSettlement.verifyAndSettle` confirms on
+picks it up within ~500ms → `CLOBSettlement.fillOrders` confirms on
 anvil → the filled ask shrinks or disappears from the order book (2s poll)
 and the position is yours — show it in Portfolio in the next beat.
 
