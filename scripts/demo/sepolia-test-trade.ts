@@ -1,8 +1,8 @@
 // Post-cutover check (runbook §6): a fresh test wallet buys the whole best resting
 // Upbet (YES) ask on a market on the HOSTED order book, then waits for the hosted
 // matching engine to settle it on-chain. YES buys are fee-free. CLOBSettlement only
-// settles whole orders, so the buy mirrors the ask's exact amounts — a smaller order
-// would revert SlippageExceeded and the settler prunes BOTH orders.
+// settles whole orders, so the buy mirrors the ask's exact amounts — a different-size
+// order would never be matched against it (both would just keep resting).
 //
 // Run:  set -a && . ../../contracts/.env && set +a && \
 //       ORDER_BOOK_URL=https://order-book-server-production-9bb6.up.railway.app \

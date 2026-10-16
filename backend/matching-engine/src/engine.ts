@@ -24,6 +24,9 @@ class MatchingEngine extends EventEmitter {
    */
   private readonly pendingSettlement = new Set<string>()
 
+  /** Pairs (`makerId|takerId`) that reverted SlippageExceeded → time marked. See markIncompatible. */
+  private readonly incompatible = new Map<string, number>()
+
   /**
    * Number of runOnce() cycles currently in flight (fired by the interval
    * timer, not a direct test call to runOnce()). Tracked so stop() can await
@@ -166,38 +169,76 @@ class MatchingEngine extends EventEmitter {
    *   bids — highest price first; equal prices: earliest timestamp first
    *   asks — lowest price first;  equal prices: earliest timestamp first
    *
-   * Walk both sorted lists with two pointers. While best_bid.price >= best_ask.price
-   * the spread is crossed and we have a match. Execution price = ask.price
-   * (ask is the maker whose limit is honoured; bid is the taker).
+   * Each bid, best first, takes the best still-unmatched ask that it crosses
+   * (bid.price >= ask.price) AND that can settle with it as whole orders
+   * (canSettleWhole). CLOBSettlement has no partial fills, so a crossing pair of
+   * different sizes would only revert SlippageExceeded on-chain — it is skipped
+   * and both orders keep resting; neither did anything wrong. A bid whose price is
+   * below the best open ask ends the walk (no lower bid can cross either).
+   * Execution: ask = maker (limit), bid = taker.
    *
    * Matched IDs are added to pendingSettlement so they are not re-matched
-   * before Task 12 removes them from the book.
+   * before the settler removes them from the book.
    */
   private matchMarket(bids: StoredOrder[], asks: StoredOrder[]): void {
     const activeBids = bids
       .filter(o => !this.pendingSettlement.has(o.id))
       .sort((a, b) => b.price - a.price || a.timestamp - b.timestamp)
 
-    const activeAsks = asks
+    const openAsks = asks
       .filter(o => !this.pendingSettlement.has(o.id))
       .sort((a, b) => a.price - b.price || a.timestamp - b.timestamp)
 
-    let bi = 0
-    let ai = 0
+    for (const bid of activeBids) {
+      if (openAsks.length === 0 || bid.price < openAsks[0].price) break
 
-    while (bi < activeBids.length && ai < activeAsks.length) {
-      const bid = activeBids[bi]
-      const ask = activeAsks[ai]
+      const i = openAsks.findIndex(ask =>
+        bid.price >= ask.price && canSettleWhole(ask, bid) && !this.isIncompatible(ask.id, bid.id))
+      if (i < 0) continue
 
-      if (bid.price < ask.price) break  // spread not crossed — no further matches possible
-
+      const [ask] = openAsks.splice(i, 1)
       this.pendingSettlement.add(bid.id)
       this.pendingSettlement.add(ask.id)
       this.emit('matched', ask, bid)    // ask = maker (limit), bid = taker
-
-      bi++
-      ai++
     }
+  }
+
+  /**
+   * Remember that this exact pair reverted SlippageExceeded at gas estimation
+   * even though it passed canSettleWhole — on a NO sale the fee-free seller's
+   * limit is checked NET of the buyer-paid fee, which this engine doesn't model.
+   * Amounts are static, so the pair would revert again; skip it (both orders keep
+   * resting and can match anyone else). Entries expire after INCOMPATIBLE_TTL_MS
+   * so a fee-config change gets a fresh try.
+   */
+  markIncompatible(makerId: string, takerId: string): void {
+    const now = Date.now()
+    for (const [k, t] of this.incompatible) if (now - t > INCOMPATIBLE_TTL_MS) this.incompatible.delete(k)
+    this.incompatible.set(`${makerId}|${takerId}`, now)
+  }
+
+  private isIncompatible(makerId: string, takerId: string): boolean {
+    const t = this.incompatible.get(`${makerId}|${takerId}`)
+    return t !== undefined && Date.now() - t <= INCOMPATIBLE_TTL_MS
+  }
+}
+
+const INCOMPATIBLE_TTL_MS = 10 * 60_000
+
+/**
+ * Mirrors CLOBSettlement.verifyAndSettle's whole-order slippage guards: the
+ * seller's tokens must cover what the buyer asked for, and the buyer's USDC must
+ * cover what the seller asked for. (The contract checks these maker/taker-wise;
+ * with one seller and one buyer that is the same pair of conditions.) Settlement
+ * moves the seller's FULL amountIn and the buyer's FULL amountIn, so a crossing
+ * pair of different sizes fails one of these and can never settle.
+ */
+function canSettleWhole(ask: StoredOrder, bid: StoredOrder): boolean {
+  try {
+    return BigInt(ask.amountIn) >= BigInt(bid.minAmountOut)
+        && BigInt(bid.amountIn) >= BigInt(ask.minAmountOut)
+  } catch {
+    return false  // malformed amounts can't settle either
   }
 }
 
