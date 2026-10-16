@@ -69,13 +69,16 @@ function sleep(ms: number) {
 
 // Use a bare EventEmitter as the engine — Settler calls engine.on('matched', …)
 // and, on non-pruned settlement failures, engine.releasePendingSettlement(...ids)
-// to un-wedge orders. Stub the latter as a spy so tests can assert on it.
+// to un-wedge orders (plus engine.markIncompatible on SlippageExceeded). Stub
+// both as spies so tests can assert on them.
 function makeEngine() {
   const engine = new EventEmitter() as unknown as MatchingEngine & {
     releasePendingSettlement: ReturnType<typeof vi.fn>
+    markIncompatible: ReturnType<typeof vi.fn>
   }
-  ;(engine as unknown as { releasePendingSettlement: ReturnType<typeof vi.fn> })
-    .releasePendingSettlement = vi.fn()
+  const spies = engine as unknown as Record<'releasePendingSettlement' | 'markIncompatible', ReturnType<typeof vi.fn>>
+  spies.releasePendingSettlement = vi.fn()
+  spies.markIncompatible = vi.fn()
   return engine
 }
 
@@ -294,7 +297,7 @@ describe('Settler — deterministic revert handling', () => {
     expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-pf')
   }, 10_000)
 
-  it('PositionFrozen: claimable() read throws → both orders removed', async () => {
+  it('PositionFrozen: claimable() read throws → nothing removed, both released for retry', async () => {
     const engine = makeEngine()
     const { publicClient, walletClient, orderRemover } = makeMocks({
       estimateContractGas: () => Promise.reject(makeRevertError('PositionFrozen')),
@@ -309,12 +312,27 @@ describe('Settler — deterministic revert handling', () => {
     await sleep(3000)
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
-    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-pf-err', 'ask', 'mstr')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-pf-err', 'bid', 'mstr')
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-pf-err', 'bid-pf-err')
   }, 10_000)
 
-  it('SlippageExceeded (fee-config mismatch): both orders removed, no tx submitted', async () => {
+  it('PositionFrozen but claimable() reports neither flagged → nothing removed, both released', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks({
+      estimateContractGas: () => Promise.reject(makeRevertError('PositionFrozen')),
+      readContract: () => Promise.resolve(false),
+    })
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    engine.emit('matched', makeOrder('ask-pf-none', 'ask', { maker: MAKER_A }), makeOrder('bid-pf-none', 'bid', { maker: MAKER_B }))
+
+    await sleep(3000)
+
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-pf-none', 'bid-pf-none')
+  }, 10_000)
+
+  it('SlippageExceeded: nothing removed — pair marked incompatible, both released, no tx', async () => {
     const engine = makeEngine()
     const { publicClient, walletClient, orderRemover } = makeMocks({
       estimateContractGas: () => Promise.reject(makeRevertError('SlippageExceeded')),
@@ -326,9 +344,9 @@ describe('Settler — deterministic revert handling', () => {
     await sleep(3000)
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
-    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-slip', 'ask', 'mstr')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-slip', 'bid', 'mstr')
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    expect(engine.markIncompatible).toHaveBeenCalledWith('ask-slip', 'bid-slip')
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-slip', 'bid-slip')
   }, 10_000)
 
   it('generic RPC error (not a deterministic revert) → nothing removed', async () => {
@@ -602,7 +620,7 @@ describe('Settler — NonceUsed handling', () => {
     expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-nonce')
   }, 10_000)
 
-  it('usedNonces() read throws → both orders removed (never wedge the book)', async () => {
+  it('usedNonces() read throws → nothing removed, both released for retry', async () => {
     const engine = makeEngine()
     const { publicClient, walletClient, orderRemover } = makeMocks({
       estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
@@ -615,12 +633,11 @@ describe('Settler — NonceUsed handling', () => {
     await sleep(3000)
 
     expect(walletClient.writeContract).not.toHaveBeenCalled()
-    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nu-err', 'ask', 'mstr')
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-nu-err', 'bid', 'mstr')
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-nu-err', 'bid-nu-err')
   }, 10_000)
 
-  it('usedNonces() reports neither spent → both orders removed', async () => {
+  it('usedNonces() reports neither spent → nothing removed, both released for retry', async () => {
     const engine = makeEngine()
     const { publicClient, walletClient, orderRemover } = makeMocks({
       estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
@@ -632,7 +649,8 @@ describe('Settler — NonceUsed handling', () => {
 
     await sleep(3000)
 
-    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(2)
+    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-nu-none', 'bid-nu-none')
   }, 10_000)
 })
 

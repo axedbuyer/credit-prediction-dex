@@ -128,6 +128,7 @@ function revert(errorName: 'PositionFrozen' | 'NonceUsed') {
 async function settlerHarness(over: { estimate?: () => Promise<bigint>; read?: (args: { address: string; functionName: string }) => Promise<unknown> } = {}) {
   const engine = new EventEmitter() as unknown as MatchingEngine
   ;(engine as unknown as { releasePendingSettlement: unknown }).releasePendingSettlement = vi.fn()
+  ;(engine as unknown as { markIncompatible: unknown }).markIncompatible = vi.fn()
   const publicClient: IPublicClient = {
     estimateContractGas: vi.fn(over.estimate ?? (async () => 200_000n)),
     waitForTransactionReceipt: vi.fn(async () => ({ status: 'success' as const })),
@@ -190,13 +191,17 @@ describe('Settler — multi-market routing', () => {
     return h
   }
 
-  it('REFUSES (prunes both, no submit) a pair from different markets', async () => {
+  const engineSpy = (h: Awaited<ReturnType<typeof settlerHarness>>, name: 'releasePendingSettlement' | 'markIncompatible') =>
+    (h.engine as unknown as Record<string, ReturnType<typeof vi.fn>>)[name]
+
+  it('REFUSES (no submit, prunes nothing) a pair of two valid orders from different markets', async () => {
     const h = await refuse(
       order('ma', 'mstr', M.mstr.yes, 'ask', 0.2),
       order('tb', 'turkey', M.turkey.yes, 'bid', 0.3),
     )
-    expect(h.orderRemover.removeOrder).toHaveBeenCalledWith('ma', 'ask', 'mstr')
-    expect(h.orderRemover.removeOrder).toHaveBeenCalledWith('tb', 'bid', 'turkey')
+    expect(h.orderRemover.removeOrder).not.toHaveBeenCalled()
+    expect(engineSpy(h, 'markIncompatible')).toHaveBeenCalledWith('ma', 'tb')
+    expect(engineSpy(h, 'releasePendingSettlement')).toHaveBeenCalledWith('ma', 'tb')
   })
 
   it("REFUSES a pair stamped with one market but trading another market's token", async () => {
@@ -207,16 +212,25 @@ describe('Settler — multi-market routing', () => {
     expect(h.orderRemover.removeOrder).toHaveBeenCalledTimes(2)
   })
 
-  it('REFUSES an order whose legs are not {USDC, outcome token}', async () => {
+  it('REFUSES an order whose legs are not {USDC, outcome token} — prunes only that order', async () => {
     const bad = order('b', 'mstr', M.mstr.yes, 'bid', 0.3, { tokenOut: M.mstr.cm })   // creditMarket address as "token"
-    await refuse(order('a', 'mstr', M.mstr.yes, 'ask', 0.2), bad)
+    const h = await refuse(order('a', 'mstr', M.mstr.yes, 'ask', 0.2), bad)
+    expect(h.orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+    expect(h.orderRemover.removeOrder).toHaveBeenCalledWith('b', 'bid', 'mstr')
+    expect(engineSpy(h, 'releasePendingSettlement')).toHaveBeenCalledWith('a')
     const bad2 = order('b2', 'mstr', M.mstr.yes, 'bid', 0.3, { tokenIn: M.mstr.no, tokenOut: M.mstr.yes })   // no USDC leg
-    await refuse(order('a2', 'mstr', M.mstr.yes, 'ask', 0.2), bad2)
+    const h2 = await refuse(order('a2', 'mstr', M.mstr.yes, 'ask', 0.2), bad2)
+    expect(h2.orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+    expect(h2.orderRemover.removeOrder).toHaveBeenCalledWith('b2', 'bid', 'mstr')
   })
 
-  it('REFUSES pairs on different outcome tokens or the same side', async () => {
-    await refuse(order('a', 'mstr', M.mstr.yes, 'ask', 0.2), order('b', 'mstr', M.mstr.no, 'bid', 0.3))
-    await refuse(order('a', 'mstr', M.mstr.yes, 'ask', 0.2), order('b', 'mstr', M.mstr.yes, 'ask', 0.3))
+  it('REFUSES pairs on different outcome tokens or the same side — prunes nothing', async () => {
+    const h = await refuse(order('a', 'mstr', M.mstr.yes, 'ask', 0.2), order('b', 'mstr', M.mstr.no, 'bid', 0.3))
+    const h2 = await refuse(order('a', 'mstr', M.mstr.yes, 'ask', 0.2), order('b', 'mstr', M.mstr.yes, 'ask', 0.3))
+    for (const x of [h, h2]) {
+      expect(x.orderRemover.removeOrder).not.toHaveBeenCalled()
+      expect(engineSpy(x, 'markIncompatible')).toHaveBeenCalledWith('a', 'b')
+    }
   })
 
   it('does not prune (releases) when the market is unknown to this directory', async () => {
