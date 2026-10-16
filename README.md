@@ -65,7 +65,7 @@ examples, and the 10 hard invariants) is specified canonically in the root
         │  pre-filters     │ │ submits matched   │
         │  frozen/short-   │ │ pairs on-chain    │
         │  fall orders     │ └────────┬─────────┘
-        └──────────────────┘          │ verifyAndSettle(...)
+        └──────────────────┘          │ fillOrders(...)
                                       ▼
    ┌──────────────────────────────────────────────────────────────┐
    │                      On-chain (Base / Base Sepolia)           │

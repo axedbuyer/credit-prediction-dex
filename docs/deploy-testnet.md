@@ -20,7 +20,7 @@ an ops document, not user-facing copy.
   `https://base-sepolia.blockscout.com/api`, not real Etherscan).
 - Two more EOAs to generate (or reuse the deployer, not recommended — see §2):
   a **keeper** key (signs `accrueFunding()`/`flagClaimable()`/`setMark()` txs from
-  `funding-keeper.ts`) and a **settler** key (signs `CLOBSettlement.verifyAndSettle()` txs
+  `funding-keeper.ts`) and a **settler** key (signs `CLOBSettlement.fillOrders()` txs — batch 3: it must hold each CLOB's `OPERATOR_ROLE`
   from `matching-engine`'s settler). `cast wallet new` generates a fresh keypair for each.
 
 ---
