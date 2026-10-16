@@ -120,6 +120,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
         // ── deploy handler, then grant it the privileged roles it drives ───────
         handler = new Handler(usdc, yesToken, noToken, market, clob, router, insuranceFund, liquidationEngine, teamWallet);
+        clob.grantRole(clob.OPERATOR_ROLE(), address(handler));
+        clob.grantRole(clob.OPERATOR_ROLE(), admin); // direct regression tests below
 
         market.grantRole(market.KEEPER_ROLE(), address(handler));
         market.grantRole(market.ORACLE_ROLE(), address(handler)); // setMotionPending
@@ -227,7 +229,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
             uint256 yesBal = yesToken.balanceOf(u);
             uint256 fPerUnit = cumYES - market.fundingSnapshot(u);
-            sumUnsyncedYesDebit += int256(yesBal * fPerUnit / 1e18);
+            sumUnsyncedYesDebit += int256(_ceilDiv1e18(yesBal * fPerUnit)); // as settleFunding would record it
 
             uint256 noBal = noToken.balanceOf(u);
             uint256 nPerUnit = cumNO - market.snapNO(u);
@@ -237,28 +239,32 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         int256 expected =
             int256(yesToken.totalSupply()) - sumFundingDebt - sumUnsyncedYesDebit + sumUnsyncedNoCredit;
 
-        // Tolerance, not laxity: the contract settles each user's funding with its
-        // OWN independent floor division at the moment that user is actually
-        // synced (settleFunding), so the real on-chain balance is always exact by
-        // construction. This invariant instead reconstructs "what balance SHOULD
-        // be right now" by projecting every actor's unsynced funding as-if they
-        // were all synced simultaneously -- and floor(a/d) + floor(b/d) can fall
-        // up to 1 wei short of floor((a+b)/d) per actor whose YES/NO holdings for
-        // the same unsynced interval are fragmented across a different set of
-        // holders on the YES side vs the NO side (verified: a 2-mint + 1-YES-sale
-        // sequence with N_ACTORS=5 reproduces an exact, deterministic 1-wei gap
-        // this way -- see test_Repro_SolvencyFormulaOneWeiRoundingSlack). This is
-        // pure measurement noise in the projection, not a real leak: it can never
-        // exceed 1 wei per actor per side, so a tolerance of 2*N_ACTORS wei is
-        // generous and still catches any real drift many orders of magnitude
-        // below the token amounts in play (1e15+ per mint).
-        assertApproxEqAbs(
-            int256(usdc.balanceOf(address(market))),
-            expected,
-            2 * handler.numActors(),
-            "CreditMarket USDC balance diverged from the derived solvency formula beyond floor-rounding slack (invariants 4/7/9)"
-        );
+        // Two-sided, deliberately asymmetric check.
+        //
+        // (1) Projection noise: this reconstructs "what the balance SHOULD be now" by
+        // projecting every actor's unsynced funding as if all were synced at once, and
+        // per-actor rounding of fragmented holdings can differ from the aggregate by
+        // < 1 wei per actor per side (see test_Repro_SolvencyFormulaOneWeiRoundingSlack)
+        // — hence 2*N_ACTORS of slack in either direction.
+        //
+        // (2) Settlement rounding: each settleFunding rounds a YES debit UP and a NO
+        // credit DOWN (batch 3), so every settlement leaves < 1 wei per side IN
+        // collateral. That surplus accumulates with the number of settlements, so the
+        // balance may sit above `expected` — but never below it. Before batch 3 the
+        // YES debit rounded down and the deep 2-market run (partial fills) drove
+        // collateral 11 wei SHORT of this formula; that direction is now a hard failure.
+        //
+        // The upper bound only has to catch a real over-collection, which would be many
+        // orders of magnitude above rounding (token amounts here are 1e15+ per mint).
+        int256 bal = int256(usdc.balanceOf(address(market)));
+        int256 slack = int256(2 * handler.numActors());
+        assertGe(bal, expected - slack, "CreditMarket collateral SHORT of the derived solvency formula (invariants 4/7/9)");
+        assertLe(bal, expected + slack + SETTLEMENT_ROUNDING_BUDGET, "CreditMarket collateral above the solvency formula by more than settlement rounding");
     }
+
+    // Generous ceiling for the rounding surplus a run can accumulate (< 2 wei per
+    // settlement, a few settlements per handler call, depth <= 256).
+    int256 internal constant SETTLEMENT_ROUNDING_BUDGET = 10_000;
 
     // ── funding index invariants ─────────────────────────────────────────────────
 
@@ -398,7 +404,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             bool expected;
             if (yesBal != 0) {
                 uint256 accruedPerUnit = cumYES - market.fundingSnapshot(u);
-                uint256 owedTotal = market.fundingDebt(u) + yesBal * accruedPerUnit / 1e18;
+                uint256 owedTotal = market.fundingDebt(u) + _ceilDiv1e18(yesBal * accruedPerUnit); // YES debit rounds up
                 uint256 value = yesBal * m / 1e18;
                 uint256 nextEpoch = yesBal * (market.currentCarryRate() * epochLength / 365 days) / 1e18;
                 // Evaluated in totals (value vs owed+nextEpoch) rather than
@@ -471,7 +477,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             0, // sideSeed even => YES
             1, // sellerIsMakerSeed odd => makerIsSeller=false (maker is the buyer)
             mintAmount1, // sell actor1's entire YES balance
-            5e17 // 50% price fraction
+            5e17, // 50% price fraction
+            0 // fillSeed 0 => one whole fill
         );
 
         // Warp chosen so the per-actor floors land on the gap at the 5% mark's carry
@@ -574,7 +581,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             expiry: expiry,
             nonce: 0
         });
-        clob.verifyAndSettle(aOrder, _sign(a.aliceKey, aOrder), bOrder, _sign(a.bobKey, bOrder));
+        clob.fillOrders(aOrder, _sign(a.aliceKey, aOrder), bOrder, _sign(a.bobKey, bOrder), _qty(aOrder));
     }
 
     function _reproBobTriggeredSync(ReproActors memory a) internal returns (uint256 bobPayout, uint256 marketOutflow) {
@@ -600,7 +607,9 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             expiry: expiry,
             nonce: 0
         });
-        clob.verifyAndSettle(bSell, _sign(a.bobKey, bSell), cBuy, _sign(a.carolKey, cBuy));
+        // The buyer is the maker so the fill prices at its limit (a zero-floor sell as
+        // maker would price at 0 USDC, which fillOrders rejects as FillTooSmall).
+        clob.fillOrders(cBuy, _sign(a.carolKey, cBuy), bSell, _sign(a.bobKey, bSell), _qty(bSell));
 
         bobPayout = usdc.balanceOf(a.bob) - bobUsdcBefore;
         marketOutflow = marketBalanceBefore - usdc.balanceOf(address(market));
@@ -686,7 +695,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
             expiry: expiry,
             nonce: nonce
         });
-        clob.verifyAndSettle(bSell, _sign(a.bobKey, bSell), aBuy, _sign(a.aliceKey, aBuy));
+        // Buyer as maker: prices at its limit (see _reproBobTriggeredSync).
+        clob.fillOrders(aBuy, _sign(a.aliceKey, aBuy), bSell, _sign(a.bobKey, bSell), _qty(bSell));
     }
 
     function test_Regression_F4_TradeResetsSeizureClockWhileDebtGrows() public {
@@ -819,4 +829,16 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         console2.log("yesBurnedTotal", handler.ghost_yesBurnedTotal());
         console2.log("noBurnedTotal", handler.ghost_noBurnedTotal());
     }
+
+    // Whole-order fill size in outcome tokens (CLOBSettlement.tokenQuantity).
+    function _qty(CLOBSettlement.Order memory o) internal view returns (uint256) {
+        return o.tokenIn == address(usdc) ? o.minAmountOut : o.amountIn;
+    }
+
+
+    // CreditMarket._yesDebit: a YES debit rounds UP (in collateral's favour).
+    function _ceilDiv1e18(uint256 x) internal pure returns (uint256) {
+        return x == 0 ? 0 : (x - 1) / 1e18 + 1;
+    }
+
 }

@@ -41,6 +41,10 @@ contract DeployMarketRegistry is MarketScriptBase {
         _maxMarkStep = j.readUint(".maxMarkStep");
         _minMarkInterval = j.readUint(".minMarkInterval");
         _keeperAddress = j.readAddress(".keeperAddress");
+        // Batch 3+: the CLOB's OPERATOR_ROLE holder (older deployment JSONs predate the role).
+        _operatorAddress = vm.keyExistsJson(j, ".operatorAddress")
+            ? j.readAddress(".operatorAddress")
+            : vm.envOr("OPERATOR_ADDRESS", DEFAULT_OPERATOR);
         _pauserAddress = j.readAddress(".pauserAddress");
         _oracleAttester = j.readAddress(".oracleAttester");
         _teamWallet = j.readAddress(".teamWallet");

@@ -49,6 +49,9 @@ contract Deploy is Script {
     // Today's live keeper EOA (docs/HANDOVER.md "Ops wallets and secrets") — the default
     // KEEPER_ADDRESS if the env var isn't set.
     address constant DEFAULT_KEEPER = 0x63F98358246D5860A5b4c85fBB7936494F4FeC54;
+    // The matching engine's settler wallet: CLOBSettlement OPERATOR_ROLE (only it may submit
+    // fills). OPERATOR_ADDRESS overrides.
+    address constant DEFAULT_OPERATOR = 0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9;
 
     // Deployed addresses + resolved config, held in storage so the post-broadcast
     // assertion/JSON-writing helpers can read them without blowing the stack (same
@@ -64,6 +67,7 @@ contract Deploy is Script {
     address internal _liquidationEngine;
 
     address internal _keeperAddress;
+    address internal _operatorAddress;
     address internal _pauserAddress;
     address internal _oracleAttester;
     address internal _teamWallet;
@@ -99,6 +103,7 @@ contract Deploy is Script {
         // (docs/HANDOVER.md "Ops wallets and secrets").
         _teamWallet     = vm.envOr("TEAM_WALLET", _deployer);
         _keeperAddress  = vm.envOr("KEEPER_ADDRESS", DEFAULT_KEEPER);
+        _operatorAddress = vm.envOr("OPERATOR_ADDRESS", DEFAULT_OPERATOR);
         _pauserAddress  = vm.envOr("PAUSER_ADDRESS", _deployer);
         _oracleAttester = vm.envOr("ORACLE_ATTESTER_ADDRESS", _deployer);
 
@@ -120,6 +125,7 @@ contract Deploy is Script {
         console.log("USDC     :", _usdc);
         console.log("ChainId  :", block.chainid);
         console.log("Keeper   :", _keeperAddress);
+        console.log("Operator :", _operatorAddress);
         console.log("Pauser   :", _pauserAddress);
         console.log("Oracle   :", _oracleAttester);
 
@@ -189,6 +195,7 @@ contract Deploy is Script {
         // steps (docs/deploy-testnet.md §2); granted here so one broadcast leaves the
         // system fully wired.
         market.grantRole(market.KEEPER_ROLE(), _keeperAddress);
+        clob.grantRole(clob.OPERATOR_ROLE(), _operatorAddress);
         market.grantRole(market.PAUSER_ROLE(), _pauserAddress);
         oracleRouter.grantRole(oracleRouter.ORACLE_ROLE(), _oracleAttester);
 
@@ -255,6 +262,7 @@ contract Deploy is Script {
 
         // Ops roles previously granted by hand
         require(market.hasRole(market.KEEPER_ROLE(), _keeperAddress), "assert: KEEPER_ROLE");
+        require(clob.hasRole(clob.OPERATOR_ROLE(), _operatorAddress), "assert: clob OPERATOR_ROLE");
         require(market.hasRole(market.PAUSER_ROLE(), _pauserAddress), "assert: PAUSER_ROLE");
 
         // Fee config
@@ -293,6 +301,7 @@ contract Deploy is Script {
         vm.serializeUint(obj, "maxMarkStep",     _maxMarkStep);
         vm.serializeUint(obj, "minMarkInterval", _minMarkInterval);
         vm.serializeAddress(obj, "keeperAddress",  _keeperAddress);
+        vm.serializeAddress(obj, "operatorAddress", _operatorAddress);
         vm.serializeAddress(obj, "pauserAddress",  _pauserAddress);
         vm.serializeAddress(obj, "oracleAttester", _oracleAttester);
         vm.serializeAddress(obj, "teamWallet",     _teamWallet);

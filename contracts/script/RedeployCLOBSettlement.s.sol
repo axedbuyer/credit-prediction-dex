@@ -10,6 +10,10 @@ import {NOToken} from "../src/NOToken.sol";
 import {CreditMarket} from "../src/CreditMarket.sol";
 import {CLOBSettlement} from "../src/CLOBSettlement.sol";
 
+// HISTORICAL (2026-07-11 fee change). Do not use for batch 3+: the partial-fill
+// CLOBSettlement calls CreditMarket.collectDebt, which only batch-3 CreditMarkets have,
+// so a CLOB change now means a full market redeploy (docs/partial-fills-plan.md §4).
+//
 // Redeploys CLOBSettlement against an already-deployed CreditMarket stack.
 // Needed because the trading-fee change (2026-07-11) altered CLOBSettlement's
 // constructor to (creditMarket, admin) and added setFeeConfig — the Base

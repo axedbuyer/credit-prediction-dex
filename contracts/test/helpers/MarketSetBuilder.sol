@@ -34,6 +34,7 @@ library MarketSetBuilder {
         s.no = new NOToken(admin, noSymbol, noSymbol);
         s.market = new CreditMarket(admin, usdc, address(s.yes), address(s.no), initialMark, 1 days);
         s.clob = new CLOBSettlement(address(s.market), admin);
+        s.clob.grantRole(s.clob.OPERATOR_ROLE(), admin);
         s.router = new OracleRouter(admin, address(s.market));
         s.engine = new LiquidationEngine(address(s.market), address(insuranceFund));
 

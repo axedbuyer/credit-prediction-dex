@@ -84,6 +84,8 @@ contract DeployLocal is Script {
         yesToken.grantRole(yesToken.CLOB_ROLE(), address(clob));
         noToken.grantRole(noToken.CLOB_ROLE(),   address(clob));
         market.grantRole(market.CLOB_ROLE(), address(clob));
+        // Only the settler may submit fills; default = the demo stack's settler (anvil #9).
+        clob.grantRole(clob.OPERATOR_ROLE(), vm.envOr("OPERATOR_ADDRESS", 0xa0Ee7A142d267C1f36714E4a8F75612F20a79720));
 
         market.grantRole(market.ORACLE_ROLE(), address(oracleRouter));
 
