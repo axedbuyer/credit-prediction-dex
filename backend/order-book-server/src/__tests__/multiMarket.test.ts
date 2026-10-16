@@ -44,6 +44,7 @@ const CONFIG: AppConfig = {
   yesTokenAddress: MSTR.yes, noTokenAddress: MSTR.no, clobSettlementAddress: MSTR.clob,
   chainId: CHAIN_ID,
   orderRateLimitMax: 0,
+  minOrderTokens: 0n, // fixtures use tiny sizes; the minimum has its own tests in server.test.ts
 }
 
 function sign(clob: Address, m: { tokenIn: Address; tokenOut: Address; amountIn: bigint; minAmountOut: bigint; nonce: bigint }) {

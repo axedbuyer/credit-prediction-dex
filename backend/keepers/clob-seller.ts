@@ -5,13 +5,14 @@
 // Option B) for the economics this file leans on.
 //
 // ── What `minAmountOut` means for a YES ask (gross, not net) ───────────────
-// contracts/src/CLOBSettlement.sol's `verifyAndSettle` checks
-// `takerOrder.amountIn < makerOrder.minAmountOut` (line ~202) BEFORE any fee
-// or funding-debt deduction — i.e. a YES ask's `minAmountOut` is a floor on
-// the buyer's GROSS `amountIn` (the "tradePrice"), not on the seller's net
-// proceeds. Unlike a NO sale (which gets an *additional* net-of-fee check,
-// `sellerProceeds < sellerMinOut`, because the NO buyer's amountIn is
-// fee-inflated), a YES sale has no such second check — net proceeds
+// contracts/src/CLOBSettlement.sol's `_price` checks a YES seller's floor —
+// tokens × minAmountOut / amountIn per fill — against the GROSS tradePrice,
+// BEFORE any fee or funding-debt deduction: a YES ask's `minAmountOut` is a
+// floor on the buyer's gross payment, not on the seller's net proceeds.
+// (Batch 3: orders fill in pieces at the resting order's price, so the same
+// floor applies pro rata to every partial fill.) Unlike a NO sale (whose
+// fee-free seller's floor is checked NET of the buyer-paid fee), a YES sale
+// has no such net check — net proceeds
 // (`tradePrice − fee − any fundingDebt owed`) can and normally will land
 // below `minAmountOut` by ~the trade fee. That's by design: YES buys are
 // fee-free, YES sells pay the fee out of proceeds, and the order book's own
@@ -30,11 +31,14 @@
 // floor = markWad × (10_000 − maxDiscountBps) / 10_000 (default 3% under
 // mark — the claim margin, so a fire-sale doesn't hand the margin back).
 // best YES bid ≥ floor  → post the full yesAmount at the best bid's price
-//                          ("crossed" — expected to fill now).
+//                          ("crossed" — fills now against that bid, any size;
+//                          whatever the bid can't take rests at that price
+//                          until the next sell() reprices it).
 // else                   → post the full yesAmount at markWad and let it
 //                          rest ("rested").
 // Before posting, look for our OWN resting YES asks (maker == account,
-// tokenIn == YES). If they already cover yesAmount exactly at a price
+// tokenIn == YES). If their REMAINING size (amountIn − filled) already covers
+// yesAmount exactly at a price
 // within a small tolerance of the current target and aren't expiring within
 // ~1h, do nothing ("unchanged"). Otherwise cancel them (so the total YES
 // offered never exceeds the balance) and post a fresh ask.
@@ -69,6 +73,7 @@ interface StoredOrder extends OrderWire {
   side: 'bid' | 'ask'
   price: number
   timestamp: number
+  filled?: string  // outcome tokens already filled (batch-3 partial fills); absent = '0'
 }
 
 interface OrderBookResponse {
@@ -154,7 +159,7 @@ interface BestBid {
 
 interface OwnAsk {
   id: string
-  amountIn: bigint
+  amountIn: bigint  // REMAINING tokens offered (size − filled)
   priceWad: bigint
   expiry: bigint
 }
@@ -171,10 +176,11 @@ export class ClobYesSeller implements IYesSeller {
   private readonly orderTtlSec: number
   private readonly fetchImpl: typeof fetch
 
-  // Time-based, monotonic within this process — mirrors scripts/demo/clob.ts's
-  // nextNonce(). Only needs to be unique per (maker, nonce); CLOBSettlement
-  // dedups per-maker so collisions across bots/processes don't matter.
-  private nonceCounter: bigint
+  // Millisecond-timestamp nonces, strictly increasing within this process —
+  // mirrors scripts/demo/clob.ts's nextNonce(). Must be unique per maker (the
+  // order-book-server dedups per maker + market), and must track wall-clock ms so
+  // CLOBSettlement.setMinNonce(Date.now()) would cancel everything signed so far.
+  private nonceCounter = 0n
 
   constructor(cfg: ClobYesSellerConfig) {
     this.orderBookUrl = cfg.orderBookUrl.replace(/\/+$/, '')
@@ -187,7 +193,6 @@ export class ClobYesSeller implements IYesSeller {
     this.maxDiscountBps = cfg.maxDiscountBps ?? DEFAULT_MAX_DISCOUNT_BPS
     this.orderTtlSec = cfg.orderTtlSec ?? DEFAULT_ORDER_TTL_SEC
     this.fetchImpl = cfg.fetchImpl ?? fetch
-    this.nonceCounter = BigInt(Date.now()) * 1_000_000n
   }
 
   /** Idempotent, never throws — see class doc comment for the full policy. */
@@ -334,9 +339,9 @@ export class ClobYesSeller implements IYesSeller {
       if (!isSameAddress(bid.tokenOut, this.yesTokenAddress)) continue
       const parsed = parseAmounts(bid)
       if (!parsed) continue
-      const { amountIn, minAmountOut, expiry } = parsed
+      const { amountIn, minAmountOut, expiry, filled } = parsed
       if (expiry <= nowSec) continue
-      if (minAmountOut <= 0n) continue
+      if (minAmountOut <= 0n || filled >= minAmountOut) continue  // nothing left to buy
       const priceWad = (amountIn * WAD) / minAmountOut
       if (!best || priceWad > best.priceWad) best = { priceWad, order: bid }
     }
@@ -353,11 +358,12 @@ export class ClobYesSeller implements IYesSeller {
       if (!isSameAddress(ask.tokenOut, this.usdcAddress)) continue
       const parsed = parseAmounts(ask)
       if (!parsed) continue
-      const { amountIn, minAmountOut, expiry } = parsed
+      const { amountIn, minAmountOut, expiry, filled } = parsed
       if (expiry <= nowSec) continue
-      if (amountIn <= 0n) continue
+      if (amountIn <= filled) continue  // fully filled
       const priceWad = (minAmountOut * WAD) / amountIn
-      out.push({ id: ask.id, amountIn, priceWad, expiry })
+      // Coverage counts what is still offered, not the original size.
+      out.push({ id: ask.id, amountIn: amountIn - filled, priceWad, expiry })
     }
     return out
   }
@@ -391,7 +397,8 @@ export class ClobYesSeller implements IYesSeller {
   }
 
   private nextNonce(): bigint {
-    this.nonceCounter += 1n
+    const now = BigInt(Date.now())
+    this.nonceCounter = now > this.nonceCounter ? now : this.nonceCounter + 1n
     return this.nonceCounter
   }
 
@@ -469,12 +476,13 @@ function isSameAddress(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase()
 }
 
-function parseAmounts(order: StoredOrder): { amountIn: bigint; minAmountOut: bigint; expiry: bigint } | null {
+function parseAmounts(order: StoredOrder): { amountIn: bigint; minAmountOut: bigint; expiry: bigint; filled: bigint } | null {
   try {
     return {
       amountIn: BigInt(order.amountIn),
       minAmountOut: BigInt(order.minAmountOut),
       expiry: BigInt(order.expiry),
+      filled: BigInt(order.filled ?? '0'),
     }
   } catch {
     return null

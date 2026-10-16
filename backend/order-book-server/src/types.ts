@@ -31,6 +31,10 @@ export interface StoredOrder extends OrderWire {
   side: Side
   price: number   // USDC-per-token float, used only for sorting
   timestamp: number
+  // Outcome tokens already filled on-chain (decimal string; absent = '0'). Written by
+  // the matching-engine settler after each confirmed partial fill. An order's size is
+  // minAmountOut for a bid and amountIn for an ask; remaining = size − filled.
+  filled?: string
 }
 
 export interface OrderBook {
@@ -78,6 +82,11 @@ export interface AppConfig {
   // 60_000 (60s). Parsed from ORDER_RATE_LIMIT_MAX / ORDER_RATE_LIMIT_WINDOW_MS.
   orderRateLimitMax?: number
   orderRateLimitWindowMs?: number
+  // Smallest order POST /order accepts, in outcome-token base units (6 decimals:
+  // 1_000_000 = 1 Upbet/Downbet). Owner decision B (docs/partial-fills-plan.md).
+  // Applies to an order's size when placed; a partly filled order's leftover may be
+  // smaller and still fills. Undefined ⇒ DEFAULT_MIN_ORDER_TOKENS. From MIN_ORDER_TOKENS.
+  minOrderTokens?: bigint
   // Fastify's `trustProxy` option (passed straight through to the Fastify()
   // constructor), parsed from TRUST_PROXY by src/rateLimit.ts#parseTrustProxy.
   // Governs how `request.ip` (what the rate limiter keys on) is derived from

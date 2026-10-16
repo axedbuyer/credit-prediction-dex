@@ -62,7 +62,8 @@ describe('MatchingEngine — multi-market', () => {
     engine.on('matched', (m, t) => matches.push([m, t]))
     await engine.runOnce()
     expect(fetchOrderBook.mock.calls.map(c => c[0])).toEqual(['mstr', 'turkey'])   // 'dead' inactive: skipped
-    expect(matches.map(([m, t]) => [m.id, t.id])).toEqual([['ma', 'mb'], ['ta', 'tb']])
+    // The EARLIER order is the maker (fixture timestamps increase with creation order: bid first).
+    expect(matches.map(([m, t]) => [m.id, t.id])).toEqual([['mb', 'ma'], ['tb', 'ta']])
   })
 
   it('never crosses orders from different markets (even if one book contains both)', async () => {
@@ -117,11 +118,11 @@ describe('MatchingEngine — multi-market', () => {
 
 // ─── Settler ──────────────────────────────────────────────────────────────────
 
-function revert(errorName: 'PositionFrozen' | 'NonceUsed') {
+function revert(errorName: 'PositionFrozen' | 'FillExceedsRemaining') {
   return new ContractFunctionRevertedError({
     abi: CLOB_SETTLEMENT_ABI,
     data: encodeErrorResult({ abi: CLOB_SETTLEMENT_ABI, errorName, args: [] }),
-    functionName: 'verifyAndSettle',
+    functionName: 'fillOrders',
   })
 }
 
@@ -138,7 +139,7 @@ async function settlerHarness(over: { estimate?: () => Promise<bigint>; read?: (
     writeContract: vi.fn(async () => '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' as const),
     account: { address: a(0xfeed) as `0x${string}` },
   }
-  const orderRemover: OrderRemover = { removeOrder: vi.fn(async () => {}) }
+  const orderRemover: OrderRemover = { removeOrder: vi.fn(async () => {}), setFilled: vi.fn(async () => {}) }
   new Settler(engine, { usdcAddress: USDC as `0x${string}`, directory: await directory() }, publicClient, walletClient, orderRemover)
   const flush = (ms = 30) => new Promise(r => setTimeout(r, ms))
   return { engine, publicClient, walletClient, orderRemover, flush }
@@ -147,8 +148,8 @@ async function settlerHarness(over: { estimate?: () => Promise<bigint>; read?: (
 describe('Settler — multi-market routing', () => {
   it("submits each pair to that market's own CLOBSettlement", async () => {
     const h = await settlerHarness()
-    h.engine.emit('matched', order('ma', 'mstr', M.mstr.yes, 'ask', 0.2), order('mb', 'mstr', M.mstr.yes, 'bid', 0.3))
-    h.engine.emit('matched', order('ta', 'turkey', M.turkey.no, 'ask', 0.2), order('tb', 'turkey', M.turkey.no, 'bid', 0.3))
+    h.engine.emit('matched', order('ma', 'mstr', M.mstr.yes, 'ask', 0.2), order('mb', 'mstr', M.mstr.yes, 'bid', 0.3), 1000n)
+    h.engine.emit('matched', order('ta', 'turkey', M.turkey.no, 'ask', 0.2), order('tb', 'turkey', M.turkey.no, 'bid', 0.3), 1000n)
     await h.flush()
     const targets = (h.walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls.map(c => c[0].address)
     expect(targets).toEqual([M.mstr.clob, M.turkey.clob])
@@ -163,7 +164,7 @@ describe('Settler — multi-market routing', () => {
       estimate: async () => { throw revert('PositionFrozen') },
       read: async ({ address }) => address === M.turkey.cm,
     })
-    h.engine.emit('matched', order('ta', 'turkey', M.turkey.yes, 'ask', 0.2), order('tb', 'turkey', M.turkey.yes, 'bid', 0.3))
+    h.engine.emit('matched', order('ta', 'turkey', M.turkey.yes, 'ask', 0.2), order('tb', 'turkey', M.turkey.yes, 'bid', 0.3), 1000n)
     await h.flush(2500)
     const reads = (h.publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls.map(c => c[0].address)
     expect(new Set(reads)).toEqual(new Set([M.turkey.cm]))
@@ -171,20 +172,20 @@ describe('Settler — multi-market routing', () => {
     expect(h.orderRemover.removeOrder).toHaveBeenCalledWith('tb', 'bid', 'turkey')
   })
 
-  it("NonceUsed reads usedNonces on that market's CLOB", async () => {
+  it("FillExceedsRemaining reads remaining() on that market's CLOB", async () => {
     const h = await settlerHarness({
-      estimate: async () => { throw revert('NonceUsed') },
-      read: async () => true,
+      estimate: async () => { throw revert('FillExceedsRemaining') },
+      read: async () => 0n,
     })
-    h.engine.emit('matched', order('ta', 'turkey', M.turkey.yes, 'ask', 0.2), order('tb', 'turkey', M.turkey.yes, 'bid', 0.3))
+    h.engine.emit('matched', order('ta', 'turkey', M.turkey.yes, 'ask', 0.2), order('tb', 'turkey', M.turkey.yes, 'bid', 0.3), 1000n)
     await h.flush(2500)
     const calls = (h.publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls.map(c => [c[0].address, c[0].functionName])
-    expect(calls).toEqual([[M.turkey.clob, 'usedNonces'], [M.turkey.clob, 'usedNonces']])
+    expect(calls).toEqual([[M.turkey.clob, 'remaining'], [M.turkey.clob, 'remaining']])
   })
 
   const refuse = async (maker: StoredOrder, taker: StoredOrder) => {
     const h = await settlerHarness()
-    h.engine.emit('matched', maker, taker)
+    h.engine.emit('matched', maker, taker, 1000n)
     await h.flush()
     expect(h.publicClient.estimateContractGas).not.toHaveBeenCalled()
     expect(h.walletClient.writeContract).not.toHaveBeenCalled()
@@ -235,7 +236,7 @@ describe('Settler — multi-market routing', () => {
 
   it('does not prune (releases) when the market is unknown to this directory', async () => {
     const h = await settlerHarness()
-    h.engine.emit('matched', order('a', 'ghost', M.mstr.yes, 'ask', 0.2), order('b', 'ghost', M.mstr.yes, 'bid', 0.3))
+    h.engine.emit('matched', order('a', 'ghost', M.mstr.yes, 'ask', 0.2), order('b', 'ghost', M.mstr.yes, 'bid', 0.3), 1000n)
     await h.flush()
     expect(h.walletClient.writeContract).not.toHaveBeenCalled()
     expect(h.orderRemover.removeOrder).not.toHaveBeenCalled()

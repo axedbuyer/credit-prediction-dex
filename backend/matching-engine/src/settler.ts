@@ -9,7 +9,7 @@ import type { MatchingEngine } from './engine'
 import type { MarketDirectory, MarketInfo } from './registry'
 import { orderMarketSlug } from './types'
 
-// ─── CLOBSettlement ABI (minimal — verifyAndSettle only) ─────────────────────
+// ─── CLOBSettlement ABI (minimal — fillOrders + remaining) ────────────────────
 
 const ORDER_COMPONENTS = [
   { name: 'maker',        type: 'address' },
@@ -21,9 +21,13 @@ const ORDER_COMPONENTS = [
   { name: 'nonce',        type: 'uint256' },
 ] as const
 
+const noArgError = (name: string) => ({ name, type: 'error' as const, inputs: [] })
+
 export const CLOB_SETTLEMENT_ABI = [
   {
-    name: 'verifyAndSettle',
+    // Batch 3: fills `tokens` YES/NO at the maker's limit price. OPERATOR_ROLE only —
+    // this settler's wallet.
+    name: 'fillOrders',
     type: 'function' as const,
     stateMutability: 'nonpayable' as const,
     inputs: [
@@ -31,51 +35,40 @@ export const CLOB_SETTLEMENT_ABI = [
       { name: 'makerSig',   type: 'bytes' },
       { name: 'takerOrder', type: 'tuple', components: ORDER_COMPONENTS },
       { name: 'takerSig',   type: 'bytes' },
+      { name: 'tokens',     type: 'uint256' },
     ],
     outputs: [],
   },
-  // v1b1: deterministic reverts — including these lets viem decode the
-  // revert data into a named error (ContractFunctionRevertedError.data.errorName)
-  // instead of an opaque "execution reverted". Both are terminal on retry:
-  // the seller's funding debit / the flagged freeze won't clear itself.
   {
-    name: 'FundingShortfall',
-    type: 'error' as const,
-    inputs: [],
-  },
-  {
-    name: 'PositionFrozen',
-    type: 'error' as const,
-    inputs: [],
-  },
-  // Order amounts are static, so a SlippageExceeded pair reverts identically
-  // forever too. The engine only pairs orders that pass the contract's gross
-  // whole-order checks, so this is the NO-sale net-of-fee check (or a fee-config
-  // mismatch) — neither order is at fault, so the pair is skipped, not pruned.
-  {
-    name: 'SlippageExceeded',
-    type: 'error' as const,
-    inputs: [],
-  },
-  // A prior verifyAndSettle call for one (or both) of these makers' nonces
-  // already landed on-chain — most commonly a duplicate resubmission of a
-  // pair whose original tx was broadcast, then confirmed, just before/while
-  // this process was killed and restarted (the in-memory pendingSettlement
-  // set doesn't survive a restart, so the same resting orders get re-matched
-  // and re-submitted). Deterministic forever for this exact pair — prune
-  // rather than wedge the level.
-  {
-    name: 'NonceUsed',
-    type: 'error' as const,
-    inputs: [],
-  },
-  {
-    name: 'usedNonces',
+    // Tokens still fillable: 0 once fully filled, cancelled (cancelOrders / setMinNonce)
+    // or expired. Used to resync `filled` after a restart and to prune dead orders.
+    name: 'remaining',
     type: 'function' as const,
     stateMutability: 'view' as const,
-    inputs: [{ name: 'maker', type: 'address' }, { name: 'nonce', type: 'uint256' }],
-    outputs: [{ name: '', type: 'bool' }],
+    inputs: [{ name: 'order', type: 'tuple', components: ORDER_COMPONENTS }],
+    outputs: [{ name: '', type: 'uint256' }],
   },
+  // Deterministic reverts — listing them lets viem decode the revert data into a
+  // named error (ContractFunctionRevertedError.data.errorName). Handling, per the
+  // order removal policy (root CLAUDE.md): only an order whose OWN state caused
+  // the revert is ever pruned.
+  //   FundingShortfall  — the YES seller's price can't cover its pro-rata carry
+  //                       debt + fee: prune the seller's order.
+  //   PositionFrozen    — a flagged party: prune that party's order.
+  //   SlippageExceeded / FillTooSmall — this PAIR can't fill (rounding at the
+  //                       maker price, NO net-of-fee check, or a 0-USDC dust fill):
+  //                       skip the pair, prune nothing.
+  //   FillExceedsRemaining / OrderInvalidated / OrderExpired / InvalidOrder — read
+  //                       remaining() per order: 0 → prune it (filled, cancelled or
+  //                       expired); otherwise resync `filled` and retry.
+  noArgError('FundingShortfall'),
+  noArgError('PositionFrozen'),
+  noArgError('SlippageExceeded'),
+  noArgError('FillTooSmall'),
+  noArgError('FillExceedsRemaining'),
+  noArgError('OrderInvalidated'),
+  noArgError('OrderExpired'),
+  noArgError('InvalidOrder'),
 ] as const
 
 // ─── CreditMarket ABI (minimal — claimable() read only) ──────────────────────
@@ -138,6 +131,9 @@ export interface SettlerConfig {
 export interface OrderRemover {
   // `market` = slug of the book the order rests in (namespaced Redis keys).
   removeOrder(orderId: string, side: 'bid' | 'ask', market: string): Promise<void>
+  // Records a partial fill: sets the stored order's `filled` (outcome tokens). Must
+  // not resurrect an order that was removed meanwhile (e.g. DELETE /order).
+  setFilled(orderId: string, filled: bigint): Promise<void>
 }
 
 // ─── NonceQueue: serialises concurrent settlements to prevent nonce conflicts ─
@@ -222,20 +218,20 @@ class Settler extends EventEmitter {
     private readonly orderRemover: OrderRemover,
   ) {
     super()
-    engine.on('matched', (maker, taker) => {
+    engine.on('matched', (maker, taker, tokens) => {
       // All settlements are serialised through the nonce queue —
       // only one writeContract call is in-flight at any time.
-      this.nonceQueue.enqueue(() => this.settle(maker, taker)).catch(err => {
+      this.nonceQueue.enqueue(() => this.settle(maker, taker, tokens)).catch(err => {
         console.error('[settler] unexpected queue error:', err)
       })
     })
   }
 
-  private async settle(maker: StoredOrder, taker: StoredOrder): Promise<void> {
+  private async settle(maker: StoredOrder, taker: StoredOrder, tokens: bigint): Promise<void> {
     this.currentSettlement = { makerId: maker.id, takerId: taker.id }
     try {
       const market = await this.validatePair(maker, taker)
-      if (market) await this.settleInner(maker, taker, market)
+      if (market) await this.settleInner(maker, taker, tokens, market)
     } finally {
       this.currentSettlement = null
     }
@@ -286,7 +282,7 @@ class Settler extends EventEmitter {
     return market
   }
 
-  private async settleInner(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
+  private async settleInner(maker: StoredOrder, taker: StoredOrder, tokens: bigint, market: MarketInfo): Promise<void> {
     const makerArg = toContractOrder(maker)
     const takerArg = toContractOrder(taker)
     const makerSig = maker.signature as `0x${string}`
@@ -301,8 +297,8 @@ class Settler extends EventEmitter {
         this.publicClient.estimateContractGas({
           address:      market.clobSettlement,
           abi:          CLOB_SETTLEMENT_ABI,
-          functionName: 'verifyAndSettle',
-          args:         [makerArg, makerSig, takerArg, takerSig],
+          functionName: 'fillOrders',
+          args:         [makerArg, makerSig, takerArg, takerSig, tokens],
           account,
         }),
       )
@@ -321,25 +317,26 @@ class Settler extends EventEmitter {
         await this.handlePositionFrozen(maker, taker, market)
         return
       }
-      if (revertName === 'SlippageExceeded') {
-        // Deterministic for THIS pair (amounts are static), but both orders are
-        // valid and may match someone else: never prune a user's order for an
-        // incompatibility between two orders. Remember the pair so the engine
-        // stops re-pairing it, and release both back into matching.
+      if (revertName === 'SlippageExceeded' || revertName === 'FillTooSmall') {
+        // Deterministic for THIS pair, but both orders are valid and may match
+        // someone else: never prune a user's order for an incompatibility between
+        // two orders. Remember the pair so the engine stops re-pairing it, and
+        // release both back into matching.
         console.warn(
-          `[settler] SlippageExceeded — pair can't settle as whole orders; ` +
-          `skipping it, both orders keep resting maker=${maker.id} taker=${taker.id}`,
+          `[settler] ${revertName} — this pair can't fill; skipping it, both orders ` +
+          `keep resting maker=${maker.id} taker=${taker.id}`,
         )
         this.engine.markIncompatible(maker.id, taker.id)
         this.engine.releasePendingSettlement(maker.id, taker.id)
         return
       }
-      if (revertName === 'NonceUsed') {
-        await this.handleNonceUsed(maker, taker, market)
+      if (revertName !== undefined) {
+        // FillExceedsRemaining / OrderInvalidated / OrderExpired / InvalidOrder
+        await this.handleRemaining(maker, taker, market, revertName)
         return
       }
 
-      // Not a deterministic revert (e.g. RPC hiccup, OrderExpired, an
+      // Not a deterministic revert (e.g. RPC hiccup, an
       // as-yet-unhandled revert reason) — no tx was ever submitted, so it's
       // safe to release both orders back into pendingSettlement immediately:
       // they stay in the book and are retried on the next poll cycle instead
@@ -356,8 +353,8 @@ class Settler extends EventEmitter {
       txHash = await this.walletClient.writeContract({
         address:      market.clobSettlement,
         abi:          CLOB_SETTLEMENT_ABI,
-        functionName: 'verifyAndSettle',
-        args:         [makerArg, makerSig, takerArg, takerSig],
+        functionName: 'fillOrders',
+        args:         [makerArg, makerSig, takerArg, takerSig, tokens],
         gas,
       })
     } catch (err) {
@@ -397,7 +394,7 @@ class Settler extends EventEmitter {
       // failure above, the receipt alone carries no revert reason (viem's
       // waitForTransactionReceipt doesn't decode it), and re-simulating here
       // would race a since-changed chain state (e.g. a nonce already
-      // consumed by this same reverted tx would surface as NonceUsed instead
+      // filled by this same reverted tx would surface as FillExceedsRemaining instead
       // of the original cause). Orders are re-matched next cycle, at which
       // point a deterministic revert will re-surface at the gas-estimation
       // step above and be pruned there; anything else falls into the
@@ -407,11 +404,9 @@ class Settler extends EventEmitter {
       return
     }
 
-    // ── 4. Remove both (now filled) orders from the order book store ──────────
-    await Promise.all([
-      this.orderRemover.removeOrder(maker.id, maker.side, orderMarketSlug(maker)),
-      this.orderRemover.removeOrder(taker.id, taker.side, orderMarketSlug(taker)),
-    ])
+    // ── 4. Record the fill: a fully filled order leaves the book; a partly
+    // filled one stays with its new `filled` and goes back into matching. ──────
+    await Promise.all([this.recordFill(maker, tokens), this.recordFill(taker, tokens)])
 
     this.bumpStat(orderMarketSlug(maker), 'settled', 1)
     console.log(`[settler] settled ${txHash}`)
@@ -492,60 +487,64 @@ class Settler extends EventEmitter {
     if (!takerFlagged) this.engine.releasePendingSettlement(taker.id)
   }
 
-  // ── NonceUsed: one (or both) orders' nonces already landed on-chain —
-  // almost always a duplicate resubmission after a restart (the in-memory
-  // pendingSettlement set doesn't survive a kill, so filled-but-not-yet-
-  // cleaned-up orders get re-matched). Such an order can never fill, so it
-  // must be pruned or it wedges the book forever. The revert carries no args,
-  // so read usedNonces for both and prune ONLY the spent one(s): removing an
-  // innocent counterparty's valid resting order would let anyone knock orders
-  // off the book by crossing them with a spent-nonce order. If the read fails
-  // or shows neither spent, prune nobody: release both for a retry.
-  private async handleNonceUsed(maker: StoredOrder, taker: StoredOrder, market: MarketInfo): Promise<void> {
-    let makerSpent: boolean
-    let takerSpent: boolean
+  // ── Order-state reverts (FillExceedsRemaining / OrderInvalidated / OrderExpired /
+  // InvalidOrder): read each order's on-chain remaining(). 0 means that order is
+  // done — filled (e.g. a fill that landed just before a restart, before Redis was
+  // updated), cancelled on-chain (cancelOrders / setMinNonce), or expired — so prune
+  // it: its own state, never the counterparty's. A non-zero remaining is resynced
+  // into Redis and the order released, so the next cycle sizes the fill correctly.
+  // If the read fails, prune nobody and release both for a retry.
+  private async handleRemaining(maker: StoredOrder, taker: StoredOrder, market: MarketInfo, reason: string): Promise<void> {
+    let makerLeft: bigint
+    let takerLeft: bigint
     try {
-      ;[makerSpent, takerSpent] = await Promise.all([
-        this.readUsedNonce(market, maker),
-        this.readUsedNonce(market, taker),
+      ;[makerLeft, takerLeft] = await Promise.all([
+        this.readRemaining(market, maker),
+        this.readRemaining(market, taker),
       ])
     } catch (err) {
       console.error(
-        `[settler] NonceUsed — usedNonces() read failed, releasing both for retry ` +
+        `[settler] ${reason} — remaining() read failed, releasing both for retry ` +
         `maker=${maker.id} taker=${taker.id}:`, err,
       )
       this.engine.releasePendingSettlement(maker.id, taker.id)
       return
     }
-
-    if (!makerSpent && !takerSpent) {
-      console.error(
-        `[settler] NonceUsed but usedNonces() reports neither nonce spent — ` +
-        `releasing both for retry maker=${maker.id} taker=${taker.id}`,
-      )
-      this.engine.releasePendingSettlement(maker.id, taker.id)
-      return
-    }
-
     console.error(
-      `[settler] NonceUsed — maker=${maker.id}(spent=${makerSpent}) ` +
-      `taker=${taker.id}(spent=${takerSpent})`,
+      `[settler] ${reason} — maker=${maker.id}(remaining=${makerLeft}) taker=${taker.id}(remaining=${takerLeft})`,
     )
-    const removals: Array<Promise<void>> = []
-    if (makerSpent) removals.push(this.pruneOrder(maker))
-    if (takerSpent) removals.push(this.pruneOrder(taker))
-    await Promise.all(removals)
-    if (!makerSpent) this.engine.releasePendingSettlement(maker.id)
-    if (!takerSpent) this.engine.releasePendingSettlement(taker.id)
+    await Promise.all([this.syncRemaining(maker, makerLeft), this.syncRemaining(taker, takerLeft)])
   }
 
-  private async readUsedNonce(market: MarketInfo, order: StoredOrder): Promise<boolean> {
+  private async syncRemaining(order: StoredOrder, left: bigint): Promise<void> {
+    if (left === 0n) {
+      await this.pruneOrder(order)
+      return
+    }
+    const synced = sizeOf(order) - left
+    if (synced !== BigInt(order.filled ?? '0')) await this.orderRemover.setFilled(order.id, synced)
+    this.engine.releasePendingSettlement(order.id)
+  }
+
+  // After a confirmed fill: remove a now fully filled order (a fill, not a prune);
+  // otherwise store its new `filled` and release it for its next fill.
+  private async recordFill(order: StoredOrder, tokens: bigint): Promise<void> {
+    const filled = BigInt(order.filled ?? '0') + tokens
+    if (filled >= sizeOf(order)) {
+      await this.orderRemover.removeOrder(order.id, order.side, orderMarketSlug(order))
+      return
+    }
+    await this.orderRemover.setFilled(order.id, filled)
+    this.engine.releasePendingSettlement(order.id)
+  }
+
+  private async readRemaining(market: MarketInfo, order: StoredOrder): Promise<bigint> {
     return this.publicClient.readContract({
       address:      market.clobSettlement,
       abi:          CLOB_SETTLEMENT_ABI,
-      functionName: 'usedNonces',
-      args:         [order.maker as Address, BigInt(order.nonce)],
-    }) as Promise<boolean>
+      functionName: 'remaining',
+      args:         [toContractOrder(order)],
+    }) as Promise<bigint>
   }
 
   private async readClaimable(market: MarketInfo, user: Address): Promise<boolean> {
@@ -607,7 +606,11 @@ class Settler extends EventEmitter {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-type DeterministicRevert = 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded' | 'NonceUsed'
+const DETERMINISTIC_REVERTS = [
+  'FundingShortfall', 'PositionFrozen', 'SlippageExceeded', 'FillTooSmall',
+  'FillExceedsRemaining', 'OrderInvalidated', 'OrderExpired', 'InvalidOrder',
+] as const
+type DeterministicRevert = typeof DETERMINISTIC_REVERTS[number]
 
 // Decodes a deterministic, non-retryable custom-error revert out of a thrown
 // estimateContractGas error. viem wraps on-chain reverts in a BaseError chain;
@@ -622,13 +625,9 @@ function decodeSettlementError(err: unknown): DeterministicRevert | undefined {
     e => e instanceof ContractFunctionRevertedError,
   ) as ContractFunctionRevertedError | null
   const errorName = revertError?.data?.errorName
-  if (
-    errorName === 'FundingShortfall' ||
-    errorName === 'PositionFrozen' ||
-    errorName === 'SlippageExceeded' ||
-    errorName === 'NonceUsed'
-  ) return errorName
-  return undefined
+  return (DETERMINISTIC_REVERTS as readonly string[]).includes(errorName ?? '')
+    ? errorName as DeterministicRevert
+    : undefined
 }
 
 // Returns a human-readable reason if the pair must NOT be submitted, else null.
@@ -680,6 +679,12 @@ function identifySellerOrder(
   return undefined
 }
 
+// An order's size in outcome tokens (CLOBSettlement.tokenQuantity): a bid wants
+// minAmountOut tokens, an ask offers amountIn tokens.
+function sizeOf(order: StoredOrder): bigint {
+  return BigInt(order.side === 'bid' ? order.minAmountOut : order.amountIn)
+}
+
 function toContractOrder(order: StoredOrder) {
   return {
     maker:        order.maker        as Address,
@@ -718,6 +723,8 @@ function sleep(ms: number): Promise<void> {
 interface MinimalRedis {
   del(...keys: string[]): Promise<unknown>
   zrem(key: string, ...members: string[]): Promise<unknown>
+  get(key: string): Promise<string | null>
+  set(key: string, value: string, flag: 'XX'): Promise<unknown>
 }
 
 export class RedisOrderRemover implements OrderRemover {
@@ -730,6 +737,16 @@ export class RedisOrderRemover implements OrderRemover {
       this.redis.del(`orders:${orderId}`),
       this.redis.zrem(sortedSet, orderId),
     ])
+  }
+
+  async setFilled(orderId: string, filled: bigint): Promise<void> {
+    const key = `orders:${orderId}`
+    const raw = await this.redis.get(key)
+    if (!raw) return  // removed meanwhile (cancelled / filled elsewhere) — don't resurrect
+    const order = JSON.parse(raw) as StoredOrder
+    order.filled = filled.toString()
+    // XX: only overwrite an existing key, so a concurrent DELETE /order still wins.
+    await this.redis.set(key, JSON.stringify(order), 'XX')
   }
 }
 

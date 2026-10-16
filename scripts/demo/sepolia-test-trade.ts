@@ -1,8 +1,8 @@
-// Post-cutover check (runbook §6): a fresh test wallet buys the whole best resting
-// Upbet (YES) ask on a market on the HOSTED order book, then waits for the hosted
-// matching engine to settle it on-chain. YES buys are fee-free. CLOBSettlement only
-// settles whole orders, so the buy mirrors the ask's exact amounts — a different-size
-// order would never be matched against it (both would just keep resting).
+// Post-cutover check (runbook §6): a test wallet buys 1 Upbet (YES) — the minimum
+// order size — at the best resting ask's price on the HOSTED order book, then waits
+// for the hosted matching engine to fill it on-chain. YES buys are fee-free. Batch 3
+// fills partially, so this takes 1 Upbet out of a larger ask and the rest keeps
+// resting (pass --qty <upbets> for more).
 //
 // Run:  set -a && . ../../contracts/.env && set +a && \
 //       ORDER_BOOK_URL=https://order-book-server-production-9bb6.up.railway.app \
@@ -50,10 +50,13 @@ async function main() {
   if (!yesAsks.length) throw new Error('no resting Upbet asks')
   const ask = yesAsks.reduce((b, a) =>
     Number(a.minAmountOut) / Number(a.amountIn) < Number(b.minAmountOut) / Number(b.amountIn) ? a : b)
-  const QTY = BigInt(ask.amountIn) // tokens the ask sells
-  const amountIn = BigInt(ask.minAmountOut) // USDC it asks for
-  const best = Number(amountIn) / Number(QTY)
-  console.log(`${slug}: taker ${account.address} buys ${Number(QTY) / 1e6} Upbet @ ${(best * 100).toFixed(2)}¢ (${Number(amountIn) / 1e6} USDC)`)
+  const q = process.argv.indexOf('--qty')
+  const QTY = BigInt(Math.round(Number(q >= 0 ? process.argv[q + 1] : '1') * 1e6)) // tokens to buy (6 dp)
+  // Pay up to the ask's own price: ceil(QTY × ask USDC / ask tokens). The fill runs at
+  // the resting ask's price anyway.
+  const amountIn = (QTY * BigInt(ask.minAmountOut) + BigInt(ask.amountIn) - 1n) / BigInt(ask.amountIn)
+  const best = Number(ask.minAmountOut) / Number(ask.amountIn)
+  console.log(`${slug}: taker ${account.address} buys ${Number(QTY) / 1e6} Upbet @ ${(best * 100).toFixed(2)}¢ (up to ${Number(amountIn) / 1e6} USDC)`)
 
   const allowance = await pub.readContract({ address: USDC, abi: ERC20_ABI, functionName: 'allowance', args: [account.address, m.clobSettlement] })
   if (allowance < amountIn) {

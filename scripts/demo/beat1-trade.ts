@@ -1,6 +1,6 @@
 // Task 3, Beat 1 — live trade: wallet A (Presenter) buys Upbet (YES) crossing
 // wallet B's best resting ask, via the real EIP-712 -> REST -> matching-engine
-// -> CLOBSettlement.verifyAndSettle path (same path the live UI uses).
+// -> CLOBSettlement.fillOrders path (same path the live UI uses).
 import { createPublicClient, http } from 'viem'
 import { A } from './wallets'
 import { signOrder, toWire, postOrder, nextNonce, waitUntil, getOrderBook } from './clob'
