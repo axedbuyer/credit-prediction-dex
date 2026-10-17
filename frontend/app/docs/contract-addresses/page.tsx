@@ -6,11 +6,11 @@ export const metadata: Metadata = {
 
 type Row = { name: string; address: `0x${string}`; note: string }
 
-// Batch-2 contracts (2026-10-15) — contracts/deployments/base-sepolia/{core.json,markets/*.json}.
+// Batch-3 contracts (2026-10-17) — contracts/deployments/base-sepolia/{core.json,markets/*.json}.
 const SHARED: Row[] = [
   {
     name: 'MarketRegistry',
-    address: '0xF650221216c76Bb775cd42211aFcb7a3c99f99A0',
+    address: '0xA7bcc124aF821388886012B905Ba8cF4B79469b1',
     note: 'list of markets and their contracts',
   },
   {
@@ -31,32 +31,32 @@ const MARKETS: { title: string; rows: Row[] }[] = [
     rows: [
       {
         name: 'CreditMarket',
-        address: '0x7AF29bd2fE6CF3bE904A538f2e0217285A7da94c',
+        address: '0x89e54F5e5C996174D9d2e52dbf90589b2f355d3A',
         note: 'collateral, carry ledger, mint/redeem/settle',
       },
       {
         name: 'CLOBSettlement',
-        address: '0x2311472C07F8b79a456F1F939895EaF6504E8B47',
+        address: '0x3dB1b2CD9B427C6E3ACdB73901125A4257D1b540',
         note: 'on-chain trade settlement (EIP-712 verifying contract)',
       },
       {
         name: 'Upbet (YES) token',
-        address: '0xdFDe0540b22EA7a5c047Fc4bCBf6072BE8143F0B',
+        address: '0x0Fe03367f54e93625Ef26C8D7759225b9Ca99197',
         note: '',
       },
       {
         name: 'Downbet (NO) token',
-        address: '0x0Eb7e95BbE7A5f39182C561dD4c2739bD6Cd24a2',
+        address: '0xfdBA4301169A6595FE651E303c50D50a59fb7EF0',
         note: '',
       },
       {
         name: 'LiquidationEngine',
-        address: '0x49360c6b8C36e5e1F71Ea6Ae60Bd968b71Ad0cbE',
+        address: '0xCc1b43ef6C26D3805af0cef6a5633aE9dB56364e',
         note: 'claims of flagged positions',
       },
       {
         name: 'OracleRouter',
-        address: '0x1FD6ca58479E0EAb455E930f6d4A7ff3C2d97111',
+        address: '0x352B2610d4820B31A7896a8571749BE07151ea60',
         note: 'credit-event attestations',
       },
     ],
@@ -66,32 +66,32 @@ const MARKETS: { title: string; rows: Row[] }[] = [
     rows: [
       {
         name: 'CreditMarket',
-        address: '0xcD60CDe83f631A82f369BF7D6C03b91D2b25f5A0',
+        address: '0xB6bc5e9FA166520536453FD667B79Fb705ca09b5',
         note: '',
       },
       {
         name: 'CLOBSettlement',
-        address: '0xF8959aB75C09F1b6E02d77e5b9eA50D337dfF280',
+        address: '0xc305b6d159F13075383242Bb0aA43f6Cbe8337fb',
         note: '',
       },
       {
         name: 'Upbet (YES) token',
-        address: '0x5f48ed2550D4C17FF337E010a352CE8B00Bd25e9',
+        address: '0xd747040C24FA0e2EE59a0ac64Bd013E4F329cF3c',
         note: '',
       },
       {
         name: 'Downbet (NO) token',
-        address: '0xb229940Ca48B8c6da6576eD4B524669F02cd3AB7',
+        address: '0xbFaF87A8A2dcf983be470B5e814AF0Be99E99Db5',
         note: '',
       },
       {
         name: 'LiquidationEngine',
-        address: '0x93eD293bF4cfa8dA851Cb736923bD44b71e65502',
+        address: '0xdEA3667904a6663A2b0848A92200E3109c4A2d1d',
         note: '',
       },
       {
         name: 'OracleRouter',
-        address: '0xD75220802b1A0FA9472c7E8D5Cf46B74217F6084',
+        address: '0x4Ac34d76B6895610B90cA793869dc9c1188b86B5',
         note: '',
       },
     ],
@@ -101,32 +101,32 @@ const MARKETS: { title: string; rows: Row[] }[] = [
     rows: [
       {
         name: 'CreditMarket',
-        address: '0xA891D433DEcEf0d35C40f93b86057411777Ca594',
+        address: '0xdD1202B077b9B89253006610F80DAD23B9fDf76e',
         note: '',
       },
       {
         name: 'CLOBSettlement',
-        address: '0xfd5a4CE143117c6Be8fb5363AD0fB265345fdC57',
+        address: '0xE2ce4475de6AD60Fd9DEC54925275CA646E71325',
         note: '',
       },
       {
         name: 'Upbet (YES) token',
-        address: '0xf20ee08ab83490f09A3CF0E93Be339B51636991d',
+        address: '0x22b817A301d19d4cb9a20714eBaDf1898B932E03',
         note: '',
       },
       {
         name: 'Downbet (NO) token',
-        address: '0x41495b3555Ac80783e90afE707e93c49a7a49e38',
+        address: '0x51324e748E171385Fa9b89CA07e06B81Ae093A5f',
         note: '',
       },
       {
         name: 'LiquidationEngine',
-        address: '0xb84b373F12a3a52dE3b3800b75ab2A4Af56570Db',
+        address: '0x787Ce5B37C8D1064c09B193c56C6CC88B3093737',
         note: '',
       },
       {
         name: 'OracleRouter',
-        address: '0x046B4F6D055B899Fa58254b6E23338c30d9b3917',
+        address: '0x470218241E1ACEdCe947B2e75dB8199038b3df96',
         note: '',
       },
     ],
