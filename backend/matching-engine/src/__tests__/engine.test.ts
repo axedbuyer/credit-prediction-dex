@@ -71,8 +71,8 @@ describe('YES market matching', () => {
   beforeEach(resetIds)
 
   it('matches a YES buy against a YES sell when bid price ≥ ask price', async () => {
-    const bid = yesBid('bid1', 0.30)
-    const ask = yesAsk('ask1', 0.25)
+    const ask = yesAsk('ask1', 0.25, 1_000)   // resting first
+    const bid = yesBid('bid1', 0.30, 2_000)
     const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
 
     const matches = collectMatches(engine)
@@ -80,8 +80,8 @@ describe('YES market matching', () => {
 
     expect(matches).toHaveLength(1)
     const [maker, taker] = matches[0]
-    expect(maker.id).toBe('ask1')  // ask = maker (sets the limit price)
-    expect(taker.id).toBe('bid1')  // bid = taker  (fills at ask price)
+    expect(maker.id).toBe('ask1')  // the EARLIER order is the maker (sets the price)
+    expect(taker.id).toBe('bid1')  // the later one takes it
   })
 
   it('does not match when bid price < ask price', async () => {
@@ -159,7 +159,9 @@ describe('price-time priority', () => {
     await engine.runOnce()
 
     expect(matches).toHaveLength(1)
-    expect(matches[0][1].id).toBe('bid1')  // earlier bid wins (taker slot)
+    // earlier bid wins; it is also older than the ask, so it is the maker here
+    expect(matches[0][0].id).toBe('bid1')
+    expect(matches[0][1].id).toBe('ask1')
   })
 
   it('matches best price first when asks have different prices', async () => {
@@ -243,83 +245,80 @@ function sizedBid(id: string, tokens: number, usdc: number, timestamp = Date.now
   })
 }
 
-describe('whole-order compatibility', () => {
+describe('partial fills (batch 3)', () => {
   beforeEach(resetIds)
   afterEach(() => { vi.useRealTimers() })
 
-  it('a smaller crossing bid does not match (it would revert SlippageExceeded) and both keep resting', async () => {
-    const ask = sizedAsk('ask4', 4, 0.96)   // sells 4 @ 24¢
-    const bid = sizedBid('bid1', 1, 0.24)   // buys 1 @ 24¢ — crosses, can't settle whole
+  const fills = (ms: Array<[StoredOrder, StoredOrder, bigint]>) => ms.map(([m, t, q]) => [m.id, t.id, q])
+
+  function collectFills(engine: MatchingEngine): Array<[StoredOrder, StoredOrder, bigint]> {
+    const out: Array<[StoredOrder, StoredOrder, bigint]> = []
+    engine.on('matched', (maker, taker, tokens) => out.push([maker, taker, tokens]))
+    return out
+  }
+
+  it('a smaller crossing bid fills PART of a resting ask; the ask (older) is the maker', async () => {
+    const ask = sizedAsk('ask4', 4, 0.96, 1)   // sells 4 @ 24¢, resting first
+    const bid = sizedBid('bid1', 1, 0.24, 2)   // buys 1 @ 24¢
     const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
-    const matches = collectMatches(engine)
-
+    const out = collectFills(engine)
     await engine.runOnce()
-    await engine.runOnce()
-
-    expect(matches).toHaveLength(0)
+    expect(fills(out)).toEqual([['ask4', 'bid1', 1_000_000n]])
   })
 
-  it('a larger crossing bid does not match a smaller ask', async () => {
-    const ask = sizedAsk('ask1', 1, 0.24)
-    const bid = sizedBid('bid4', 4, 0.96)
+  it('a larger crossing bid fills the whole smaller ask; the older bid is the maker', async () => {
+    const bid = sizedBid('bid4', 4, 0.96, 1)
+    const ask = sizedAsk('ask1', 1, 0.24, 2)
     const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
-    const matches = collectMatches(engine)
-
+    const out = collectFills(engine)
     await engine.runOnce()
-
-    expect(matches).toHaveLength(0)
+    expect(fills(out)).toEqual([['bid4', 'ask1', 1_000_000n]])
   })
 
-  it('the griefing case: a tiny bid leaves the resting ask matchable by a whole-size bid', async () => {
+  it('uses remaining size (size − filled), and skips fully filled orders', async () => {
+    const ask = { ...sizedAsk('ask4', 4, 0.96, 1), filled: '3000000' }   // 1 left
+    const done = { ...sizedAsk('done', 2, 0.40, 1), filled: '2000000' }  // nothing left
+    const bid = sizedBid('bid4', 4, 0.96, 2)
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [done, ask] }), CONFIG)
+    const out = collectFills(engine)
+    await engine.runOnce()
+    expect(fills(out)).toEqual([['ask4', 'bid4', 1_000_000n]])
+  })
+
+  it('one fill per order per cycle: a big bid takes the best ask now, the next ask after the fill is recorded', async () => {
+    const a1 = sizedAsk('a1', 1, 0.22, 1)
+    const a2 = sizedAsk('a2', 1, 0.23, 2)
+    const bid = sizedBid('bid', 2, 0.48, 3)
+    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [a1, a2] }), CONFIG)
+    const out = collectFills(engine)
+    await engine.runOnce()
+    expect(fills(out)).toEqual([['a1', 'bid', 1_000_000n]])
+  })
+
+  it('the griefing case is gone: a tiny bid takes only its own size and the rest of the ask stays', async () => {
     const ask = sizedAsk('ask4', 4, 0.96, 1)
     const tiny = sizedBid('tiny', 1, 0.24, 2)
-    const whole = sizedBid('whole', 4, 0.96, 3)
-    const engine = new MatchingEngine(staticClient({ bids: [tiny, whole], asks: [ask] }), CONFIG)
-    const matches = collectMatches(engine)
-
+    const engine = new MatchingEngine(staticClient({ bids: [tiny], asks: [ask] }), CONFIG)
+    const out = collectFills(engine)
     await engine.runOnce()
-
-    expect(matches.map(([m, t]) => [m.id, t.id])).toEqual([['ask4', 'whole']])
+    expect(fills(out)).toEqual([['ask4', 'tiny', 1_000_000n]])
   })
 
-  it('skips an incompatible best ask for the next compatible one', async () => {
-    const big = sizedAsk('big', 4, 0.80)     // 20¢, wrong size
-    const fit = sizedAsk('fit', 1, 0.22)     // 22¢, fits
-    const bid = sizedBid('bid1', 1, 0.24)
-    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [big, fit] }), CONFIG)
-    const matches = collectMatches(engine)
-
-    await engine.runOnce()
-
-    expect(matches.map(([m, t]) => [m.id, t.id])).toEqual([['fit', 'bid1']])
-  })
-
-  it('matches when the seller offers at least what the buyer wants and the buyer pays at least what the seller wants', async () => {
-    const ask = sizedAsk('ask5', 5, 1.00)    // sells 5 for >= $1.00
-    const bid = sizedBid('bid4', 4, 1.00)    // pays $1.00 for >= 4 — gets all 5
-    const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
-    const matches = collectMatches(engine)
-
-    await engine.runOnce()
-
-    expect(matches).toHaveLength(1)
-  })
-
-  it('markIncompatible: the pair is skipped (both stay matchable elsewhere) until the TTL lapses', async () => {
+  it('markIncompatible: the pair (in either role) is skipped until the TTL lapses', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
-    const ask = sizedAsk('ask', 1, 0.24)
-    const bid = sizedBid('bid', 1, 0.24)
+    const ask = sizedAsk('ask', 1, 0.24, 1)
+    const bid = sizedBid('bid', 1, 0.24, 2)
     const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
-    const matches = collectMatches(engine)
+    const out = collectFills(engine)
 
-    engine.markIncompatible('ask', 'bid')
+    engine.markIncompatible('bid', 'ask')   // reversed roles still count
     await engine.runOnce()
-    expect(matches).toHaveLength(0)
+    expect(out).toHaveLength(0)
 
     vi.setSystemTime(1_000_000 + 10 * 60_000 + 1)
     await engine.runOnce()
-    expect(matches).toHaveLength(1)
+    expect(out).toHaveLength(1)
   })
 })
 

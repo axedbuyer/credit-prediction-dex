@@ -13,6 +13,7 @@ interface ICreditMarket {
     function yesToken() external view returns (address);
     function noToken() external view returns (address);
     function claimable(address user) external view returns (bool);
+    function fundingDebt(address user) external view returns (uint256);
 
     // v1b1-2b-2: unified per-user funding settlement (no pool, no tradePrice
     // coupling). Nets the user's YES-side debit against their NO-side credit over
@@ -21,22 +22,30 @@ interface ICreditMarket {
     // reported but NOT pulled — the caller decides whether/how to collect it).
     function settleFunding(address user) external returns (int256 delta);
 
-    // CLOB_ROLE: clears fundingDebt[user] after the caller has routed the
-    // equivalent USDC into collateral (e.g. the YES-sale seller-debit path below).
-    function markDebtCollected(address user) external;
+    // CLOB_ROLE: reduces fundingDebt[user] by `amount` after the caller has routed
+    // that much USDC into collateral (the YES-sale pro-rata debt path below).
+    function collectDebt(address user, uint256 amount) external;
 }
 
 contract CLOBSettlement is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    // Batch 3 (docs/partial-fills-plan.md): orders fill in pieces. Each fill moves
+    // `tokens` YES/NO at the MAKER's (resting order's) limit price; every order's
+    // progress is tracked on-chain in token units, so an order can fill against any
+    // number of counterparties until it is used up, cancelled, or expired. Only
+    // OPERATOR_ROLE (the matching engine's settler) may submit fills, so nobody else
+    // picks fill sizes, and an off-chain cancel is binding in practice; cancelOrders /
+    // setMinNonce are the on-chain guarantee that doesn't depend on the operator.
+
     struct Order {
         address maker;
         address tokenIn;      // USDC when buying tokens; YES/NO when selling
         address tokenOut;     // YES/NO when buying tokens; USDC when selling
-        uint256 amountIn;
-        uint256 minAmountOut; // slippage guard / encodes limit price
+        uint256 amountIn;     // seller: tokens offered; buyer: USDC it will pay at most
+        uint256 minAmountOut; // seller: USDC floor; buyer: tokens wanted (with amountIn, the limit price)
         uint256 expiry;
-        uint256 nonce;
+        uint256 nonce;        // unique per maker (salt); must be >= minNonce[maker]
     }
 
     bytes32 public constant ORDER_TYPEHASH = keccak256(
@@ -44,13 +53,22 @@ contract CLOBSettlement is AccessControl, ReentrancyGuard {
         ",uint256 amountIn,uint256 minAmountOut,uint256 expiry,uint256 nonce)"
     );
 
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+
     address public immutable creditMarket;
     address public immutable usdc;
     address public immutable yesToken;
     address public immutable noToken;
     bytes32 public immutable DOMAIN_SEPARATOR;
 
-    mapping(address => mapping(uint256 => bool)) public usedNonces;
+    // Tokens filled per order digest (hashOrder). A cancelled order is marked fully
+    // filled. remaining = tokenQuantity − filled.
+    mapping(bytes32 => uint256) public filled;
+    // USDC a BUY order has paid so far (its gross amountIn is a hard cap across all
+    // of its fills — the contract never pulls more than a buyer signed for).
+    mapping(bytes32 => uint256) public spent;
+    // "Cancel everything": an order is void if its nonce < minNonce[maker].
+    mapping(address => uint256) public minNonce;
 
     // ── trading fee ──────────────────────────────────────────────────────────
     // Charged only on the carry-earning side of a trade: the YES seller and the
@@ -67,14 +85,19 @@ contract CLOBSettlement is AccessControl, ReentrancyGuard {
     address public teamWallet;
     address public insuranceFund;
 
-    event OrderSettled(
-        address indexed maker,
-        address indexed taker,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 amountOut
+    event OrderFilled(
+        bytes32 indexed makerOrderHash,
+        bytes32 indexed takerOrderHash,
+        address indexed seller,
+        address buyer,
+        address token,       // the YES or NO token traded
+        uint256 tokens,      // tokens moved in this fill
+        uint256 tradePrice,  // buyer's gross USDC for this fill
+        uint256 fee,
+        uint256 debtCollected
     );
+    event OrderCancelled(bytes32 indexed orderHash, address indexed maker);
+    event MinNonceUpdated(address indexed maker, uint256 minNonce);
 
     event FeeConfigUpdated(
         uint256 feeBps,
@@ -92,11 +115,17 @@ contract CLOBSettlement is AccessControl, ReentrancyGuard {
 
     error InvalidSignature();
     error OrderExpired();
-    error NonceUsed();
+    error OrderInvalidated();     // nonce below the maker's minNonce
+    error InvalidOrder();         // zero token size
+    error FillExceedsRemaining(); // also: fully filled or cancelled
+    error FillTooSmall();         // zero tokens, or the fill prices at 0 USDC
     error MismatchedPair();
+    error InvalidTokenPair();
     error SlippageExceeded();
     error FundingShortfall();
     error PositionFrozen();
+    error NotOrderMaker();
+    error NonceNotIncreasing();
     error ZeroAddress();
     error FeeConfigInvalid();
 
@@ -172,141 +201,214 @@ contract CLOBSettlement is AccessControl, ReentrancyGuard {
         );
     }
 
-    function verifyAndSettle(
+    // An order's size in outcome tokens: a seller offers amountIn tokens, a buyer
+    // wants minAmountOut tokens. Fills are counted in these units for both sides.
+    function tokenQuantity(Order calldata order) public view returns (uint256) {
+        return order.tokenIn == usdc ? order.minAmountOut : order.amountIn;
+    }
+
+    // Tokens still fillable: 0 once fully filled, cancelled (per order or via
+    // minNonce), expired, or — for a buy — once its USDC budget is used up (rounding
+    // can exhaust it a few units before the last tokens). Off-chain readers use this
+    // to resync after a restart and to recognise a finished order.
+    function remaining(Order calldata order) external view returns (uint256) {
+        if (block.timestamp > order.expiry || order.nonce < minNonce[order.maker]) return 0;
+        bytes32 h = hashOrder(order);
+        if (order.tokenIn == usdc && spent[h] >= order.amountIn) return 0;
+        uint256 qty = tokenQuantity(order);
+        uint256 f = filled[h];
+        return f >= qty ? 0 : qty - f;
+    }
+
+    // ── cancellation (maker only) ─────────────────────────────────────────────
+
+    function cancelOrders(Order[] calldata orders) external {
+        for (uint256 i = 0; i < orders.length; i++) {
+            if (orders[i].maker != msg.sender) revert NotOrderMaker();
+            bytes32 h = hashOrder(orders[i]);
+            filled[h] = tokenQuantity(orders[i]);
+            emit OrderCancelled(h, msg.sender);
+        }
+    }
+
+    // Voids every order of msg.sender with nonce < newMinNonce. Off-chain signers use
+    // millisecond-timestamp nonces, so passing "now" cancels everything signed so far.
+    function setMinNonce(uint256 newMinNonce) external {
+        if (newMinNonce <= minNonce[msg.sender]) revert NonceNotIncreasing();
+        minNonce[msg.sender] = newMinNonce;
+        emit MinNonceUpdated(msg.sender, newMinNonce);
+    }
+
+    // ── fills ─────────────────────────────────────────────────────────────────
+
+    // Trade context lives in one memory struct (a single stack slot) — loose locals
+    // blow solc 0.8.24's stack in this function.
+    struct Fill {
+        bytes32 makerHash;
+        bytes32 takerHash;
+        address seller;
+        address buyer;
+        bool    makerIsSeller;
+        bool    isYesSale;
+        uint256 tokens;
+        uint256 tradePrice;      // buyer's gross USDC leg
+        uint256 fee;
+        uint256 debtShare;       // YES sale: seller's carry debt collected by this fill
+        uint256 sellerProceeds;
+        bytes32 buyHash;
+    }
+
+    /// Fill `tokens` YES/NO between a resting `makerOrder` and a crossing
+    /// `takerOrder`, at the maker's limit price. OPERATOR_ROLE only.
+    function fillOrders(
         Order calldata makerOrder,
         bytes calldata makerSig,
         Order calldata takerOrder,
-        bytes calldata takerSig
-    ) external nonReentrant {
-        // ── signature verification ───────────────────────────────────────────
-        if (ECDSA.recover(hashOrder(makerOrder), makerSig) != makerOrder.maker) {
-            revert InvalidSignature();
+        bytes calldata takerSig,
+        uint256 tokens
+    ) external nonReentrant onlyRole(OPERATOR_ROLE) {
+        if (tokens == 0) revert FillTooSmall();
+        Fill memory f;
+        f.tokens = tokens;
+        f.makerHash = _checkOrder(makerOrder, makerSig, tokens);
+        f.takerHash = _checkOrder(takerOrder, takerSig, tokens);
+
+        // ── pair: one leg USDC, the other THIS market's YES or NO, opposite sides ──
+        if (makerOrder.tokenIn != takerOrder.tokenOut || makerOrder.tokenOut != takerOrder.tokenIn) {
+            revert MismatchedPair();
         }
-        if (ECDSA.recover(hashOrder(takerOrder), takerSig) != takerOrder.maker) {
-            revert InvalidSignature();
+        f.makerIsSeller = makerOrder.tokenOut == usdc;
+        address token = f.makerIsSeller ? makerOrder.tokenIn : makerOrder.tokenOut;
+        if ((!f.makerIsSeller && makerOrder.tokenIn != usdc) || (token != yesToken && token != noToken)) {
+            revert InvalidTokenPair();
         }
+        f.isYesSale = token == yesToken;
+        Order calldata sell = f.makerIsSeller ? makerOrder : takerOrder;
+        Order calldata buy  = f.makerIsSeller ? takerOrder : makerOrder;
+        f.seller = sell.maker;
+        f.buyer  = buy.maker;
+        f.buyHash = f.makerIsSeller ? f.takerHash : f.makerHash;
 
-        // ── order validity ───────────────────────────────────────────────────
-        if (block.timestamp > makerOrder.expiry) revert OrderExpired();
-        if (block.timestamp > takerOrder.expiry) revert OrderExpired();
+        _price(f, sell, buy);
 
-        // ── nonce freshness ──────────────────────────────────────────────────
-        if (usedNonces[makerOrder.maker][makerOrder.nonce]) revert NonceUsed();
-        if (usedNonces[takerOrder.maker][takerOrder.nonce]) revert NonceUsed();
+        // ── record the fill (checks-effects before interactions) ─────────────
+        filled[f.makerHash] += tokens;
+        filled[f.takerHash] += tokens;
+        spent[f.buyHash] += f.tradePrice;
 
-        // ── pair compatibility ───────────────────────────────────────────────
-        if (
-            makerOrder.tokenIn  != takerOrder.tokenOut ||
-            makerOrder.tokenOut != takerOrder.tokenIn
-        ) revert MismatchedPair();
-
-        // ── slippage guards ──────────────────────────────────────────────────
-        if (takerOrder.amountIn < makerOrder.minAmountOut) revert SlippageExceeded();
-        if (makerOrder.amountIn < takerOrder.minAmountOut) revert SlippageExceeded();
-
-        // ── mark nonces spent (checks-effects before interactions) ───────────
-        usedNonces[makerOrder.maker][makerOrder.nonce] = true;
-        usedNonces[takerOrder.maker][takerOrder.nonce] = true;
-
-        _settleFundingAndSwap(makerOrder, takerOrder);
+        _settleFundingAndSwap(f);
     }
 
-    // Split out of verifyAndSettle to give the funding-settlement + swap logic its
-    // own stack frame (the combined function hits "stack too deep" under solc 0.8.24).
-    // Trade context lives in one memory struct (a single stack slot) — with the
-    // fee fields added, loose locals here blow solc 0.8.24's stack again even
-    // after the frame split.
-    struct TradeCtx {
-        address seller;
-        address buyer;
-        bool    isYesSale;
-        uint256 amount;          // tokens sold
-        uint256 tradePrice;      // buyer's gross USDC leg
-        uint256 sellerMinOut;    // seller's signed limit (needed net-of-fee on NO sales)
-        uint256 fee;
-        uint256 sellerProceeds;
-        uint256 debtToCollateral;
+    // Signature, expiry, nonce floor, a non-zero token size, and room for `tokens` more.
+    // (A seller's minAmountOut may be 0: "sell at any price".)
+    function _checkOrder(Order calldata o, bytes calldata sig, uint256 tokens) private view returns (bytes32 h) {
+        h = hashOrder(o);
+        if (ECDSA.recover(h, sig) != o.maker) revert InvalidSignature();
+        if (block.timestamp > o.expiry) revert OrderExpired();
+        if (o.nonce < minNonce[o.maker]) revert OrderInvalidated();
+        uint256 qty = tokenQuantity(o);
+        if (qty == 0) revert InvalidOrder();
+        if (filled[h] + tokens > qty) revert FillExceedsRemaining();
     }
 
-    function _settleFundingAndSwap(Order calldata makerOrder, Order calldata takerOrder) private {
-        // ── identify seller/buyer and sale type ──────────────────────────────
-        // The seller is whichever party sends YES/NO tokens and receives USDC.
-        bool makerIsSeller = makerOrder.tokenIn == yesToken || makerOrder.tokenIn == noToken;
+    // Prices the fill. What leaves a wallet is capped exactly; rounding (< 1 USDC unit,
+    // 1e-6 USDC, per fill) only ever lands on what a party receives — as in
+    // Polymarket's CTF Exchange.
+    //   buyer cap: min(ceil(tokens × amountIn / minAmountOut), amountIn − spent) — its
+    //     limit price for this fill, and never more than its signed amountIn in total
+    //     (gross: a NO buyer's amountIn already includes the fee).
+    //   price: the MAKER's limit — a resting seller's floor (YES: on the gross; NO, which
+    //     is fee-free: the gross that nets it after the buyer-paid fee), or a resting
+    //     buyer's cap — rounded in the maker's favour, then clamped to the buyer cap.
+    //   seller floor: a YES seller's minAmountOut floors the GROSS tradePrice (fee and
+    //     carry debt come out after); a NO seller's floors the NET it receives
+    //     (tradePrice − fee). Checked against floor(tokens × minAmountOut / amountIn).
+    function _price(Fill memory f, Order calldata sell, Order calldata buy) private view {
+        uint256 q = f.tokens;
+        uint256 budget = buy.amountIn - spent[f.buyHash]; // spent ≤ amountIn always
+        uint256 buyerCap = _ceilDiv(q * buy.amountIn, buy.minAmountOut);
+        if (buyerCap > budget) buyerCap = budget;
 
-        TradeCtx memory t;
-        t.seller       = makerIsSeller ? makerOrder.maker : takerOrder.maker;
-        t.buyer        = makerIsSeller ? takerOrder.maker : makerOrder.maker;
-        t.isYesSale    = (makerIsSeller ? makerOrder.tokenIn : takerOrder.tokenIn) == yesToken;
-        t.amount       = makerIsSeller ? makerOrder.amountIn : takerOrder.amountIn;
-        t.tradePrice   = makerIsSeller ? takerOrder.amountIn : makerOrder.amountIn;
-        t.sellerMinOut = makerIsSeller ? makerOrder.minAmountOut : takerOrder.minAmountOut;
+        uint256 makerPrice;
+        if (f.makerIsSeller) {
+            uint256 floorUsdc = _ceilDiv(q * sell.minAmountOut, sell.amountIn);
+            makerPrice = f.isYesSale ? floorUsdc : _minGrossForNet(floorUsdc, q);
+        } else {
+            makerPrice = buyerCap;
+        }
+        f.tradePrice = makerPrice < buyerCap ? makerPrice : buyerCap;
+        if (f.tradePrice == 0) revert FillTooSmall();
+        f.fee = tradeFee(q, f.tradePrice);
 
+        uint256 sellerBasis = f.isYesSale ? f.tradePrice : f.tradePrice - f.fee;
+        if (sellerBasis < q * sell.minAmountOut / sell.amountIn) revert SlippageExceeded();
+    }
+
+    function _settleFundingAndSwap(Fill memory f) private {
         // A flagged position is fully locked until claimed, cured, or settled
         // post-credit-event: no CLOB trade may move tokens in/out of it either side.
-        _requireNotFrozen(t.seller, t.buyer);
+        _requireNotFrozen(f.seller, f.buyer);
 
-        // ── funding settlement (v1b1-2b-2: per-user, no pool, no tradePrice
-        // coupling) — BEFORE the swap, on each party's full pre-trade balance.
-        // A credit (positive delta) is already paid out directly by settleFunding;
-        // a debit (negative delta) is only reported here, never pulled.
-        int256 sellerDelta = ICreditMarket(creditMarket).settleFunding(t.seller);
-        ICreditMarket(creditMarket).settleFunding(t.buyer);
-
-        // ── trading fee ──────────────────────────────────────────────────────
-        // Fee-paying side is whoever moves toward the carry-earning side: the
-        // YES seller (fee joins the funding debit as a deduction from proceeds)
-        // or the NO buyer (fee rides inside their signed amountIn — the contract
-        // can never pull USDC beyond what a party signed for).
-        t.fee = tradeFee(t.amount, t.tradePrice);
+        // ── funding settlement — BEFORE the swap, on each party's full pre-trade
+        // balance. A credit is paid out directly by settleFunding; a debit is only
+        // recorded in fundingDebt, never pulled here except as below.
+        ICreditMarket(creditMarket).settleFunding(f.seller);
+        ICreditMarket(creditMarket).settleFunding(f.buyer);
 
         // ── seller proceeds ───────────────────────────────────────────────────
-        // tradePrice is pure token value — funding never rides the swap leg except
-        // for the one case where the seller's own settleFunding call left them with
-        // an outstanding YES-side debit, which must be collected from this trade's
-        // proceeds now (Option B): the debit stays in collateral, funded by the
-        // buyer's payment, and the sale reverts (position fully unchanged) if the
-        // trade doesn't clear high enough to cover it. The fee extends that
-        // safeguard: a YES sale that can't cover debit + fee reverts the same way.
-        t.sellerProceeds = t.tradePrice - t.fee;
-        if (t.isYesSale) {
-            uint256 owed = sellerDelta < 0 ? uint256(-sellerDelta) : 0;
-            if (t.tradePrice < owed + t.fee) revert FundingShortfall();
-            t.sellerProceeds   = t.tradePrice - owed - t.fee;
-            t.debtToCollateral = owed;
-        } else if (t.fee > 0) {
-            // NO sale: the buyer pays the fee, so the fee-free seller's limit
-            // must be honored NET of it — the gross check in verifyAndSettle is
-            // necessary but not sufficient here.
-            if (t.sellerProceeds < t.sellerMinOut) revert SlippageExceeded();
+        // YES sale (Option B, pro-rata per fill): the seller's carry debt is
+        // collected in proportion to the share of their YES this fill sells —
+        // debtShare = fundingDebt × tokens / YES held (rounded down; selling the
+        // last YES collects all of it). The debt per remaining YES is unchanged, so
+        // a partial sale never moves the seller's seizure trigger. A fill that can't
+        // cover debtShare + fee reverts FundingShortfall with the position unchanged
+        // (never liquidated by a sale attempt). Nothing is forgiven: the rest stays
+        // in fundingDebt until a later fill, redeem, settleYES, cure or claim.
+        f.sellerProceeds = f.tradePrice - f.fee;
+        if (f.isYesSale) {
+            uint256 debt = ICreditMarket(creditMarket).fundingDebt(f.seller);
+            if (debt > 0) {
+                uint256 held = IERC20(yesToken).balanceOf(f.seller);
+                f.debtShare = f.tokens >= held ? debt : debt * f.tokens / held;
+            }
+            if (f.tradePrice < f.debtShare + f.fee) revert FundingShortfall();
+            f.sellerProceeds = f.tradePrice - f.debtShare - f.fee;
         }
 
         // ── atomic swap ──────────────────────────────────────────────────────
-        // Token leg: seller's tokens move to the buyer.
-        IERC20(t.isYesSale ? yesToken : noToken).safeTransferFrom(t.seller, t.buyer, t.amount);
-
-        // USDC leg: buyer pays sellerProceeds to the seller; any collected debit
-        // routes to CreditMarket (collateral) instead of the seller.
-        IERC20(usdc).safeTransferFrom(t.buyer, t.seller, t.sellerProceeds);
-        if (t.debtToCollateral > 0) {
-            IERC20(usdc).safeTransferFrom(t.buyer, creditMarket, t.debtToCollateral);
-            // The debt amount now sits in collateral — clear the seller's ledger entry.
-            // (Buyer's debit, and a NO-sale seller's debit, are intentionally left
-            // uncollected here: they persist in fundingDebt and are collected later
-            // at redeem/settleYES/a future YES sale/liquidation.)
-            ICreditMarket(creditMarket).markDebtCollected(t.seller);
+        IERC20(f.isYesSale ? yesToken : noToken).safeTransferFrom(f.seller, f.buyer, f.tokens);
+        IERC20(usdc).safeTransferFrom(f.buyer, f.seller, f.sellerProceeds);
+        if (f.debtShare > 0) {
+            // The debt share now sits in collateral — reduce the seller's ledger by it.
+            // (A buyer's debit, and a NO-sale seller's debit, stay in fundingDebt and
+            // are collected later at redeem/settleYES/a future YES sale/liquidation.)
+            IERC20(usdc).safeTransferFrom(f.buyer, creditMarket, f.debtShare);
+            ICreditMarket(creditMarket).collectDebt(f.seller, f.debtShare);
         }
-        if (t.fee > 0) {
-            _collectFee(t.buyer, t.isYesSale ? t.seller : t.buyer, t.isYesSale, t.fee);
+        if (f.fee > 0) {
+            _collectFee(f.buyer, f.isYesSale ? f.seller : f.buyer, f.isYesSale, f.fee);
         }
 
-        emit OrderSettled(
-            makerOrder.maker,
-            takerOrder.maker,
-            makerOrder.tokenIn,
-            makerOrder.tokenOut,
-            makerOrder.amountIn,
-            takerOrder.amountIn
+        emit OrderFilled(
+            f.makerHash, f.takerHash, f.seller, f.buyer,
+            f.isYesSale ? yesToken : noToken, f.tokens, f.tradePrice, f.fee, f.debtShare
         );
+    }
+
+    // Smallest gross G with G − tradeFee(q, G) ≥ net (the exact piecewise inversion
+    // mirrored by order-book-server/src/fee.ts minGrossForNet and
+    // frontend/lib/feeMath.ts — keep all three in lockstep).
+    function _minGrossForNet(uint256 net, uint256 q) private view returns (uint256) {
+        if (feeBps == 0 || net == 0) return net;
+        // Low branch (G ≤ Q/2, fee = feeBps×G): G ≥ net / (1 − r)
+        uint256 lowG = _ceilDiv(net * 10_000, 10_000 - feeBps);
+        if (lowG * 2 <= q) return lowG;
+        // High branch (G > Q/2, fee = feeBps×(Q−G)): G ≥ (net + r×Q) / (1 + r)
+        return _ceilDiv(net * 10_000 + feeBps * q, 10_000 + feeBps);
+    }
+
+    function _ceilDiv(uint256 a, uint256 b) private pure returns (uint256) {
+        return a == 0 ? 0 : (a - 1) / b + 1;
     }
 
     // The fee is always pulled from the buyer's USDC as part of the trade's USDC
@@ -322,8 +424,7 @@ contract CLOBSettlement is AccessControl, ReentrancyGuard {
         emit FeeCharged(payer, isYesSale, fee, toInsurance, toTeam);
     }
 
-    // Hoisted into its own frame (rather than inlined) to keep _settleFundingAndSwap's
-    // stack shallow enough for solc 0.8.24, which already stack-too-deeps easily here.
+    // Hoisted into its own frame to keep _settleFundingAndSwap's stack shallow.
     function _requireNotFrozen(address seller, address buyer) private view {
         if (
             ICreditMarket(creditMarket).claimable(seller) ||

@@ -83,7 +83,12 @@ refreshed every 60s (`FEE_REFRESH_MS`). `GET /health` → `fee.source` should sa
 preview URLs are NOT covered — add them (or unset the var) if you test previews against
 the hosted backend.
 
-**Rate limiting:** `POST /order` + `DELETE /order/:id` share one bucket per client IP,
+**Minimum order (batch 3):** `MIN_ORDER_TOKENS` (default `1000000` = 1 Upbet/Downbet,
+6-decimal units) — `POST /order` rejects smaller orders with `400 BelowMinOrderSize`. Leave
+unset unless the owner changes the minimum; keep `frontend/lib/constants.ts`
+`MIN_ORDER_TOKENS` in step.
+
+**Rate limiting:** `POST /order`, `DELETE /order/:id` and `POST /orders/sync` share one bucket per client IP,
 `ORDER_RATE_LIMIT_MAX` (default 60) per `ORDER_RATE_LIMIT_WINDOW_MS` (default 60000);
 `ORDER_RATE_LIMIT_MAX=0` disables it. Reads, `/health` and preflights are never limited.
 `TRUST_PROXY=2` makes the limiter key on the real client IP. A wrong value fails

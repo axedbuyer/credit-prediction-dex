@@ -79,6 +79,7 @@ const CM = parseAbi([
 const CLOB = parseAbi([
   'function feeBps() view returns (uint256)', 'function insuranceShareBps() view returns (uint256)',
   'function teamWallet() view returns (address)', 'function insuranceFund() view returns (address)',
+  'function remaining((address maker,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint256 expiry,uint256 nonce)) view returns (uint256)',
 ])
 const LE = parseAbi([
   'function claim(address)',
@@ -137,8 +138,9 @@ async function warp(days: number) {
   await testClient.mine({ blocks: 1 })
 }
 
-let nonceCounter = BigInt(Date.now()) * 1_000_000n
-const nextNonce = () => ++nonceCounter
+// ms-timestamp nonces, strictly increasing (same convention as scripts/demo/clob.ts)
+let nonceCounter = 0n
+const nextNonce = () => { const now = BigInt(Date.now()); nonceCounter = now > nonceCounter ? now : nonceCounter + 1n; return nonceCounter }
 
 interface Mkt {
   slug: string; name: string; type: number
@@ -598,6 +600,35 @@ async function main() {
       await redis.zrem('orderbook:mstr:bids', id); await redis.del(`orders:${id}`); await redis.srem(`nonces:mstr:${maker}`, nonce)
       return `order visible after ${orderMs}ms, nonce merged after ${nonceMs}ms (LEGACY_SWEEP_MS=2000; nonce scan every 10th tick)`
     } finally { redis.disconnect() }
+  })
+
+  // ── 12. partial fills (batch 3) ──────────────────────────────────────────────
+  await check(12, 'partial fills: two small takers fill one resting Upbet ask in pieces; sub-minimum order rejected', async () => {
+    const m = crwv, Q = usd(900), P = BigInt(Math.round(m.p * Number(Q)))   // 900 Upbet @ p
+    await send(A, m.cm, CM, 'mint', [Q])
+    const ask = await newOrder(A, m.yes, env.usdc, Q, P, m.clob)
+    const ra = await post(ask.w); assertEq(ra.status, 201, `ask POST ${JSON.stringify(ra.json)}`)
+    const askId = ra.json.orderId
+    // first taker: 300 Upbet at the ask's price
+    const q1 = usd(300), c1 = (q1 * P + Q - 1n) / Q
+    const cPre = await bal(m.yes, C.address), xPre = await bal(m.yes, X.address)
+    const b1 = await newOrder(C, env.usdc, m.yes, c1, q1, m.clob)
+    assertEq((await post(b1.w)).status, 201, 'first taker bid accepted')
+    await until(async () => (await bal(m.yes, C.address)) === cPre + q1, 'first partial fill', 45_000)
+    await until(async () => (await read<bigint>(m.clob, CLOB, 'remaining', [ask.o])) === Q - q1, 'on-chain remaining = 600', 10_000)
+    await until(async () => (await getBook(m.slug)).asks.some((o: any) => o.id === askId && o.filled === (q1).toString()), 'book shows the ask with filled=300', 15_000)
+    // second taker: the remaining 600
+    const q2 = Q - q1, c2 = (q2 * P + Q - 1n) / Q
+    const b2 = await newOrder(X, env.usdc, m.yes, c2, q2, m.clob)
+    assertEq((await post(b2.w)).status, 201, 'second taker bid accepted')
+    await until(async () => (await bal(m.yes, X.address)) === xPre + q2, 'second fill', 45_000)
+    assertEq(await read<bigint>(m.clob, CLOB, 'remaining', [ask.o]), 0n, 'ask fully filled on-chain')
+    await until(async () => !(await getBook(m.slug)).asks.some((o: any) => o.id === askId), 'fully filled ask leaves the book', 15_000)
+    // below the 1-Upbet minimum
+    const tiny = await newOrder(C, env.usdc, m.yes, usd(0.1), usd(0.5), m.clob)
+    const rt = await post(tiny.w)
+    assertEq(rt.status, 400, 'sub-minimum order status'); assertEq(rt.json.error, 'BelowMinOrderSize', 'sub-minimum order error')
+    return `${fmt(Q)} ask filled ${fmt(q1)} + ${fmt(q2)}; 0.5 Upbet order -> 400 BelowMinOrderSize`
   })
 
   // ── 11. invariants ────────────────────────────────────────────────────────────

@@ -36,11 +36,22 @@ CI fails on drift).
   fee rate (live `CLOBSettlement.feeBps()` per market, own refresh) and the chain pre-filter all use
   that market's contracts. Response: `{ orderId, market }`; stored order JSON carries `market`.
 - `DELETE /order/:id` — unchanged API; verified against the stored order's market domain.
+  Off-chain only — the binding cancel is on-chain (`cancelOrders` / `setMinNonce`).
+- `POST /order` rejects orders under `MIN_ORDER_TOKENS` (default 1_000_000 = 1 Upbet/Downbet;
+  bid size = `minAmountOut`, ask size = `amountIn`) with `400 {error:'BelowMinOrderSize',
+  minOrderTokens}`. The YES-sell FundingShortfall pre-filter is pro-rata: required =
+  ceil(D × amountIn / yesBalance) (all of D when selling the whole balance) + fee.
+- `POST /orders/sync {market, maker}` — re-reads `CLOBSettlement.remaining()` for each of that
+  maker's orders in the market and deletes those at 0 (cancelled / setMinNonce'd / spent /
+  filled on-chain). No signature: removal follows objective chain state only; a failed read
+  removes nothing (`{removed, unreadable}`); 503 without chain reads.
+- Stored orders carry `filled` (outcome tokens filled so far, written by the matching engine);
+  remaining = size − filled. Fully filled orders are deleted.
 - `GET /health` — all legacy top-level fields (`fee` = mstr's) plus `registry` (directory status) and
   `markets: { [slug]: { fee: { bps, source } } }`.
 - Rate limit stays per client IP across all markets.
-- Redis keys: `orderbook:<slug>:bids|asks`, `nonces:<slug>:<maker>` (on-chain `usedNonces` is per
-  CLOBSettlement), `orders:<id>` global. Readers treat a missing `market` as `mstr`.
+- Redis keys: `orderbook:<slug>:bids|asks`, `nonces:<slug>:<maker>` (an order is unique per
+  maker + nonce on each CLOBSettlement), `orders:<id>` global. Readers treat a missing `market` as `mstr`.
 - Legacy-key SWEEP (`src/migration.ts`): on boot and every `LEGACY_SWEEP_MS` (default 30000; 0
   disables) moves legacy `orderbook:bids|asks` ids into `orderbook:mstr:*`, stamps `market:'mstr'`
   on the order JSON, and UNIONs `nonces:<maker>` into `nonces:mstr:<maker>`. It is recurring because
@@ -55,13 +66,16 @@ CI fails on drift).
 ### matching-engine
 - Each poll fetches `GET /orderbook?market=<slug>` for every ACTIVE market and matches each book
   independently (price-time priority unchanged). Orders from different markets are never crossed.
-  Only pairs that can settle as WHOLE orders are matched (`canSettleWhole`; CLOBSettlement has no
-  partial fills) — a crossing pair of different sizes keeps both orders resting.
-- Settler: one wallet for all markets; each pair goes to its market's `CLOBSettlement`. Revert
-  handling reads `claimable()` / `usedNonces()` on that market's contracts and prunes from that
-  market's keys: FundingShortfall / PositionFrozen / NonceUsed prune ONLY the order whose own state
-  caused the revert; SlippageExceeded never prunes (`engine.markIncompatible`, 10-min TTL, both
-  released); a failed or ambiguous chain read releases both for retry. Root CLAUDE.md "Order
+  Batch 3 partial fills: `matched` is emitted as (maker, taker, tokens) — the EARLIER order is the
+  maker, tokens = min of both `remainingTokens()` (size − filled); one fill per order per cycle.
+- Settler: one wallet for all markets (it must hold each CLOB's `OPERATOR_ROLE`); each fill goes
+  to its market's `CLOBSettlement.fillOrders`. On success `filled` is written back
+  (`OrderRemover.setFilled`, Redis `SET … XX`) or the order is removed once full. Revert handling
+  (reads on that market's contracts, prunes from that market's keys): FundingShortfall /
+  PositionFrozen prune ONLY the order whose own state caused the revert; FillExceedsRemaining /
+  OrderInvalidated / OrderExpired / InvalidOrder read `remaining()` — 0 prunes, otherwise `filled`
+  is resynced; SlippageExceeded / FillTooSmall never prune (`engine.markIncompatible`, 10-min TTL,
+  both released); a failed or ambiguous chain read releases both for retry. Root CLAUDE.md "Order
   removal policy".
 - **Defense in depth (CLOBSettlement does not validate order tokens):** before any gas estimate the
   settler requires both orders to be exactly {USDC, that market's YES or NO}, on the SAME outcome
@@ -71,7 +85,7 @@ CI fails on drift).
 
 ### Env vars added
 `MARKET_REGISTRY_ADDRESS`, `REGISTRY_REFRESH_MS` (both services); `CHAIN_ID` (matching-engine);
-`LEGACY_SWEEP_MS` (order-book-server).
+`LEGACY_SWEEP_MS`, `MIN_ORDER_TOKENS` (order-book-server).
 
 ## Do not build
 Subgraph, The Graph integration, fee distributor

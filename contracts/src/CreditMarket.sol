@@ -78,6 +78,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     error InvalidMark();
     error MarkStepTooLarge();
     error MarkUpdateTooSoon();
+    error DebtCollectionExceedsDebt();
 
     constructor(
         address admin,
@@ -142,7 +143,18 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // claimed, cured, or settled.
     function owed(address user) public view returns (uint256) {
         uint256 yesBal = IERC20(yesToken).balanceOf(user);
-        return fundingDebt[user] + yesBal * (_projectedCumYES() - fundingSnapshot[user]) / 1e18;
+        return fundingDebt[user] + _yesDebit(yesBal, _projectedCumYES() - fundingSnapshot[user]);
+    }
+
+    // A YES holder's carry for `bal` tokens over an index move of `indexDelta`, rounded
+    // UP: the < 1 wei remainder lands in collateral, never against it. (A NO credit
+    // rounds down, so every rounding favours solvency; flooring both let collateral
+    // drift short by < 1 wei per YES settlement — found by the batch-3 invariant run.)
+    // Every YES-debit computation goes through here, so owed() / previewFunding()
+    // agree exactly with what settleFunding records.
+    function _yesDebit(uint256 bal, uint256 indexDelta) internal pure returns (uint256) {
+        uint256 x = bal * indexDelta;
+        return x == 0 ? 0 : (x - 1) / 1e18 + 1;
     }
 
     // owed() per unit of YES held (1e18-scaled) — the spec's f_now.
@@ -230,7 +242,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // ─── funding views ──────────────────────────────────────────────────────────
 
     function yesFundingOwed(address user) public view returns (uint256) {
-        return IERC20(yesToken).balanceOf(user) * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
+        return _yesDebit(IERC20(yesToken).balanceOf(user), cumulativeFundingPerYES - fundingSnapshot[user]);
     }
 
     function noFundingCredit(address user) public view returns (uint256) {
@@ -388,11 +400,13 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         emit DepositCapUpdated(_depositCap);
     }
 
-    // CLOB_ROLE: clears a user's outstanding fundingDebt ledger entry. Caller must
-    // have already routed the equivalent USDC into collateral (e.g. CLOBSettlement's
-    // YES-sale seller-debit path, which transfers the debt amount to this contract).
-    function markDebtCollected(address user) external onlyRole(CLOB_ROLE) {
-        fundingDebt[user] = 0;
+    // CLOB_ROLE: reduces a user's fundingDebt ledger entry by `amount`. Caller must
+    // have already routed that much USDC into collateral (CLOBSettlement's YES-sale
+    // path collects the seller's debt pro-rata per fill and transfers it here first).
+    // Never erases more than is owed (invariant 9).
+    function collectDebt(address user, uint256 amount) external onlyRole(CLOB_ROLE) {
+        if (amount > fundingDebt[user]) revert DebtCollectionExceedsDebt();
+        fundingDebt[user] -= amount;
     }
 
     // Flagged holder pays their entire live funding obligation (owed(), net of any
@@ -426,8 +440,8 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // side of a CLOB trade, or a NO-sale seller's side, where nothing collects cash
     // in the same transaction). It persists in fundingDebt until an explicit
     // collection point clears it: redeem/settleYES deduct it from the payout and
-    // zero it out, or CLOB_ROLE calls markDebtCollected after routing the
-    // equivalent USDC into collateral (e.g. the YES-sale seller-debit path).
+    // zero it out, or CLOB_ROLE calls collectDebt after routing the equivalent
+    // USDC into collateral (the YES-sale seller-debit path, pro-rata per fill).
     //
     // No freeze: a flagged holder is charged live accrual exactly like anyone else
     // (a freeze let the paired NO keep earning credit nobody paid for — see
@@ -450,7 +464,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 yesBal = IERC20(yesToken).balanceOf(user);
         uint256 noBal  = IERC20(noToken).balanceOf(user);
 
-        uint256 yesOwed = yesBal * (cumulativeFundingPerYES - fundingSnapshot[user]) / 1e18;
+        uint256 yesOwed = _yesDebit(yesBal, cumulativeFundingPerYES - fundingSnapshot[user]);
         fundingSnapshot[user] = cumulativeFundingPerYES;
         uint256 noCredit = noBal * (cumFundingPerNO - snapNO[user]) / 1e18;
         snapNO[user] = cumFundingPerNO;
@@ -483,7 +497,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         uint256 yesBal = isYes ? amount : IERC20(yesToken).balanceOf(user);
         uint256 noBal  = isYes ? IERC20(noToken).balanceOf(user) : amount;
 
-        uint256 yesOwed  = yesBal * (projectedCumYES - fundingSnapshot[user]) / 1e18;
+        uint256 yesOwed  = _yesDebit(yesBal, projectedCumYES - fundingSnapshot[user]);
         uint256 noCredit = noBal  * (projectedCumNO  - snapNO[user]) / 1e18;
 
         delta = noCredit > yesOwed

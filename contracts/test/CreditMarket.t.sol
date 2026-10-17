@@ -222,9 +222,11 @@ contract CreditMarketTest is Test {
         assertEq(market.cumFundingPerNO(), market.cumulativeFundingPerYES(), "equal after second accrual");
     }
 
-    // Fuzz: sum of yesFundingOwed == sum of noFundingCredit at any mark and timing.
-    // With 1:1 mint, YES.totalSupply() == NO.totalSupply() always, so the equal indices
-    // guarantee exact conservation of total funding flow across all holders.
+    // Fuzz: sum of yesFundingOwed == sum of noFundingCredit at any mark and timing, up
+    // to rounding. With 1:1 mint, YES.totalSupply() == NO.totalSupply() always, so the
+    // equal indices conserve the funding flow exactly; per holder the YES debit rounds
+    // UP and the NO credit DOWN (batch 3), so owed can exceed credited by < 1 wei per
+    // holder per side — always in collateral's favour, never the other way.
     function test_Conservation_TotalOwedEqualsTotalCredited(
         uint256 markPct,
         uint256 warpSecs,
@@ -258,7 +260,8 @@ contract CreditMarketTest is Test {
         uint256 totalOwed   = m.yesFundingOwed(alice) + m.yesFundingOwed(bob);
         uint256 totalCredit = m.noFundingCredit(alice) + m.noFundingCredit(bob);
 
-        assertEq(totalOwed, totalCredit, "conservation: total YES owed == total NO credited");
+        assertGe(totalOwed, totalCredit, "rounding never favours YES holders over collateral");
+        assertLe(totalOwed - totalCredit, 4, "conservation: owed == credited up to < 1 wei per holder per side");
     }
 
     function test_NoFundingCredit_ScalesWithBalance() public {

@@ -88,6 +88,20 @@ function derivePrice(wire: OrderWire, usdcAddress: string, market: MarketInfo, f
   return amtIn === 0n ? 0 : Number(minOut) / Number(amtIn)
 }
 
+// Owner decision B (docs/partial-fills-plan.md): 1 Upbet/Downbet (6 decimals).
+export const DEFAULT_MIN_ORDER_TOKENS = 1_000_000n
+
+/** MIN_ORDER_TOKENS env → bigint base units; unset/invalid ⇒ the default. */
+export function parseMinOrderTokens(raw: string | undefined): bigint {
+  if (raw == null || raw.trim() === '') return DEFAULT_MIN_ORDER_TOKENS
+  try {
+    const v = BigInt(raw.trim())
+    return v >= 0n ? v : DEFAULT_MIN_ORDER_TOKENS
+  } catch {
+    return DEFAULT_MIN_ORDER_TOKENS
+  }
+}
+
 function deriveSide(wire: OrderWire, usdcAddress: string): 'bid' | 'ask' {
   return wire.tokenIn.toLowerCase() === usdcAddress.toLowerCase() ? 'bid' : 'ask'
 }
@@ -124,20 +138,28 @@ async function runChainPreFilter(
 
       // Net debit D = fundingDebt − previewDelta (previewDelta = noCredit − yesOwed,
       // mirroring settleFunding's `debit = fundingDebt + yesOwed` netted against
-      // noCredit). Only relevant when positive. The on-chain check is
-      // tradePrice ≥ debit + fee, so the trading fee on this YES sell joins the
-      // required proceeds; minSellProceeds inverts net(G) = G − fee(G) exactly.
+      // noCredit). Only relevant when positive. Batch 3 collects it PRO-RATA per
+      // fill: a fill of q tokens must cover D × q / yesBalance plus its fee, so an
+      // order selling A tokens needs minAmountOut ≥ ceil(D × A / yesBalance) + fee
+      // (the whole D once it sells everything held). The per-token requirement is
+      // the same for every fill size, so this check covers all of its partial fills.
+      // minSellProceeds inverts net(G) = G − fee(G) exactly.
       const netDebit = debt - previewDelta
-      const feeBps = BigInt(feeBpsNow)
-      const fee = tradeFee(order.amountIn, order.minAmountOut, feeBps)
-      if (netDebit > 0n && order.minAmountOut < netDebit + fee) {
-        return {
-          rejected: true,
-          status: 400,
-          body: {
-            error: 'FundingShortfall',
-            minSellProceeds: minGrossForNet(netDebit, order.amountIn, feeBps).toString(),
-          },
+      if (netDebit > 0n) {
+        const required = order.amountIn >= yesBal || yesBal === 0n
+          ? netDebit
+          : (netDebit * order.amountIn + yesBal - 1n) / yesBal
+        const feeBps = BigInt(feeBpsNow)
+        const fee = tradeFee(order.amountIn, order.minAmountOut, feeBps)
+        if (order.minAmountOut < required + fee) {
+          return {
+            rejected: true,
+            status: 400,
+            body: {
+              error: 'FundingShortfall',
+              minSellProceeds: minGrossForNet(required, order.amountIn, feeBps).toString(),
+            },
+          }
         }
       }
     }
@@ -357,6 +379,14 @@ export async function buildApp(
       return reply.status(400).send({ error: 'Order expired' })
     }
 
+    // Minimum order size (owner decision B), in outcome tokens: a bid's size is the
+    // tokens it wants, an ask's the tokens it offers.
+    const minOrderTokens = config.minOrderTokens ?? DEFAULT_MIN_ORDER_TOKENS
+    const sizeTokens = inIsUsdc ? order.minAmountOut : order.amountIn
+    if (sizeTokens < minOrderTokens) {
+      return reply.status(400).send({ error: 'BelowMinOrderSize', minOrderTokens: minOrderTokens.toString() })
+    }
+
     if (await store.isNonceUsed(market.slug, order.maker, order.nonce.toString())) {
       return reply.status(400).send({ error: 'Nonce already used' })
     }
@@ -436,6 +466,47 @@ export async function buildApp(
     else await store.removeAsk(orderMarket.slug, id)
 
     return reply.status(200).send({ cancelled: true })
+  })
+
+  // POST /orders/sync { market, maker } — after an on-chain cancel
+  // (CLOBSettlement.cancelOrders / setMinNonce) the frontend asks the book to
+  // drop that maker's dead orders now rather than when they next cross. No
+  // signature needed: an order is removed ONLY if the chain itself says it can
+  // never fill again (remaining() == 0) — objective state, per the "Order
+  // removal policy" in root CLAUDE.md. A failed read removes nothing.
+  app.post<{ Body: { market?: string; maker?: string } }>('/orders/sync', async (request, reply) => {
+    const slug = request.body?.market
+    const maker = request.body?.maker?.toLowerCase()
+    if (!slug || !maker || !/^0x[0-9a-f]{40}$/.test(maker)) {
+      return reply.status(400).send({ error: 'Missing or invalid market / maker' })
+    }
+    const market = directory.bySlug(slug)
+    if (!market) return reply.status(404).send({ error: 'UnknownMarket' })
+    const reader = servicesFor(market).chainReader
+    if (!reader?.orderRemaining) return reply.status(503).send({ error: 'Chain reads unavailable' })
+
+    const [bidIds, askIds] = await Promise.all([store.getBidIds(slug), store.getAskIds(slug)])
+    const removed: string[] = []
+    let unreadable = 0
+    for (const [side, ids] of [['bid', bidIds], ['ask', askIds]] as const) {
+      for (const id of ids) {
+        const o = await store.getOrder(id)
+        if (!o || o.maker.toLowerCase() !== maker) continue
+        let left: bigint
+        try {
+          left = await reader.orderRemaining(market.clobSettlement as Address, wireToOrder(o))
+        } catch {
+          unreadable++
+          continue
+        }
+        if (left !== 0n) continue
+        await store.deleteOrder(id)
+        if (side === 'bid') await store.removeBid(slug, id)
+        else await store.removeAsk(slug, id)
+        removed.push(id)
+      }
+    }
+    return reply.status(200).send({ removed, unreadable })
   })
 
   // GET /orderbook — sorted bids (high→low) and asks (low→high). Polled

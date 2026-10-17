@@ -8,7 +8,7 @@ import { parseUnits, formatUnits } from 'viem'
 import { wagmiConfig } from '@/lib/wagmi'
 import { ACTIVE_CHAIN_ID } from '@/lib/chainConfig'
 import type { Market } from '@/lib/markets'
-import { ORDER_BOOK_URL } from '@/lib/constants'
+import { ORDER_BOOK_URL, MIN_ORDER_TOKENS } from '@/lib/constants'
 import { CREDIT_MARKET_ABI, ERC20_ABI, netFundingDebit } from '@/lib/creditMarketAbi'
 import { tradeFee, minGrossForNet } from '@/lib/feeMath'
 import { useFeeBps } from '@/lib/useFeeBps'
@@ -229,9 +229,10 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       ? yesBalance != null ? Number(formatUnits(yesBalance, 6)) : null
       : noBalance  != null ? Number(formatUnits(noBalance,  6)) : null
 
-  // Minimum USDC proceeds this order must clear to cover carry owed (Option B safeguard
-  // mirrors CLOBSettlement: proceeds for the WHOLE trade, not per-token, must be >= carry
-  // owed — the debit is netted over the seller's full balance regardless of trade size).
+  // Minimum USDC proceeds this order must clear to cover carry owed (Option B safeguard).
+  // Batch 3: a YES sale repays the PRO-RATA share of the seller's net carry debit —
+  // owed × tokens sold / Upbet held — so selling part of a position only needs to clear
+  // that part's share (see `carryShare` below; mirrors order-book-server's pre-filter).
   let usdcAmountWeiPreview: bigint | null = null
   let tokenAmountWeiPreview: bigint | null = null
   if (isValidAmount) {
@@ -244,6 +245,10 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       tokenAmountWeiPreview = null
     }
   }
+
+  // Minimum order size: 1 Upbet/Downbet (order-book-server MIN_ORDER_TOKENS; batch 3
+  // fills orders in pieces, so this floor keeps dust out of the book).
+  const belowMinSize = tokenAmountWeiPreview !== null && tokenAmountWeiPreview < MIN_ORDER_TOKENS
 
   // ── Trade fee (charged on the carry-earning side only) ─────────────────────
   // Upbet (YES) sell: fee comes out of the seller's proceeds on-chain, exactly
@@ -275,26 +280,37 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
   // fallback (useFeeBps already does this internally); only signing blocks.
   const feeRateUnknownForNoBuy = isNoBuy && feeBpsSource !== 'chain'
 
-  // The on-chain Option B check is tradePrice ≥ carry owed + fee.
+  // This order's share of the carry owed: ceil(owed × sold / held), all of it when
+  // selling the whole position (or minting first, so nothing is held yet). Rounded up
+  // like the order-book-server's pre-filter; the contract floors, so this never
+  // under-states what a fill will deduct.
+  const yesHeld = yesBalance ?? 0n
+  const carryShare =
+    carryOwed > 0n && tokenAmountWeiPreview !== null && yesHeld > 0n && tokenAmountWeiPreview < yesHeld
+      ? (carryOwed * tokenAmountWeiPreview + yesHeld - 1n) / yesHeld
+      : carryOwed
+
+  // The on-chain Option B check is tradePrice ≥ this order's carry share + fee.
   const carryShortfall =
     wantsCarryPreview &&
-    carryOwed > 0n &&
+    carryShare > 0n &&
     usdcAmountWeiPreview !== null &&
-    usdcAmountWeiPreview < carryOwed + feeWeiPreview
+    usdcAmountWeiPreview < carryShare + feeWeiPreview
 
-  // Minimum sell price (as annual-probability %) needed for THIS order's token
-  // quantity to clear carry owed plus the trade fee: exact inversion of
-  // net(G) = G − fee(G) ≥ carryOwed, divided by tokens sold.
+  // Minimum sell price (as % chance) needed for THIS order's quantity to clear its
+  // carry share plus the trade fee: exact inversion of net(G) = G − fee(G) ≥ carryShare,
+  // divided by tokens sold.
   const minSellPricePct =
-    wantsCarryPreview && carryOwed > 0n && tokenAmountWeiPreview && tokenAmountWeiPreview > 0n
-      ? (Number(minGrossForNet(carryOwed, tokenAmountWeiPreview, liveFeeBps)) / Number(tokenAmountWeiPreview)) * 100
+    wantsCarryPreview && carryShare > 0n && tokenAmountWeiPreview && tokenAmountWeiPreview > 0n
+      ? (Number(minGrossForNet(carryShare, tokenAmountWeiPreview, liveFeeBps)) / Number(tokenAmountWeiPreview)) * 100
       : null
 
-  const carryOwedDisplay = wantsCarryPreview && carryOwed > 0n
-    ? `$${parseFloat(formatUnits(carryOwed, 6)).toFixed(2)}`
+  const carryOwedDisplay = wantsCarryPreview && carryShare > 0n
+    ? `$${parseFloat(formatUnits(carryShare, 6)).toFixed(2)}` +
+      (carryShare < carryOwed ? ` (this sale's share of $${parseFloat(formatUnits(carryOwed, 6)).toFixed(2)})` : '')
     : null
 
-  const sellDeductions = carryOwed + feeWeiPreview
+  const sellDeductions = carryShare + feeWeiPreview
   const sellProceedsAfterCarry =
     isYesSell && sellDeductions > 0n && usdcAmountWeiPreview !== null
       ? formatUnits(
@@ -331,7 +347,7 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
   }, [address, publicClient, contracts.usdc, writeContractAsync])
 
   const handleSubmit = useCallback(async () => {
-    if (!address || !isValidAmount || isFrozen || marketClosed || carryShortfall || feeRateUnknownForNoBuy) return
+    if (!address || !isValidAmount || belowMinSize || isFrozen || marketClosed || carryShortfall || feeRateUnknownForNoBuy) return
     setStatus('idle')
     setErrorMsg('')
     setSuccessOrderId('')
@@ -472,6 +488,9 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
         if (body?.error === 'InvalidTokenPair') {
           throw new Error('That order doesn’t match this market. Refresh the page and try again.')
         }
+        if (body?.error === 'BelowMinOrderSize') {
+          throw new Error(`The minimum order is 1 ${sideLabel(side)}.`)
+        }
         if (body?.error === 'MarketInactive') {
           throw new Error('This market is closed to new orders.')
         }
@@ -497,7 +516,7 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       )
     }
   }, [
-    address, isValidAmount, isFrozen, marketClosed, carryShortfall, ensureAllowance, feeRateUnknownForNoBuy, liveFeeBps,
+    address, isValidAmount, belowMinSize, isFrozen, marketClosed, carryShortfall, ensureAllowance, feeRateUnknownForNoBuy, liveFeeBps,
     usdcAmt, limitPrice, side, direction,
     yesBalance, noBalance, contracts, marketId, publicClient,
     writeContractAsync, signTypedDataAsync,
@@ -630,6 +649,9 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       {/* Contextual info */}
       <div className="border border-subtle bg-surface-2 px-3 py-2 text-xs text-text-2 tabular space-y-1">
         <p>{tokenCostDisplay}</p>
+        {belowMinSize && (
+          <p className="text-danger">The minimum order is 1 {sideLabel(side)} — increase the amount.</p>
+        )}
         {dailyCarryDisplay && <p>{dailyCarryDisplay}</p>}
         {direction === 'SELL' && tokenBalance != null && (
           <p>
@@ -667,7 +689,7 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       {/* Submit button */}
       <button
         onClick={handleSubmit}
-        disabled={!isConnected || !isValidAmount || busy || isFrozen || marketClosed || carryShortfall || feeRateUnknownForNoBuy}
+        disabled={!isConnected || !isValidAmount || belowMinSize || busy || isFrozen || marketClosed || carryShortfall || feeRateUnknownForNoBuy}
         className={`pari-b-btn w-full py-3 ${side === 'YES' ? 'pari-b-btn--danger' : 'pari-b-btn--primary'}`}
       >
         {buttonLabel}

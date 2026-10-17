@@ -296,10 +296,12 @@ list.
 3. ~~Ops polish~~ — done 2026-10-13 (matching-engine /health, funding-keeper retry +
    `[ALERT]`, uptime coverage). Remaining: a public domain for matching-engine port 3005 +
    its uptime step.
-4. **Partial fills + on-chain cancel (batch 3)** — `docs/partial-fills-plan.md`. Since
-   2026-10-15 the matching engine only pairs orders that settle WHOLE and never deletes an
-   order over a size mismatch (stopgap); real trading needs partial fills. Also fixes
-   `DELETE /order` not being binding on-chain. Owner decisions A–D in the plan first.
+4. **Partial fills + on-chain cancel (batch 3)** — `docs/partial-fills-plan.md`. All
+   decisions made 2026-10-16 (A pro-rata carry debt, B 1-Upbet minimum off-chain, C
+   `cancelOrders` + `setMinNonce`, D pair-only fills, E operator-only fills). BUILT on
+   `feat/partial-fills` (contracts, matching-engine, order-book-server, liquidator seller,
+   frontend, smoke 12/12). Needs a FULL redeploy (CreditMarket changed):
+   `docs/redeploy-batch3-runbook.md` — the owner merges and runs the broadcast steps.
 
 ### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
 

@@ -41,7 +41,11 @@ off-chain tests (2026-10-13), 11/11 multi-market anvil smoke (`scripts/smoke/run
 markets and registry `0xdF1A…5720` are paused and inactive (archived in
 `deployments/base-sepolia/archive/batch1/`). Without `MARKET_REGISTRY_ADDRESS` /
 `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` every service falls back to legacy single-market
-(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Ops hardening
+(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Batch 3 (built 2026-10-16 on `feat/partial-fills`, NOT deployed):** partial fills
+(`fillOrders`, operator-only), on-chain cancel (`cancelOrders` / `setMinNonce`), pro-rata YES
+carry-debt collection (`CreditMarket.collectDebt`), YES debits rounded up, 1-Upbet minimum
+order — a full redeploy of every market (CreditMarket changed), runbook
+`docs/redeploy-batch3-runbook.md`. **Ops hardening
 (2026-10-13):** matching-engine `GET /health`, funding-keeper retry + `[ALERT]` logs, hourly
 uptime checks for the liquidator bot + hot-wallet gas, and mainnet *plumbing* only
 (`CHAIN_ID`/`RPC_URL`/`NEXT_PUBLIC_CHAIN_ID`, `make deploy-mainnet` guard) — nothing on mainnet.
@@ -169,9 +173,10 @@ Off-chain matching, on-chain USDC settlement:
 ```
 User signs EIP-712 limit order (tokenIn, tokenOut, amountIn, minAmountOut, expiry, nonce)
         ↓ submitted to order-book-server (REST) ↓ matching engine matches buy/sell ↓
-Matched pair submitted to CLOBSettlement.sol on-chain, which verifies both signatures,
-settles funding for both parties (CreditMarket.settleFunding), then atomically transfers
-YES/NO from seller to buyer and USDC from buyer to seller.
+Matched pair + fill size submitted to CLOBSettlement.sol on-chain (OPERATOR_ROLE only),
+which verifies both signatures and each order's remaining size, settles funding for both
+parties (CreditMarket.settleFunding), then atomically transfers YES/NO from seller to buyer
+and USDC from buyer to seller. Orders fill in pieces (batch 3).
 ```
 
 **Order struct (EIP-712 typed data, wire format):**
@@ -187,20 +192,31 @@ struct Order {
 }
 ```
 The signature is passed alongside the order, not embedded in it: on-chain
-`CLOBSettlement.verifyAndSettle(Order makerOrder, bytes makerSig, Order takerOrder, bytes
-takerSig)` takes this 7-field `Order` plus two detached signatures (selector `0x538df8d8`).
-Off-chain callers must match this exact ABI shape.
+`CLOBSettlement.fillOrders(Order makerOrder, bytes makerSig, Order takerOrder, bytes
+takerSig, uint256 tokens)` takes this 7-field `Order` plus two detached signatures and the
+fill size in outcome tokens (selector `0x96c8e34a`). Off-chain callers must match this exact
+ABI shape. (Batch 1/2 contracts had whole-order `verifyAndSettle`, selector `0x538df8d8`.)
 
-**No partial fills (current contracts):** `verifyAndSettle` moves both orders' FULL
-`amountIn` and spends both nonces, so a pair settles only if the seller's tokens cover the
-buyer's `minAmountOut` and the buyer's USDC covers the seller's `minAmountOut`. The matching
-engine pairs only such orders (`canSettleWhole` in `matching-engine/src/engine.ts`); a
-crossing pair of different sizes stays resting on both sides. Real partial fills are planned
-for the next contract batch: `docs/partial-fills-plan.md`.
+**Partial fills (batch 3, `docs/partial-fills-plan.md`):** an order's size is its outcome
+tokens (a bid's `minAmountOut`, an ask's `amountIn`); `filled[hash]` tracks tokens filled
+and `spent[hash]` the USDC a buy order has paid (hard cap: its signed `amountIn`).
+- **Price:** each fill runs at the MAKER's (earlier order's) limit, pro rata, rounded in the
+  maker's favour — a YES seller's ceil(q × minAmountOut / amountIn); a NO seller's net limit
+  grossed up by `minGrossForNet`; a maker buyer's ceil(q × amountIn / minAmountOut) — and
+  never above the buyer's pro-rata limit or unspent budget. The seller's pro-rata floor
+  (gross for YES, net of fee for NO) must hold or the fill reverts SlippageExceeded; a fill
+  that prices to 0 reverts FillTooSmall.
+- **Only the operator fills** (`OPERATOR_ROLE` = the matching-engine settler; decision E).
+- **Cancel:** `cancelOrders(Order[])` (maker only; marks them fully filled) or
+  `setMinNonce(n)` (retires every order of the maker with nonce < n; must increase). Nonces
+  are millisecond timestamps so `setMinNonce(Date.now())` cancels everything signed so far.
+  `remaining(order)` = tokens still fillable (0 once expired/cancelled/spent/filled).
+- **Minimum order:** 1 Upbet/Downbet (order-book-server `MIN_ORDER_TOKENS`, default
+  1_000_000); there is no on-chain minimum.
 
 **Order removal policy:** the platform removes a user's resting order only (a) when it is
 filled or cancelled, or (b) for a published, objective reason about THAT order or its maker's
-own state — expired, nonce already spent, maker's position flagged (PositionFrozen), a YES
+own state — expired, cancelled on-chain or fully filled (`remaining() == 0`), maker's position flagged (PositionFrozen), a YES
 sale that can't cover the maker's own carry debt (FundingShortfall), or legs that aren't
 {USDC, one market's YES/NO}. Never because of another trader's order or a guess: an
 incompatibility between two valid orders (SlippageExceeded) skips the pair, and an
@@ -221,11 +237,13 @@ fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
   both routes cost the same fee, so mint can't be used to dodge it. (Measuring p on the
   gross leg is a second-order feeBps² deviation, accepted for on-chain simplicity.)
 - **YES sale:** fee is deducted from seller proceeds exactly like the funding debit;
-  the Option B safeguard extends to it — `tradePrice < debit + fee` reverts
-  FundingShortfall with the position unchanged.
-- **NO buy:** the contract can never pull USDC beyond a signed amountIn, so the buyer's
-  signed `amountIn` is GROSS (position cost + fee); the fee-free seller's `minAmountOut`
-  is checked against the NET amount (revert SlippageExceeded otherwise). The frontend
+  the Option B safeguard extends to it — `tradePrice < debtShare + fee` (the fill's
+  pro-rata share of the debit, see "Funding settlement points") reverts FundingShortfall
+  with the position unchanged.
+- **NO buy:** the contract can never pull USDC beyond a signed amountIn (`spent` caps it
+  across partial fills), so the buyer's signed `amountIn` is GROSS (position cost + fee);
+  the fee-free seller's pro-rata `minAmountOut` is checked against the NET amount (revert
+  SlippageExceeded otherwise). The frontend
   sizes gross via the exact piecewise inversion `minGrossForNet` (lib/feeMath.ts,
   mirrored in order-book-server/src/fee.ts — keep all three in lockstep with
   CLOBSettlement.tradeFee).
@@ -253,19 +271,25 @@ from the old single-set env vars. Per-service multi-market detail: `backend/CLAU
                       InvalidTokenPair / UnknownMarket / MarketInactive), DELETE /order/:id,
                       GET /health (per-market fee). Redis books namespaced
                       orderbook:<slug>:*; a recurring sweep migrates legacy keys
-                      (mutations rate-limited per client IP). POST /order
-                      (mutations rate-limited per client IP). POST /order
+                      (mutations rate-limited per client IP). POST /order rejects
+                      orders under 1 Upbet (400 BelowMinOrderSize, MIN_ORDER_TOKENS);
+                      POST /orders/sync {market, maker} drops that maker's orders whose
+                      on-chain remaining() is 0 (after an on-chain cancel). Stored
+                      orders carry `filled` (partial fills). POST /order
                       pre-filters against chain state (src/chain.ts, IChainReader/viem):
                       rejects flagged/claimable makers (PositionFrozen) and un-fundable
                       YES sells (FundingShortfall + minSellProceeds); fails open on RPC
                       error, on-chain check backstops.
-/matching-engine    — price-time priority matching; submits matched pairs via
-                      CLOBSettlement.verifyAndSettle. Decodes FundingShortfall/
-                      PositionFrozen/NonceUsed reverts at gas-estimation and prunes
-                      ONLY the order whose own state caused it; SlippageExceeded marks the
-                      pair incompatible and keeps both resting (other reverts keep the
-                      retry behavior). Pairs only orders that can settle WHOLE —
-                      CLOBSettlement has no partial fills (see "Order removal policy"). Wires the settler when SETTLER_PRIVATE_KEY +
+/matching-engine    — price-time priority matching; the earlier order is the maker, fill
+                      size = min of both orders' remaining tokens (size − filled);
+                      submits via CLOBSettlement.fillOrders (settler = OPERATOR_ROLE),
+                      then records `filled` (removes the order once fully filled).
+                      Decodes reverts at gas-estimation: FundingShortfall/PositionFrozen
+                      prune ONLY the order whose own state caused it; FillExceedsRemaining/
+                      OrderInvalidated/OrderExpired/InvalidOrder re-read remaining() and
+                      prune at 0 or resync `filled`; SlippageExceeded/FillTooSmall mark
+                      the pair incompatible and keep both resting (other reverts keep the
+                      retry behavior; see "Order removal policy"). Wires the settler when SETTLER_PRIVATE_KEY +
                       RPC_URL (or BASE_SEPOLIA_RPC_URL) are set (log-only fallback
                       otherwise). GET /health on HEALTH_PORT (3005): 503 "stale" when the
                       match loop hasn't completed a cycle in max(5×poll, 30s); per-market
@@ -324,6 +348,10 @@ from the old single-set env vars. Per-service multi-market detail: `backend/CLAU
     estimate (owed(user) minus pending NO credit — it keeps growing until cured or
     claimed) plus approve→cure(); redeem disabled while flagged, settleYES stays enabled.
   LiquidationCard — no discount ticker (P = min(owed, m×Q) from live state) — just P + Claim
+  OpenOrders  — the wallet's resting orders in the market (remaining = size − filled) with
+    on-chain Cancel (cancelOrders) and "Cancel all in this market" (setMinNonce(Date.now())),
+    then POST /orders/sync; TradePanel enforces the 1-Upbet minimum and shows the YES
+    sale's pro-rata carry share.
 ```
 
 `lib/creditMarketAbi.ts` is the shared CreditMarket/ERC20 ABI plus a `netFundingDebit`
@@ -480,24 +508,29 @@ CLOB sale — NO side (seller selling NO): settleFunding(seller) nets full posit
   tradePrice + any credit. snapNO[seller]=snapNO[buyer]=cumFundingPerNO (buyer starts
   fresh). settleFunding(buyer) also runs — buyer's own debit (if any) lands in fundingDebt.
 
-CLOB sale — YES side (seller selling YES): settleFunding(seller) → debit =
-  fundingDebt[seller] + yesOwed. require tradePrice ≥ debit — OPTION B SAFEGUARD: if the
-  fill would clear below debit, REVERT FundingShortfall; position UNCHANGED, NOT routed to
-  liquidation (still solvent, above trigger). Otherwise seller receives tradePrice − debit;
-  CLOB_ROLE calls markDebtCollected(seller) to zero fundingDebt. snapYES[seller]=
-  snapYES[buyer]=cumFundingPerYES. settleFunding(buyer) also runs.
+CLOB sale — YES side (seller selling YES): settleFunding(seller) records the net debit
+  D = fundingDebt[seller] (prior ledger + yesOwed − noCredit). PRO-RATA (batch 3): the fill
+  repays debtShare = D × tokens / YES held (rounded down; all of D when selling the whole
+  position). require tradePrice ≥ debtShare + fee — OPTION B SAFEGUARD: otherwise REVERT
+  FundingShortfall; position UNCHANGED, NOT routed to liquidation (still solvent, above
+  trigger). Seller receives tradePrice − debtShare − fee; CLOB_ROLE calls
+  collectDebt(seller, debtShare), and D − debtShare stays on the ledger against the YES
+  still held. snapYES[seller]=snapYES[buyer]=cumFundingPerYES. settleFunding(buyer) also runs.
 ```
 
-**Worked examples:** NO sells at $95 w/ $25 credit → seller nets $120. YES sells at $30 w/
-$8 debit → seller nets $22, $8 collected via markDebtCollected. YES tries to sell at $5 w/ $8
-debit → REVERT FundingShortfall; position unchanged, still owes $8, not liquidated. The
+**Worked examples:** NO sells at $95 w/ $25 credit → seller nets $120. YES sells its whole
+position at $30 w/ $8 debit → seller nets $22, $8 collected via collectDebt. Sells HALF the
+position at $15 w/ the same $8 debit → $4 collected, nets $11, $4 stays on the ledger. YES
+tries to sell everything at $5 w/ $8 debit → REVERT FundingShortfall; position unchanged,
+still owes $8, not liquidated. The
 shortfall case requires BOTH thin equity (near but above the 3% trigger) AND thin bid-side
 liquidity — a healthy position, or a sale into a deep book, never hits it.
 
 **Off-chain pre-filter (UX):** `POST /order` rejects at submission — a flagged/claimable
 maker's order (either side) → `400 PositionFrozen`; a YES sell whose `minAmountOut` can't
-cover `fundingDebt(maker) − previewFunding(maker, fullYesBalance, true)` (clamped at 0) →
-`400 FundingShortfall` with `minSellProceeds` for the UI. Chain reads
+cover its pro-rata share ceil(D × amountIn / yesBalance) of D = `fundingDebt(maker) −
+previewFunding(maker, fullYesBalance, true)` (clamped at 0; all of D when selling the whole
+balance) plus the fee → `400 FundingShortfall` with `minSellProceeds` for the UI. Chain reads
 (`order-book-server/src/chain.ts`, `IChainReader`, viem) **fail open** on RPC error — the
 on-chain check is the backstop; this filter is pure UX.
 
@@ -521,13 +554,16 @@ on-chain check is the backstop; this filter is pure UX.
    any prior `fundingDebt`. A net credit is paid out in cash immediately; a net debit is
    NEVER forgiven just because snapshots advance — it persists in the `fundingDebt` ledger
    until collected at the holder's next redeem/settleYES/YES-sale proceeds/liquidation.
-8. A YES sale that would clear BELOW the seller's net debit (fundingDebt + yesOwed) REVERTS
-   and leaves the position completely unchanged. It is NEVER force-liquidated by a failed
+8. A YES sale (fill) that would clear BELOW its share of the seller's net debit plus the
+   fee — debtShare = (fundingDebt + yesOwed − noCredit) × tokens sold / YES held, all of
+   it for a whole-position sale — REVERTS and leaves the position completely unchanged. It is NEVER force-liquidated by a failed
    sale — the position is still above the seizure trigger and solvent. Liquidation is
    reached only by the trigger, never by a sale attempt.
 9. A net funding debit recorded in `fundingDebt` is NEVER erased without the equivalent
    USDC landing in (or staying in) collateral — snapshots may advance, but debt persists
-   until collected.
+   until collected (a partial YES sale collects its share; the rest stays recorded).
+   Rounding always favours collateral: a YES debit rounds UP, a NO credit DOWN
+   (`CreditMarket._yesDebit`, batch 3).
 10. A flagged (claimable) position is fully locked — no mint, redeem, CLOB trade on
     either side, or acting as a liquidator — while its funding keeps accruing (owed() is
     non-decreasing while flagged). The only exits are claim(), cure(), or

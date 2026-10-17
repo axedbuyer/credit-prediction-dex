@@ -151,7 +151,7 @@ log "Multicall3 present at $MULTICALL3_ADDR ($(( (${#DEPLOYED_CODE} - 2) / 2 )) 
 log "deploying contracts (DeployLocal)"
 (
   cd "$REPO_ROOT/contracts"
-  DEPLOYER_PRIVATE_KEY="$DEPLOYER_KEY" "$FORGE" script script/DeployLocal.s.sol \
+  DEPLOYER_PRIVATE_KEY="$DEPLOYER_KEY" OPERATOR_ADDRESS="$SETTLER_ADDR" "$FORGE" script script/DeployLocal.s.sol \
     --tc DeployLocal --rpc-url "$RPC_URL" --broadcast
 ) >"$RUN_DIR/deploy.log" 2>&1 || { cat "$RUN_DIR/deploy.log"; fail "contract deployment failed — see $RUN_DIR/deploy.log"; }
 

@@ -26,12 +26,15 @@ export interface OrderInput {
   nonce: bigint
 }
 
-let nonceCounter = BigInt(Date.now()) * 1_000_000n
+let nonceCounter = 0n
 
-// Monotonic per-process nonce — unique across every order this script signs,
-// which is all that matters (CLOBSettlement dedups per-maker, per-nonce).
+// Millisecond-timestamp nonce, strictly increasing within this process: unique
+// per maker (the order-book-server dedups per maker + market), and on the same
+// scale as the frontend's, so CLOBSettlement.setMinNonce(Date.now()) cancels
+// everything a maker signed before "now".
 export function nextNonce(): bigint {
-  nonceCounter += 1n
+  const now = BigInt(Date.now())
+  nonceCounter = now > nonceCounter ? now : nonceCounter + 1n
   return nonceCounter
 }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Address } from 'viem'
-import { buildApp } from '../server'
+import { buildApp, parseMinOrderTokens } from '../server'
 import { MemoryOrderStore } from '../orderbook'
 import { ORDER_TYPES } from '../validation'
 import type { AppConfig, OrderWire } from '../types'
@@ -29,6 +29,7 @@ const TEST_CONFIG: AppConfig = {
   noTokenAddress: MOCK_NO,
   clobSettlementAddress: MOCK_CLOB,
   chainId: CHAIN_ID,
+  minOrderTokens: 0n, // fixtures use tiny sizes; the minimum has its own tests
 }
 
 function eip712Domain() {
@@ -275,6 +276,28 @@ describe('POST /order — v1b1 chain pre-filter', () => {
     const body = res.json<{ error: string; minSellProceeds: string }>()
     expect(body.error).toBe('FundingShortfall')
     expect(body.minSellProceeds).toBe('80')
+  })
+
+  it('pro-rata (batch 3): a YES sell of part of the balance needs only its share of the debit', async () => {
+    // D = 80 on a 400-YES balance; selling 100 needs ceil(80 × 100 / 400) = 20.
+    const reader = mockChainReader({ fundingDebt: BigInt(50), previewDelta: BigInt(-30), yesBalance: BigInt(400) })
+    app = await buildApp(store, TEST_CONFIG, reader)
+
+    const short = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(19) },
+      BigInt(110),
+    )
+    const res = await app.inject({ method: 'POST', url: '/order', body: short })
+    expect(res.statusCode).toBe(400)
+    expect(res.json<{ minSellProceeds: string }>().minSellProceeds).toBe('20')
+
+    const ok = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(100), minAmountOut: BigInt(20) },
+      BigInt(111),
+    )
+    expect((await app.inject({ method: 'POST', url: '/order', body: ok })).statusCode).toBe(201)
   })
 
   it('accepts a YES sell whose minAmountOut covers the net funding debit', async () => {
@@ -908,5 +931,92 @@ describe('GET /orderbook', () => {
     const book = res.json<{ bids: unknown[]; asks: unknown[] }>()
     expect(book.bids).toHaveLength(0)
     expect(book.asks).toHaveLength(0)
+  })
+})
+
+// ─── Minimum order size (owner decision B: 1 Upbet/Downbet) ───────────────────
+
+describe('POST /order — minimum order size', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  afterEach(async () => { await app?.close() })
+
+  it('rejects a bid wanting fewer than MIN tokens and an ask offering fewer; accepts exactly MIN', async () => {
+    const store = new MemoryOrderStore()
+    app = await buildApp(store, { ...TEST_CONFIG, minOrderTokens: undefined })  // default = 1_000_000 (1 Upbet)
+
+    const smallBid = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_USDC as Address, tokenOut: MOCK_YES as Address, amountIn: BigInt(230_000), minAmountOut: BigInt(999_999) },
+      BigInt(901),
+    )
+    const r1 = await app.inject({ method: 'POST', url: '/order', body: smallBid })
+    expect(r1.statusCode).toBe(400)
+    expect(r1.json()).toEqual({ error: 'BelowMinOrderSize', minOrderTokens: '1000000' })
+
+    const smallAsk = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_YES as Address, tokenOut: MOCK_USDC as Address, amountIn: BigInt(999_999), minAmountOut: BigInt(230_000) },
+      BigInt(902),
+    )
+    expect((await app.inject({ method: 'POST', url: '/order', body: smallAsk })).statusCode).toBe(400)
+
+    const oneUpbet = await buildOrderWire(
+      MAKER,
+      { tokenIn: MOCK_USDC as Address, tokenOut: MOCK_YES as Address, amountIn: BigInt(230_000), minAmountOut: BigInt(1_000_000) },
+      BigInt(903),
+    )
+    expect((await app.inject({ method: 'POST', url: '/order', body: oneUpbet })).statusCode).toBe(201)
+  })
+
+  it('parseMinOrderTokens: default 1 Upbet; explicit value; invalid falls back', () => {
+    expect(parseMinOrderTokens(undefined)).toBe(1_000_000n)
+    expect(parseMinOrderTokens('5000000')).toBe(5_000_000n)
+    expect(parseMinOrderTokens('abc')).toBe(1_000_000n)
+    expect(parseMinOrderTokens('-1')).toBe(1_000_000n)
+  })
+})
+
+describe('POST /orders/sync — drop orders the chain says can never fill', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  afterEach(async () => { await app?.close() })
+
+  async function setup(remainingFor: (nonce: bigint) => bigint | Error) {
+    const store = new MemoryOrderStore()
+    const reader: IChainReader = {
+      ...mockChainReader(),
+      orderRemaining: vi.fn(async (_clob, o) => {
+        const r = remainingFor(o.nonce)
+        if (r instanceof Error) throw r
+        return r
+      }),
+    }
+    app = await buildApp(store, TEST_CONFIG, reader)
+    const ids: Record<string, string> = {}
+    for (const [name, signer, nonce] of [['dead', MAKER, 11n], ['live', MAKER, 12n], ['other', OTHER, 13n], ['rpc', MAKER, 14n]] as const) {
+      const w = await buildOrderWire(signer, { maker: signer.address }, nonce)
+      const r = await app.inject({ method: 'POST', url: '/order', body: w })
+      expect(r.statusCode).toBe(201)
+      ids[name] = r.json().orderId
+    }
+    return { store, reader, ids }
+  }
+
+  it("removes only that maker's orders with remaining() == 0; a failed read removes nothing", async () => {
+    const { reader, ids } = await setup(n => n === 11n || n === 13n ? 0n : n === 14n ? new Error('RPC down') : 500n)
+    const r = await app.inject({ method: 'POST', url: '/orders/sync', body: { market: 'mstr', maker: MAKER.address } })
+    expect(r.statusCode).toBe(200)
+    expect(r.json()).toEqual({ removed: [ids.dead], unreadable: 1 })
+    const book = (await app.inject({ method: 'GET', url: '/orderbook?market=mstr' })).json()
+    expect(book.bids.map((o: { id: string }) => o.id).sort()).toEqual([ids.live, ids.other, ids.rpc].sort())   // OTHER's dead order untouched
+    expect((reader.orderRemaining as ReturnType<typeof vi.fn>).mock.calls.every(c => c[0] === MOCK_CLOB)).toBe(true)
+  })
+
+  it('400 on a bad maker, 404 on an unknown market, 503 without chain reads', async () => {
+    await setup(() => 0n)
+    expect((await app.inject({ method: 'POST', url: '/orders/sync', body: { market: 'mstr', maker: 'nope' } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'POST', url: '/orders/sync', body: { market: 'ghost', maker: MAKER.address } })).statusCode).toBe(404)
+    await app.close()
+    app = await buildApp(new MemoryOrderStore(), TEST_CONFIG)
+    expect((await app.inject({ method: 'POST', url: '/orders/sync', body: { market: 'mstr', maker: MAKER.address } })).statusCode).toBe(503)
   })
 })
