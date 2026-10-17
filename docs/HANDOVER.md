@@ -101,7 +101,13 @@ canonical references below.*
   `docs/security/invariant-findings-2026-09-26.md`. **All three fixed (unified `owed()`)
   and deployed in the 2026-10-01 batch-1 redeploy.**
 - **Audit: deliberately deferred** by the project owner. Not forgotten.
-- **Batch 2 LIVE (2026-10-15):** carry = −(1 − m)·ln(1 − m) instead of m, so the price is
+- **Batch 3 LIVE (2026-10-17):** partial fills (operator-only `fillOrders`), on-chain cancel
+  (`cancelOrders` / `setMinNonce`, the market page's "Your Open Orders"), pro-rata carry-debt
+  collection, 1-Upbet minimum. Every market got a new contract set under a NEW MarketRegistry
+  `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`; the batch-2 sets are paused + inactive.
+  Record: `docs/redeploy-batch3-runbook.md`. Blockscout verification of the 19 batch-3
+  contracts is still to do (rate-limited on 2026-10-17).
+- **Batch 2 (2026-10-15, superseded by batch 3):** carry = −(1 − m)·ln(1 − m) instead of m, so the price is
   exactly the 12-month default probability (`docs/carry-formula.md`). Every market got a new
   contract set under a NEW MarketRegistry `0xF650221216c76Bb775cd42211aFcb7a3c99f99A0`; the
   batch-1 sets are paused + inactive. Seeds unchanged (23/10/2%) — placeholders until the
@@ -296,12 +302,13 @@ list.
 3. ~~Ops polish~~ — done 2026-10-13 (matching-engine /health, funding-keeper retry +
    `[ALERT]`, uptime coverage). Remaining: a public domain for matching-engine port 3005 +
    its uptime step.
-4. **Partial fills + on-chain cancel (batch 3)** — `docs/partial-fills-plan.md`. All
+4. ~~Partial fills + on-chain cancel (batch 3)~~ — LIVE 2026-10-17. `docs/partial-fills-plan.md`. All
    decisions made 2026-10-16 (A pro-rata carry debt, B 1-Upbet minimum off-chain, C
    `cancelOrders` + `setMinNonce`, D pair-only fills, E operator-only fills). BUILT on
    `feat/partial-fills` (contracts, matching-engine, order-book-server, liquidator seller,
-   frontend, smoke 12/12). Needs a FULL redeploy (CreditMarket changed):
-   `docs/redeploy-batch3-runbook.md` — the owner merges and runs the broadcast steps.
+   frontend, smoke 12/12), merged as PR #17 and deployed (full redeploy, record in
+   `docs/redeploy-batch3-runbook.md`). Open: Blockscout verification of the 19 contracts;
+   top up the deployer's USDC (≈1.5 USDC left after seeding, below Turkey's 97¢ Downbet bid).
 
 ### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
 

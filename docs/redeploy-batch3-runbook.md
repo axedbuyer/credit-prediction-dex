@@ -102,9 +102,40 @@ for m in mstr crwv try; do ORDER_BOOK_URL=https://order-book-server-production-9
   best (larger) resting ask; on `GET /orderbook?market=mstr` that ask now shows `filled`
   and a smaller remaining size. Repeat for `crwv` and `try`.
 - **Minimum:** a 0.5-Upbet order is rejected `400 BelowMinOrderSize`.
-- **Cancel:** on the market page, "Your Open Orders" → Cancel on a test order — the tx
-  confirms and the order leaves the book (`POST /orders/sync`).
+- **Cancel:** `npx tsx sepolia-cancel-check.ts --market <slug>` rests a 0.1¢ bid from the
+  test wallet, cancels it on-chain, syncs and confirms it left the book (or, on the market
+  page, "Your Open Orders" → Cancel).
 - Next funding-keeper tick accrues on the new markets; uptime workflow (manual run) green.
+
+## Record (2026-10-17)
+
+- **Order of events:** PR #17 merged first, so the hosted services ran batch-3 code against
+  the batch-2 CLOBs, which have no `fillOrders`. Nothing could settle until the flip, about
+  15 min.
+- **Who ran what:** the auto-mode classifier blocked Claude from the forge broadcast and
+  from `railway variable set` (allowed in batch 2). The owner ran §1, §3, §4.2 and §4.3
+  (with the re-seed chained on) as `!` commands. Claude did §2, PR #18 and the rest of §5–6.
+- **New registry:** `0xA7bcc124aF821388886012B905Ba8cF4B79469b1` (start block 48217498).
+  CreditMarkets: `mstr` `0x89e54F5e5C996174D9d2e52dbf90589b2f355d3A`, `crwv`
+  `0xB6bc5e9FA166520536453FD667B79Fb705ca09b5`, `try` `0xdD1202B077b9B89253006610F80DAD23B9fDf76e`.
+  §2 matched (carry 0.20125 / 0.09482 / 0.01980).
+- **Wind-down:** the deployer redeemed 4 pairs per market. Each batch-2 market keeps the
+  test wallet's 4 Upbets and the deployer's 4 Downbets. Collateral plus the test wallet's
+  recorded carry debt covers them, except Turkey, which is 1 wei short (the batch-2
+  rounding-down bug this batch fixes; the market is paused).
+- **Redis:** the owner deleted 18 `orders:*`, 6 `orderbook:*` and 6 `nonces:*`; the 14
+  `holder-index:*` keys were kept.
+- **Re-seed:** the deployer ran out of USDC on `try`, so its ladder was seeded with
+  `MM_QTY=2` (2 per level). Top the deployer up before the next seed.
+- **Verify:** all five services in registry mode on the new registry.
+  - `sepolia-test-trade.ts` filled 1 Upbet out of the best ask on every market (each now
+    shows `filled` 1 of 4, or 1 of 2 on `try`).
+  - A 0.5-Upbet order got `400 BelowMinOrderSize`.
+  - `sepolia-cancel-check.ts` passed on all three markets. Its first run exposed a stale
+    read from the public RPC right after the receipt; OpenOrders and the check now retry
+    the sync (PR #18).
+- **Not yet done:** Blockscout verification is rate-limited ("Too many requests") —
+  retry one contract at a time later.
 
 ## 7. After
 
