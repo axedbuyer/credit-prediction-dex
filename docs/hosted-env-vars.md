@@ -22,15 +22,19 @@ ignored (legacy one-market `mstr` mode only). Registry vars:
 | `CHAIN_ID` | matching-engine | Optional, default 84532 (only for local anvil). |
 | `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` | Vercel | Set → frontend discovers markets on-chain; the `NEXT_PUBLIC_*_ADDRESS` market vars are then ignored (`NEXT_PUBLIC_USDC_ADDRESS` still used). |
 
-**MarketRegistry (batch 2, CURRENT): `0xF650221216c76Bb775cd42211aFcb7a3c99f99A0`** (deployed
-2026-10-15, start block 48140921; `docs/redeploy-batch2-runbook.md`; carry formula
-`docs/carry-formula.md`). CreditMarkets: `mstr` `0x7AF29bd2fE6CF3bE904A538f2e0217285A7da94c`,
-`crwv` `0xcD60CDe83f631A82f369BF7D6C03b91D2b25f5A0`, `try`
-`0xA891D433DEcEf0d35C40f93b86057411777Ca594` — full address sets in
+**MarketRegistry (batch 3, CURRENT): `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`** (deployed
+2026-10-17, start block 48217498; `docs/redeploy-batch3-runbook.md`; partial fills
+`docs/partial-fills-plan.md`). CreditMarkets: `mstr` `0x89e54F5e5C996174D9d2e52dbf90589b2f355d3A`,
+`crwv` `0xB6bc5e9FA166520536453FD667B79Fb705ca09b5`, `try`
+`0xdD1202B077b9B89253006610F80DAD23B9fDf76e` — full address sets in
 `contracts/deployments/base-sepolia/markets/<slug>.json`. Set as `MARKET_REGISTRY_ADDRESS` on
 all five Railway services and as Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`.
 
-**Previous registry (batch 1, wound down 2026-10-15):** `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`
+**Previous registry (batch 2, wound down 2026-10-17):** `0xF650221216c76Bb775cd42211aFcb7a3c99f99A0`
+(deployed 2026-10-15) — its three markets are paused and inactive; address sets archived in
+`contracts/deployments/base-sepolia/archive/batch2/`.
+
+**Batch-1 registry (wound down 2026-10-15):** `0xdF1A5141310140edF6fDaE3cd339FD042dF15720`
 (deployed 2026-10-03) — its three markets are paused and inactive; address sets archived in
 `contracts/deployments/base-sepolia/archive/batch1/`. The single-set address vars below
 still point at the batch-1 MSTR contracts: they are ignored in registry mode, and unsetting
