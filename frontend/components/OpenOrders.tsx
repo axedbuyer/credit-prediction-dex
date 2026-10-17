@@ -36,12 +36,20 @@ async function fetchBook(slug: string): Promise<{ bids: RawOrder[]; asks: RawOrd
   return res.json()
 }
 
-async function syncBook(slug: string, maker: string) {
-  await fetch(`${ORDER_BOOK_URL}/orders/sync`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ market: slug, maker }),
-  }).catch(() => undefined) // best effort: the matcher prunes it on its next attempt anyway
+// The server reads remaining() from a load-balanced public RPC, which can answer from a
+// node a block behind the cancel receipt — so retry until every cancelled id is dropped.
+async function syncBook(slug: string, maker: string, ids: string[]) {
+  const pending = new Set(ids)
+  for (let attempt = 0; attempt < 5 && pending.size > 0; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2_000))
+    const res = await fetch(`${ORDER_BOOK_URL}/orders/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ market: slug, maker }),
+    }).catch(() => undefined) // best effort: the matcher prunes it on its next attempt anyway
+    const body = res?.ok ? ((await res.json().catch(() => ({}))) as { removed?: string[] }) : {}
+    for (const id of body.removed ?? []) pending.delete(id)
+  }
 }
 
 function toTuple(o: RawOrder) {
@@ -81,13 +89,13 @@ export function OpenOrders({ market }: { market: Market }) {
     (o) => o.maker.toLowerCase() === address.toLowerCase(),
   )
 
-  const run = async (key: string, send: () => Promise<`0x${string}`>) => {
+  const run = async (key: string, ids: string[], send: () => Promise<`0x${string}`>) => {
     setBusy(key)
     setError('')
     try {
       const hash = await send()
       await waitForTransactionReceipt(wagmiConfig, { hash })
-      await syncBook(market.slug, address)
+      await syncBook(market.slug, address, ids)
       await queryClient.invalidateQueries({ queryKey: ['orderbook', market.slug] })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -98,7 +106,7 @@ export function OpenOrders({ market }: { market: Market }) {
   }
 
   const cancelOne = (o: RawOrder) =>
-    run(o.id, () =>
+    run(o.id, [o.id], () =>
       writeContractAsync({
         address: market.clobSettlement,
         abi: CLOB_CANCEL_ABI,
@@ -110,7 +118,7 @@ export function OpenOrders({ market }: { market: Market }) {
   // Every order this wallet signed before now has a nonce below Date.now() (the UI
   // signs millisecond-timestamp nonces), so one setMinNonce retires all of them.
   const cancelAll = () =>
-    run('all', () =>
+    run('all', mine.map((o) => o.id), () =>
       writeContractAsync({
         address: market.clobSettlement,
         abi: CLOB_CANCEL_ABI,

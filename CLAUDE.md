@@ -35,17 +35,19 @@ Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 202
 and frontend run in registry mode since 2026-10-03** — 210 contract tests (incl. a 2-market invariant suite), 440
 off-chain tests (2026-10-13), 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
 **Batch 2 (2026-10-15):** the carry-formula change (carry = −(1 − m)·ln(1 − m), see
-"Carry rate") shipped as a fresh contract set for every market under a NEW MarketRegistry
-`0xF650221216c76Bb775cd42211aFcb7a3c99f99A0` (addresses per market in
-`contracts/deployments/base-sepolia/`; runbook `docs/redeploy-batch2-runbook.md`). The batch-1
+"Carry rate") shipped as a fresh contract set for every market under MarketRegistry
+`0xF650221216c76Bb775cd42211aFcb7a3c99f99A0` (runbook `docs/redeploy-batch2-runbook.md`;
+superseded by batch 3). The batch-1
 markets and registry `0xdF1A…5720` are paused and inactive (archived in
 `deployments/base-sepolia/archive/batch1/`). Without `MARKET_REGISTRY_ADDRESS` /
 `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` every service falls back to legacy single-market
-(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Batch 3 (built 2026-10-16 on `feat/partial-fills`, NOT deployed):** partial fills
+(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Batch 3 LIVE (2026-10-17):** partial fills
 (`fillOrders`, operator-only), on-chain cancel (`cancelOrders` / `setMinNonce`), pro-rata YES
 carry-debt collection (`CreditMarket.collectDebt`), YES debits rounded up, 1-Upbet minimum
-order — a full redeploy of every market (CreditMarket changed), runbook
-`docs/redeploy-batch3-runbook.md`. **Ops hardening
+order — a fresh contract set for every market under a NEW MarketRegistry
+`0xA7bcc124aF821388886012B905Ba8cF4B79469b1` (runbook + record `docs/redeploy-batch3-runbook.md`);
+the batch-2 markets and registry `0xF650…99A0` are paused and inactive (archived in
+`deployments/base-sepolia/archive/batch2/`). **Ops hardening
 (2026-10-13):** matching-engine `GET /health`, funding-keeper retry + `[ALERT]` logs, hourly
 uptime checks for the liquidator bot + hot-wallet gas, and mainnet *plumbing* only
 (`CHAIN_ID`/`RPC_URL`/`NEXT_PUBLIC_CHAIN_ID`, `make deploy-mainnet` guard) — nothing on mainnet.
