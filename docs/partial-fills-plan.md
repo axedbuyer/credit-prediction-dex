@@ -1,7 +1,10 @@
-# Partial fills + on-chain cancel — plan for the next contract batch (batch 3)
+# Partial fills + on-chain cancel — batch 3
 
-*Written 2026-10-15. Status: **plan, not started; open decisions in §6 need the owner.**
-Read with root `CLAUDE.md` ("No partial fills", "Order removal policy", Funding Model).*
+*Written 2026-10-15. Status: **BUILT 2026-10-16 on `feat/partial-fills` (not deployed). All
+decisions A–E made 2026-10-16 (§6). Rollout = a FULL redeploy of every market (§4),
+runbook `docs/redeploy-batch3-runbook.md`.** Read with root `CLAUDE.md` ("Partial fills",
+"Order removal policy", Funding Model). §2–§3 are the original plan; "As built" notes mark
+where the code differs.*
 
 ## 1. Why
 
@@ -31,7 +34,24 @@ signature can still settle it until it expires. Frontend orders expire after 1 h
 market-maker seed orders (`scripts/demo/mm-sepolia-seed.ts`) after 7 days. The fix belongs
 to the same contract change: an on-chain cancel.
 
-## 2. What changes on-chain (CLOBSettlement only)
+## 2. What changes on-chain (CLOBSettlement, plus a small CreditMarket change)
+
+> **As built:** decision A needs `CreditMarket.collectDebt(user, amount)` (replacing
+> `markDebtCollected`, which could only zero the whole debt), so CreditMarket changes too —
+> hence the full redeploy in §4. The batch-3 invariant run also found that flooring every
+> YES debit let collateral drift < 1 wei short per settlement; YES debits now round UP
+> (`CreditMarket._yesDebit`), NO credits stay rounded down.
+>
+> Size is in outcome tokens (`tokenQuantity`: a bid's `minAmountOut`, an ask's `amountIn`).
+> `filled[hash]` counts tokens; `spent[hash]` counts the USDC a buy order has paid and is a
+> hard cap at its signed `amountIn`, so rounding can never pull more than the buyer signed.
+> Per fill: buyerCap = min(ceil(q × B_usdc / B_tokens), amountIn − spent); makerPrice = a
+> YES maker-seller's ceil(q × minAmountOut / amountIn), a NO maker-seller's
+> `minGrossForNet` of that, a maker-buyer's buyerCap; tradePrice = min(makerPrice,
+> buyerCap); the seller's floor(q × minAmountOut / amountIn) must hold (gross for YES, net
+> of fee for NO) else SlippageExceeded; a 0 price reverts FillTooSmall. Cancel-all is
+> `setMinNonce(n)` (not `incrementMinNonce`) so ms-timestamp nonces work. Fuzz:
+> `testFuzz_SplitFills_NeverCrossLimits`.
 
 **Fill tracking replaces the nonce flag.**
 `mapping(bytes32 orderHash => uint256 filled)` (in units of the order's `amountIn`)
@@ -86,33 +106,32 @@ YES seller's carry debt is collected when the sale happens in pieces (decision A
   confirms, so a reverted fill changes nothing. `canSettleWhole` and `markIncompatible`
   are deleted. Order removal policy is unchanged: only filled, cancelled, expired or
   own-state reasons.
+  *As built:* one fill per order per cycle (the next fill waits until `filled` is
+  recorded); the earlier order is the maker. `markIncompatible` stays for
+  SlippageExceeded / FillTooSmall (a valid pair that can't trade at this size).
+  FillExceedsRemaining / OrderInvalidated / OrderExpired / InvalidOrder re-read
+  `remaining()`: 0 → prune, else resync `filled`.
 - **liquidator bot:** `clob-seller.ts` can cross the best bid for any amount and rest
   the remainder at the mark, as designed.
 - **frontend:** the order book shows remaining sizes. The portfolio lists open orders as
   "2 of 4 filled". Adds a "cancel on-chain" button. USDC approval is still per market,
   but to the new CLOB address.
+  *As built:* a "Your Open Orders" card on the market page (remaining "of" size, Cancel →
+  `cancelOrders`, "Cancel all in this market" → `setMinNonce(Date.now())`), then
+  `POST /orders/sync` (new order-book-server route: drops that maker's orders whose
+  `remaining()` is 0 — objective state, no signature). TradePanel: 1-Upbet minimum and
+  the pro-rata carry share on YES sells.
 
-## 4. Rollout: a new CLOB per market, positions untouched
+## 4. Rollout: a FULL redeploy of every market (decided 2026-10-16)
 
-Only `CLOBSettlement` changes, so the plan is to **keep every CreditMarket, YES/NO token,
-OracleRouter and LiquidationEngine**, and therefore every user's position:
-
-1. Deploy a new `CLOBSettlement` per market, pointing at that market's existing
-   CreditMarket, USDC, YES and NO. Set its fee config (50 bps, 50/50).
-2. Grant the new CLOB `CLOB_ROLE` on CreditMarket, YES and NO. Revoke the old CLOB's role.
-3. Registry entries are immutable and `clobSettlement` is part of the entry, so this needs
-   a **new MarketRegistry** registering the same market contracts with the new CLOB.
-   `register()` checks that the CLOB points at the same CreditMarket, USDC and tokens, so
-   it should pass. Verify this in the fork rehearsal.
-4. Clear Redis `orders:*`, `orderbook:*` and `nonces:*`. Every resting order is signed
-   for the old CLOB's EIP-712 domain. Users re-approve USDC to the new CLOB.
-5. Flip `MARKET_REGISTRY_ADDRESS` on Railway and Vercel, then re-seed. Same flow as the
-   batch-2 runbook, minus the market wind-down.
-
-Rehearse on an anvil fork first, as for batch 2. The rehearsal must check:
-- a partial fill on the re-seeded book;
-- an old-CLOB order reverting after the role revoke;
-- all 10 invariants under the extended invariant suite.
+The original plan here (new CLOBs only, positions kept) no longer works: decision A needs
+`CreditMarket.collectDebt`, so CreditMarket changes. The owner chose **pro-rata + full
+redeploy**, the same shape as batch 2: a fresh contract set for every market under a new
+MarketRegistry, the batch-2 markets wound down (paused, deactivated; holders redeem), Redis
+cleared, Railway + Vercel flipped to the new registry, books re-seeded. New in batch 3:
+`OPERATOR_ADDRESS` (the matching-engine settler) gets CLOBSettlement `OPERATOR_ROLE` in
+`AddMarket.s.sol`, and order-book-server reads `MIN_ORDER_TOKENS` (default 1 Upbet).
+Step by step: `docs/redeploy-batch3-runbook.md`.
 
 ## 5. Tests
 
@@ -130,38 +149,68 @@ Rehearse on an anvil fork first, as for batch 2. The rehearsal must check:
 - **Smoke:** a new check where a small taker partially fills a large resting ask, then a
   second taker fills the rest. The 11 existing checks must stay green.
 
-## 6. Decisions for the owner
+## 6. Decisions
 
-**A. Carry debt when a YES position is sold in pieces.** Today a YES sale must cover the
-seller's whole carry debt or it reverts (FundingShortfall, invariant 8). With partial
-fills, a small fill might not cover a large debt, and the engine would then prune a
-healthy seller's order because of a small counterparty: the same griefing pattern again.
-Options:
-1. **Pro-rata (recommended):** each fill collects `debt × tokens sold / YES held` and
-   must cover that share plus its fee. The debt per remaining token is unchanged, so the
-   seizure trigger and Epochs To Expire don't move. The final fill collects the rest.
-   Invariants 8 and 9 still hold per token.
-2. **Whole debt on the first fill:** keeps today's rule. Small fills against a seller
-   with debt revert, and those pairs must be skipped, not pruned.
-3. **Up to the fill's proceeds:** collect `min(debt, proceeds)`. Simplest, but a seller
-   could sell all their YES in pieces while debt is left on a position with no YES
-   behind it. Breaks invariant 9. Not recommended.
+Owner decisions of 2026-10-16: all of A–E decided.
 
-**B. Minimum fill size.** Tiny fills waste settler gas, and a 1-wei fill would round to
-zero USDC. Suggest a per-market minimum (e.g. 1 Upbet), with the last remainder of an order
-always allowed.
+**A. Carry debt when a YES position is sold in pieces: PRO-RATA (decided).** Today a
+YES sale must cover the seller's whole carry debt or it reverts (FundingShortfall,
+invariant 8). With partial fills, a small fill might not cover a large debt, and the
+engine would prune a healthy seller's order because of a small counterparty.
 
-**C. Cancel scope.** Per-order `cancelOrders` only, or also a per-maker
-`incrementMinNonce` "cancel everything" (useful for the market maker and the liquidator
-bot). Suggest both.
+Each fill instead collects `debt × tokens sold / YES held`. The fill's price must cover
+that share plus the fee, or the fill reverts and the position is unchanged (invariant 8,
+per fill). The debt per remaining token stays the same, so the seizure trigger and Epochs
+To Expire don't move. Selling the last YES collects the rest. Invariant 9 holds: no debt
+is erased without the matching USDC reaching collateral. The off-chain FundingShortfall
+pre-filter and `minSellProceeds` switch to the per-fill share.
 
-**D. Batch fills.** Ship the pair form only, or also one-taker-many-makers in a single
-transaction. Suggest pair-only first; batch later if settler gas matters.
+Rejected:
+- whole debt on the first fill (small fills against an indebted seller would revert);
+- `min(debt, proceeds)`, which can leave debt on a position with no YES behind it and
+  breaks invariant 9.
+
+**B. Minimum size: DECIDED — 1 Upbet/Downbet, off-chain only** ("go for 1 Upbet
+minimum at this stage"; `MIN_ORDER_TOKENS`, default 1_000_000, one value for all markets).
+Research that led there: For comparison, Polymarket's CTF
+Exchange has **no on-chain minimum fill**: `fillOrder`, `fillOrders` and `matchOrders`
+take any fill amount up to what remains of the order (`MakingGtRemaining` otherwise).
+The minimum is an off-chain rule applied when an order is placed: each market's book
+carries a `min_order_size` (and a `tick_size`). The clob-client types and the docs example
+use 5 shares. The remainder of a partly filled order may fall below the minimum and still
+fill.
+
+Dust fills aren't a problem for Polymarket because only its operator can call the fill
+functions (`onlyOperator`), so nobody else can submit 1-wei fills (see E).
+
+Recommendation: copy that.
+- A per-market minimum order size enforced by `POST /order` (suggest 5 Upbets, set per
+  market in the order-book-server).
+- No on-chain minimum. The contract only rejects a fill that rounds to 0 USDC.
+- Leftovers below the minimum still fill.
+
+**C. Cancel scope: BOTH (decided).** Per-order `cancelOrders(Order[])`, maker only, plus
+per-maker "cancel everything" — built as `setMinNonce(n)` (n must increase). Polymarket has the same pair:
+`cancelOrders` and `incrementNonce`.
+
+**D. Batch fills: PAIR-ONLY first (decided).** `fillOrders(maker, taker, tokens)`.
+One-taker-many-makers comes later, if settler gas matters.
+
+**E. Who may submit fills: DECIDED — operator-only** (`OPERATOR_ROLE`, the settler). Today `verifyAndSettle` is permissionless.
+Polymarket restricts every fill to an operator role. Doing the same, with an
+`OPERATOR_ROLE` held by the settler wallet:
+- stops anyone else choosing fill sizes, which removes dust griefing (B);
+- makes `DELETE /order` binding in practice, since only our operator settles and it
+  honours off-chain cancels;
+- costs nothing, because the matching engine's settler is already the only caller.
+
+The trade-off: if the operator is down, nothing settles. That's already true in practice.
+On-chain cancel (C) remains the guarantee that doesn't depend on trusting us.
+Recommendation: operator-only.
 
 ## 7. Size
 
 Roughly the batch-2 effort:
 - Contract work concentrated in `CLOBSettlement` plus tests.
 - Moderate changes in matching-engine, order-book-server and the frontend.
-- One redeploy that keeps every position: new CLOBs and a new registry, with no market
-  wind-down.
+- One full redeploy (every market, new registry, wind-down of batch 2) — see §4.

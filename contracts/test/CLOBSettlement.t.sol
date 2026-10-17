@@ -42,6 +42,7 @@ contract CLOBSettlementTest is Test {
             admin, address(usdc), address(yesToken), address(noToken), 0.23e18, 1 days
         );
         clob = new CLOBSettlement(address(market), admin);
+        clob.grantRole(clob.OPERATOR_ROLE(), admin);
 
         // Wire token roles for CreditMarket
         yesToken.grantRole(yesToken.MINTER_ROLE(), address(market));
@@ -127,14 +128,14 @@ contract CLOBSettlementTest is Test {
         uint256 makerUsdcBefore = usdc.balanceOf(maker);
         uint256 takerYesBefore  = yesToken.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         assertEq(usdc.balanceOf(maker),     makerUsdcBefore - usdcIn, "maker paid USDC");
         assertEq(yesToken.balanceOf(maker), yesOut,                   "maker received YES");
         assertEq(yesToken.balanceOf(taker), takerYesBefore - yesOut,  "taker gave YES");
         assertEq(usdc.balanceOf(taker),     usdcIn,                   "taker received USDC");
-        assertTrue(clob.usedNonces(maker, 0), "maker nonce spent");
-        assertTrue(clob.usedNonces(taker, 0), "taker nonce spent");
+        assertEq(clob.filled(clob.hashOrder(mo)), yesOut, "maker order fully filled");
+        assertEq(clob.filled(clob.hashOrder(to_)), yesOut, "taker order fully filled");
     }
 
     function test_ValidNOBuy_Settles() public {
@@ -152,7 +153,7 @@ contract CLOBSettlementTest is Test {
         uint256 makerUsdcBefore = usdc.balanceOf(maker);
         uint256 takerNoBefore   = noToken.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         assertEq(usdc.balanceOf(maker),    makerUsdcBefore - usdcIn, "maker paid USDC");
         assertEq(noToken.balanceOf(maker), noOut,                    "maker received NO");
@@ -174,7 +175,7 @@ contract CLOBSettlementTest is Test {
         bytes memory ts = _sign(takerKey, to_);
 
         vm.expectRevert(CLOBSettlement.OrderExpired.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
     }
 
     function test_WrongSignature_Reverts() public {
@@ -189,10 +190,10 @@ contract CLOBSettlementTest is Test {
         bytes memory ts       = _sign(takerKey, to_);
 
         vm.expectRevert(CLOBSettlement.InvalidSignature.selector);
-        clob.verifyAndSettle(mo, wrongSig, to_, ts);
+        clob.fillOrders(mo, wrongSig, to_, ts, _qty(mo));
     }
 
-    function test_DuplicateNonce_Reverts() public {
+    function test_ReplayFilledPair_Reverts() public {
         uint256 expiry = block.timestamp + 1 hours;
         CLOBSettlement.Order memory mo = _order(
             maker, address(usdc), address(yesToken), 100e18, 80e18, expiry, 0
@@ -203,11 +204,11 @@ contract CLOBSettlementTest is Test {
         bytes memory ms = _sign(makerKey, mo);
         bytes memory ts = _sign(takerKey, to_);
 
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
 
-        // Second attempt with same nonces must fail.
-        vm.expectRevert(CLOBSettlement.NonceUsed.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        // Replaying a fully filled pair must fail.
+        vm.expectRevert(CLOBSettlement.FillExceedsRemaining.selector);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
     }
 
     function test_MismatchedPair_Reverts() public {
@@ -223,7 +224,7 @@ contract CLOBSettlementTest is Test {
         bytes memory ts = _sign(takerKey, to_);
 
         vm.expectRevert(CLOBSettlement.MismatchedPair.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
     }
 
     function test_FundingSyncedOnSettle() public {
@@ -245,7 +246,7 @@ contract CLOBSettlementTest is Test {
 
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         // After 1 year at a 23% mark: cumulativeFundingPerYES = one year of carry at
         // carryRateFor(0.23e18) ≈ 0.2013e18 (exact over a whole year).
@@ -307,7 +308,7 @@ contract CLOBSettlementTest is Test {
 
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         // credit = one year of carry at a 3% mark = 1000e18 * carryRateFor(0.03e18) / 1e18
         // ≈ 29.55e18; tradePrice = 950e18.
@@ -336,7 +337,7 @@ contract CLOBSettlementTest is Test {
 
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         // owed = one year of carry at a 3% mark ≈ 29.55e18; tradePrice = 50e18.
         uint256 owed = 1_000e18 * market.currentCarryRate() / 1e18;
@@ -367,13 +368,13 @@ contract CLOBSettlementTest is Test {
         uint256 snapBefore     = market.fundingSnapshot(taker);
 
         vm.expectRevert(CLOBSettlement.FundingShortfall.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
 
         assertEq(yesToken.balanceOf(taker), takerYesBefore, "YES balance unchanged after failed sell");
         assertEq(market.fundingSnapshot(taker), snapBefore, "funding snapshot unchanged after failed sell");
         assertFalse(market.claimable(taker), "a failed sell must never flag the position claimable");
-        assertFalse(clob.usedNonces(taker, 0), "taker nonce not consumed on revert");
-        assertFalse(clob.usedNonces(maker, 0), "maker nonce not consumed on revert");
+        assertEq(clob.filled(clob.hashOrder(to_)), 0, "taker order not filled on revert");
+        assertEq(clob.filled(clob.hashOrder(mo)), 0, "maker order not filled on revert");
     }
 
     // Taker holds the matched YES+NO pair from setUp (never traded), so his YES
@@ -393,7 +394,7 @@ contract CLOBSettlementTest is Test {
 
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         assertEq(usdc.balanceOf(taker), takerUsdcBefore + 100e18,
             "matched pair nets to zero -> tradePrice passes through with no funding deduction");
@@ -413,7 +414,7 @@ contract CLOBSettlementTest is Test {
             taker, address(yesToken), address(usdc), 80e18, 100e18, expiry, 0
         );
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         uint256 cumYes = market.cumulativeFundingPerYES();
         uint256 cumNo  = market.cumFundingPerNO();
@@ -445,7 +446,7 @@ contract CLOBSettlementTest is Test {
         bytes memory ts = _sign(takerKey, to_);
 
         vm.expectRevert(CLOBSettlement.PositionFrozen.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
     }
 
     // A flagged holder acting as the BUYER in a CLOB trade must be blocked, even
@@ -475,7 +476,7 @@ contract CLOBSettlementTest is Test {
         bytes memory ts = _sign(takerKey, to_);
 
         vm.expectRevert(CLOBSettlement.PositionFrozen.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
     }
 
     // ─── trading fee: YES sells and NO buys pay; YES buys and NO sells don't ──
@@ -525,7 +526,7 @@ contract CLOBSettlementTest is Test {
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
         uint256 marketUsdcBefore = usdc.balanceOf(address(market));
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         // min(50, 1000−50) = 50e18 → fee = 0.25e18, split 0.125 / 0.125.
         assertEq(usdc.balanceOf(maker), makerUsdcBefore - 50e18, "YES buyer pays pure tradePrice, fee-free");
@@ -555,7 +556,7 @@ contract CLOBSettlementTest is Test {
         uint256 makerUsdcBefore = usdc.balanceOf(maker);
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         assertEq(usdc.balanceOf(maker), makerUsdcBefore - 950e18, "NO buyer pays their signed gross total");
         assertEq(usdc.balanceOf(taker), takerUsdcBefore + 950e18 - 0.25e18, "NO seller receives gross minus buyer's fee");
@@ -580,7 +581,7 @@ contract CLOBSettlementTest is Test {
         bytes memory ts = _sign(takerKey, to_);
 
         vm.expectRevert(CLOBSettlement.SlippageExceeded.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
     }
 
     // Option B safeguard extends to the fee: a YES sale clearing above the
@@ -611,7 +612,7 @@ contract CLOBSettlementTest is Test {
         uint256 takerYesBefore = yesToken.balanceOf(taker);
 
         vm.expectRevert(CLOBSettlement.FundingShortfall.selector);
-        clob.verifyAndSettle(mo, ms, to_, ts);
+        clob.fillOrders(mo, ms, to_, ts, _qty(mo));
 
         assertEq(yesToken.balanceOf(taker), takerYesBefore, "position unchanged after failed sell");
         assertFalse(market.claimable(taker), "failed sell never flags the position");
@@ -638,11 +639,11 @@ contract CLOBSettlementTest is Test {
 
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
 
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
 
         assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18 - owed - 0.25e18,
             "seller nets tradePrice minus debit minus fee");
-        assertEq(market.fundingDebt(taker), 0, "debt collected via markDebtCollected");
+        assertEq(market.fundingDebt(taker), 0, "debt collected via collectDebt");
     }
 
     // feeBps = 0 (constructor default): all legacy paths charge nothing — the
@@ -657,7 +658,7 @@ contract CLOBSettlementTest is Test {
         );
 
         uint256 takerUsdcBefore = usdc.balanceOf(taker);
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
         assertEq(usdc.balanceOf(taker), takerUsdcBefore + 50e18, "no fee when unconfigured");
     }
 
@@ -770,7 +771,7 @@ contract CLOBSettlementTest is Test {
         );
 
         UsdcBal memory b0 = _snapUsdc();
-        clob.verifyAndSettle(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_));
+        clob.fillOrders(mo, _sign(makerKey, mo), to_, _sign(takerKey, to_), _qty(mo));
         UsdcBal memory b1 = _snapUsdc();
 
         // (1) Closure: seller proceeds, collateral, insurance and team are the only
@@ -793,8 +794,13 @@ contract CLOBSettlementTest is Test {
 
         // (4) Collateral moves by the funding leg alone: fees never touch it, and the
         // complete-set invariant makes the NO credit equal the YES debit at the same mark.
+        // A YES sale collects the seller's debt PRO-RATA to the share of their YES it
+        // sells (rounded down; selling everything collects it all); the rest stays in
+        // fundingDebt — never erased (invariant 9).
         if (yesSale) {
-            assertEq(b1.market - b0.market, owed, "collected YES debit is the only collateral inflow");
+            uint256 share = amount >= 1_000e18 ? owed : owed * amount / 1_000e18;
+            assertEq(b1.market - b0.market, share, "collected pro-rata YES debit is the only collateral inflow");
+            assertEq(market.fundingDebt(taker), owed - share, "uncollected debt stays on the ledger");
         } else {
             assertEq(b0.market - b1.market, owed, "paid NO credit is the only collateral outflow");
         }
@@ -809,4 +815,306 @@ contract CLOBSettlementTest is Test {
         vm.expectRevert(CLOBSettlement.ZeroAddress.selector);
         new CLOBSettlement(address(market), address(0));
     }
+
+    // ─── batch 3: partial fills, maker price, cancels, operator-only ──────────
+
+    uint256 buyer2Key = 0xCA401;
+
+    // A second buyer with USDC + approval, for multi-counterparty fills.
+    function _buyer2() internal returns (address b2) {
+        b2 = vm.addr(buyer2Key);
+        usdc.mint(b2, 10_000e18);
+        vm.prank(b2);
+        usdc.approve(address(clob), type(uint256).max);
+    }
+
+    // Resting YES ask by `taker`: 4 YES for >= 0.96 USDC (24¢).
+    function _ask4At24(uint256 nonce) internal view returns (CLOBSettlement.Order memory) {
+        return _order(taker, address(yesToken), address(usdc), 4e18, 0.96e18, block.timestamp + 1 hours, nonce);
+    }
+
+    function test_PartialFill_SmallBidFillsPartOfAsk_RestStaysFillable() public {
+        CLOBSettlement.Order memory ask = _ask4At24(1);
+        bytes memory askSig = _sign(takerKey, ask);
+        // 1 YES at up to 25¢: executes at the MAKER's 24¢.
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.25e18, 1e18, block.timestamp + 1 hours, 1);
+
+        uint256 makerUsdc0 = usdc.balanceOf(maker);
+        clob.fillOrders(ask, askSig, bid, _sign(makerKey, bid), 1e18);
+
+        assertEq(yesToken.balanceOf(maker), 1e18, "buyer got 1 YES");
+        assertEq(makerUsdc0 - usdc.balanceOf(maker), 0.24e18, "buyer paid the maker's 24c, not its own 25c limit");
+        assertEq(clob.remaining(ask), 3e18, "3 YES of the ask still resting");
+        assertEq(clob.remaining(bid), 0, "bid fully filled");
+
+        // A second buyer takes the remaining 3.
+        address b2 = _buyer2();
+        CLOBSettlement.Order memory bid2 = _order(b2, address(usdc), address(yesToken), 0.72e18, 3e18, block.timestamp + 1 hours, 1);
+        clob.fillOrders(ask, askSig, bid2, _sign(buyer2Key, bid2), 3e18);
+        assertEq(yesToken.balanceOf(b2), 3e18, "second buyer got the rest");
+        assertEq(clob.remaining(ask), 0, "ask fully filled");
+
+        // Nothing left: any further fill reverts.
+        address b3 = makeAddr("b3");
+        CLOBSettlement.Order memory bid3 = _order(b3, address(usdc), address(yesToken), 0.24e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory bid3Sig = _sign(takerKey, bid3); // signer irrelevant: remaining is checked on the maker first
+        vm.expectRevert(CLOBSettlement.FillExceedsRemaining.selector);
+        clob.fillOrders(ask, askSig, bid3, bid3Sig, 1e18);
+    }
+
+    function test_PartialFill_MakerIsBuyer_ExecutesAtBidPrice() public {
+        // Resting bid: 2 YES at 30¢; incoming sell asks only 20¢ -> trades at 30¢.
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.6e18, 2e18, block.timestamp + 1 hours, 1);
+        CLOBSettlement.Order memory sell = _order(taker, address(yesToken), address(usdc), 1e18, 0.2e18, block.timestamp + 1 hours, 1);
+        uint256 takerUsdc0 = usdc.balanceOf(taker);
+        clob.fillOrders(bid, _sign(makerKey, bid), sell, _sign(takerKey, sell), 1e18);
+        assertEq(usdc.balanceOf(taker) - takerUsdc0, 0.3e18, "seller receives the resting bid's 30c");
+        assertEq(clob.remaining(bid), 1e18, "1 YES of the bid still resting");
+    }
+
+    function test_Fill_TakerLimitNotMet_Reverts() public {
+        CLOBSettlement.Order memory ask = _ask4At24(1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.2e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.expectRevert(CLOBSettlement.SlippageExceeded.selector);
+        clob.fillOrders(ask, askSig, bid, bidSig, 1e18);
+    }
+
+    function test_Fill_OperatorOnly() public {
+        CLOBSettlement.Order memory ask = _ask4At24(1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.24e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.prank(maker);
+        vm.expectRevert(); // AccessControlUnauthorizedAccount(maker, OPERATOR_ROLE)
+        clob.fillOrders(ask, askSig, bid, bidSig, 1e18);
+    }
+
+    function test_Fill_ZeroTokens_Reverts() public {
+        CLOBSettlement.Order memory ask = _ask4At24(1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.24e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.expectRevert(CLOBSettlement.FillTooSmall.selector);
+        clob.fillOrders(ask, askSig, bid, bidSig, 0);
+    }
+
+    function test_Fill_PricesToZeroUsdc_Reverts() public {
+        // A resting "sell at any price" (floor 0) is the maker, so the fill prices at
+        // 0 USDC — rejected rather than giving tokens away.
+        CLOBSettlement.Order memory sell = _order(taker, address(yesToken), address(usdc), 1e18, 0, block.timestamp + 1 hours, 1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.3e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory sellSig = _sign(takerKey, sell);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.expectRevert(CLOBSettlement.FillTooSmall.selector);
+        clob.fillOrders(sell, sellSig, bid, bidSig, 1e18);
+    }
+
+    function test_Fill_ForeignToken_RevertsInvalidTokenPair() public {
+        MockUSDC other = new MockUSDC();
+        CLOBSettlement.Order memory ask = _order(taker, address(other), address(usdc), 1e18, 0.2e18, block.timestamp + 1 hours, 1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(other), 0.2e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.expectRevert(CLOBSettlement.InvalidTokenPair.selector);
+        clob.fillOrders(ask, askSig, bid, bidSig, 1e18);
+    }
+
+    function test_CancelOrders_MakerOnly_ThenUnfillable() public {
+        CLOBSettlement.Order memory ask = _ask4At24(1);
+        CLOBSettlement.Order[] memory list = new CLOBSettlement.Order[](1);
+        list[0] = ask;
+
+        vm.prank(maker);
+        vm.expectRevert(CLOBSettlement.NotOrderMaker.selector);
+        clob.cancelOrders(list);
+
+        vm.prank(taker);
+        clob.cancelOrders(list);
+        assertEq(clob.remaining(ask), 0, "cancelled order has nothing left");
+
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.24e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.expectRevert(CLOBSettlement.FillExceedsRemaining.selector);
+        clob.fillOrders(ask, askSig, bid, bidSig, 1e18);
+    }
+
+    function test_CancelAfterPartialFill_StopsTheRest() public {
+        CLOBSettlement.Order memory ask = _ask4At24(1);
+        bytes memory askSig = _sign(takerKey, ask);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.24e18, 1e18, block.timestamp + 1 hours, 1);
+        clob.fillOrders(ask, askSig, bid, _sign(makerKey, bid), 1e18);
+
+        CLOBSettlement.Order[] memory list = new CLOBSettlement.Order[](1);
+        list[0] = ask;
+        vm.prank(taker);
+        clob.cancelOrders(list);
+        assertEq(clob.remaining(ask), 0, "the unfilled 3 are cancelled; the filled 1 stays filled");
+        assertEq(yesToken.balanceOf(maker), 1e18, "the earlier fill is untouched");
+    }
+
+    function test_SetMinNonce_CancelsOlderOrders() public {
+        CLOBSettlement.Order memory oldAsk = _ask4At24(100);
+        CLOBSettlement.Order memory newAsk = _ask4At24(200);
+        vm.prank(taker);
+        clob.setMinNonce(150);
+        assertEq(clob.remaining(oldAsk), 0, "nonce below the floor is void");
+        assertEq(clob.remaining(newAsk), 4e18, "nonce at/above the floor is live");
+
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 0.24e18, 1e18, block.timestamp + 1 hours, 1);
+        bytes memory oldSig = _sign(takerKey, oldAsk);
+        bytes memory bidSig = _sign(makerKey, bid);
+        vm.expectRevert(CLOBSettlement.OrderInvalidated.selector);
+        clob.fillOrders(oldAsk, oldSig, bid, bidSig, 1e18);
+
+        vm.prank(taker);
+        vm.expectRevert(CLOBSettlement.NonceNotIncreasing.selector);
+        clob.setMinNonce(150);
+    }
+
+    // Pro-rata debt (owner decision A): selling a quarter of a YES position collects a
+    // quarter of the carry debt; the debt per remaining YES — and so the seizure
+    // trigger — is unchanged; selling the rest collects the rest.
+    function test_YESSale_ProRataDebt_PerFill() public {
+        _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18);
+        vm.warp(block.timestamp + 365 days);
+        market.accrueFunding();
+        uint256 owed0 = market.owed(taker);
+        uint256 perToken0 = owed0 * 1e18 / 1_000e18;
+
+        CLOBSettlement.Order memory ask = _order(taker, address(yesToken), address(usdc), 1_000e18, 50e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 50e18, 1_000e18, block.timestamp + 1 hours, 1);
+        bytes memory bidSig = _sign(makerKey, bid);
+
+        uint256 coll0 = usdc.balanceOf(address(market));
+        uint256 takerUsdc0 = usdc.balanceOf(taker);
+        clob.fillOrders(ask, askSig, bid, bidSig, 250e18);
+
+        uint256 share = owed0 * 250e18 / 1_000e18;
+        assertEq(usdc.balanceOf(address(market)) - coll0, share, "a quarter of the debt went to collateral");
+        assertEq(market.fundingDebt(taker), owed0 - share, "three quarters stay on the ledger");
+        assertEq(usdc.balanceOf(taker) - takerUsdc0, 12.5e18 - share, "seller nets price minus its debt share");
+        assertApproxEqAbs(market.owed(taker) * 1e18 / 750e18, perToken0, 1, "debt per remaining YES unchanged");
+
+        clob.fillOrders(ask, askSig, bid, bidSig, 750e18);
+        assertEq(market.fundingDebt(taker), 0, "selling the last YES collects the rest");
+        assertEq(usdc.balanceOf(address(market)) - coll0, owed0, "the whole debt reached collateral across both fills");
+    }
+
+    function test_YESSale_ProRata_FundingShortfallPerFill_PositionUnchanged() public {
+        _stripTakerToPureYes();
+        market.grantRole(market.KEEPER_ROLE(), admin);
+        market.setMark(0.03e18);
+        vm.warp(block.timestamp + 365 days);
+        market.accrueFunding();
+        // debt ≈ 2.955¢ per YES; a 2¢ ask can't cover its pro-rata share at any size.
+        CLOBSettlement.Order memory ask = _order(taker, address(yesToken), address(usdc), 1_000e18, 20e18, block.timestamp + 1 hours, 1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 20e18, 1_000e18, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        uint256 yes0 = yesToken.balanceOf(taker);
+        vm.expectRevert(CLOBSettlement.FundingShortfall.selector);
+        clob.fillOrders(ask, askSig, bid, bidSig, 10e18);
+        assertEq(yesToken.balanceOf(taker), yes0, "position unchanged");
+        assertEq(clob.remaining(ask), 1_000e18, "nothing recorded as filled");
+    }
+
+    // NO sale with the resting SELLER as maker: the fee-free seller's floor applies to
+    // its NET; the buyer pays the gross (net + fee) and never more than its own limit.
+    function test_NOSale_MakerSeller_NetFloorHonoured_WithFee() public {
+        _enableFee();
+        // Seller rests 100 NO for >= 70 net (70¢); buyer will pay up to 72¢ gross.
+        CLOBSettlement.Order memory ask = _order(taker, address(noToken), address(usdc), 100e18, 70e18, block.timestamp + 1 hours, 1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(noToken), 72e18, 100e18, block.timestamp + 1 hours, 1);
+        uint256 takerUsdc0 = usdc.balanceOf(taker);
+        uint256 makerUsdc0 = usdc.balanceOf(maker);
+        clob.fillOrders(ask, _sign(takerKey, ask), bid, _sign(makerKey, bid), 40e18);
+        uint256 net = usdc.balanceOf(taker) - takerUsdc0;
+        uint256 gross = makerUsdc0 - usdc.balanceOf(maker);
+        assertGe(net, 28e18, "seller nets at least its 70c floor on 40 NO");
+        assertLe(gross * 100e18, 72e18 * 40e18, "buyer pays no more than its 72c gross limit");
+        assertEq(gross - net, clob.tradeFee(40e18, gross), "difference is exactly the fee");
+    }
+
+    // Equal limits at a price that isn't a whole unit per partial fill (3 YES for 1
+    // USDC unit): the fill still goes through, and the buyer's signed amountIn is a
+    // hard cap across fills.
+    function test_PartialFill_EqualLimits_SubUnitRounding_Fills() public {
+        CLOBSettlement.Order memory ask = _order(taker, address(yesToken), address(usdc), 3, 1, block.timestamp + 1 hours, 1);
+        CLOBSettlement.Order memory bid = _order(maker, address(usdc), address(yesToken), 1, 3, block.timestamp + 1 hours, 1);
+        bytes memory askSig = _sign(takerKey, ask);
+        bytes memory bidSig = _sign(makerKey, bid);
+        uint256 b0 = usdc.balanceOf(maker);
+        clob.fillOrders(ask, askSig, bid, bidSig, 2); // exact price 0.667 units -> maker's ceil = 1
+        assertEq(b0 - usdc.balanceOf(maker), 1, "buyer paid its whole 1-unit budget");
+        assertEq(clob.remaining(bid), 0, "budget exhausted: the bid is done");
+        // The last token would cost 0 USDC from an empty budget: nothing more is pulled.
+        vm.expectRevert(CLOBSettlement.FillTooSmall.selector);
+        clob.fillOrders(ask, askSig, bid, bidSig, 1);
+        assertEq(b0 - usdc.balanceOf(maker), 1, "never more than the signed amountIn");
+    }
+
+    // Any split of one order into fills never crosses either party's limit, and the
+    // buyer's total stays within its signed amountIn.
+    struct SplitCase {
+        CLOBSettlement.Order sell;
+        CLOBSettlement.Order buy;
+        CLOBSettlement.Order mo;
+        CLOBSettlement.Order to;
+        bytes ms;
+        bytes ts;
+        uint256 qty;
+        bool yes;
+        uint256 buyerPaid;
+    }
+
+    function testFuzz_SplitFills_NeverCrossLimits(uint96 qRaw, uint64 aRaw, uint64 bRaw, bool makerIsSeller, bool yes) public {
+        _enableFee();
+        SplitCase memory c;
+        c.yes = yes;
+        c.qty = bound(uint256(qRaw), 1e12, 500e18); // real sizes; a fill worth 0 USDC is FillTooSmall (own test)
+        uint256 askP = bound(uint256(aRaw), 0.01e18, 0.9e18);          // seller floor per token
+        uint256 bidP = bound(uint256(bRaw), askP + 0.02e18, 0.99e18);  // buyer limit per token (crossing, room for fee)
+        address token = yes ? address(yesToken) : address(noToken);
+        c.sell = _order(taker, token, address(usdc), c.qty, c.qty * askP / 1e18, block.timestamp + 1 hours, 1);
+        c.buy  = _order(maker, address(usdc), token, c.qty * bidP / 1e18 + 1, c.qty, block.timestamp + 1 hours, 1);
+        c.mo = makerIsSeller ? c.sell : c.buy;
+        c.to = makerIsSeller ? c.buy : c.sell;
+        c.ms = _sign(makerIsSeller ? takerKey : makerKey, c.mo);
+        c.ts = _sign(makerIsSeller ? makerKey : takerKey, c.to);
+
+        uint256 first = c.qty / 3 == 0 ? 1 : c.qty / 3;
+        _splitFill(c, first);
+        _splitFill(c, c.qty - first);
+        assertLe(c.buyerPaid, c.buy.amountIn, "buyer total never exceeds its signed amountIn");
+        assertEq(usdc.balanceOf(address(clob)), 0, "CLOB never holds USDC");
+    }
+
+    function _splitFill(SplitCase memory c, uint256 q) internal {
+        uint256 b0 = usdc.balanceOf(maker);
+        uint256 s0 = usdc.balanceOf(taker);
+        // Every generated case crosses with >= 2c of room (more than any fee), so each
+        // piece must fill — a revert here is a bug, not a skipped case.
+        clob.fillOrders(c.mo, c.ms, c.to, c.ts, q);
+        uint256 paid = b0 - usdc.balanceOf(maker);
+        uint256 got = usdc.balanceOf(taker) - s0;
+        // The buyer pays at most its limit for this piece (rounded up < 1 unit); the
+        // seller gets at least its floor (rounded down < 1 unit).
+        assertLt(paid * c.qty, q * c.buy.amountIn + c.qty, "buyer never pays a whole unit above its limit");
+        // YES floor is on the gross; the fee-free NO seller's floor is on its net.
+        assertGt((c.yes ? paid : got) * c.qty + c.qty, q * c.sell.minAmountOut, "seller never gets a whole unit below its floor");
+        c.buyerPaid += paid;
+    }
+
+    // Whole-order fill size in outcome tokens (CLOBSettlement.tokenQuantity),
+    // computed locally so it never consumes a pending vm.expectRevert.
+    function _qty(CLOBSettlement.Order memory o) internal view returns (uint256) {
+        return o.tokenIn == address(usdc) ? o.minAmountOut : o.amountIn;
+    }
+
 }

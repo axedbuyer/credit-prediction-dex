@@ -32,12 +32,15 @@ const CONFIG: SettlerConfig = {
 // A real ContractFunctionRevertedError, decoded from actual ABI-encoded revert
 // data — exercises the same decode path (`err.walk` / `.data.errorName`) that
 // real viem estimateContractGas failures produce, rather than a hand-rolled stub.
-function makeRevertError(errorName: 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded' | 'NonceUsed') {
+type RevertName = 'FundingShortfall' | 'PositionFrozen' | 'SlippageExceeded' | 'FillTooSmall'
+  | 'FillExceedsRemaining' | 'OrderInvalidated' | 'OrderExpired' | 'InvalidOrder'
+
+function makeRevertError(errorName: RevertName) {
   const data = encodeErrorResult({ abi: CLOB_SETTLEMENT_ABI, errorName, args: [] })
   return new ContractFunctionRevertedError({
     abi: CLOB_SETTLEMENT_ABI,
     data,
-    functionName: 'verifyAndSettle',
+    functionName: 'fillOrders',
   })
 }
 
@@ -53,7 +56,9 @@ function makeOrder(
     tokenIn:      overrides.tokenIn  ?? (isBid ? USDC_ADDRESS : YES_ADDR),
     tokenOut:     overrides.tokenOut ?? (isBid ? YES_ADDR : USDC_ADDRESS),
     amountIn:     '1000000000000000000',
-    minAmountOut: '230000',
+    // Both sides 1e18 tokens (an ask offers amountIn, a bid wants minAmountOut), so a
+    // FILL-token fill fills both orders completely.
+    minAmountOut: '1000000000000000000',
     expiry:       String(Math.floor(Date.now() / 1000) + 3600),
     nonce:        '1',
     signature:    '0xsig',
@@ -62,6 +67,9 @@ function makeOrder(
     timestamp:    Date.now(),
   }
 }
+
+// Default fill size: both fixture orders' full size.
+const FILL = 10n ** 18n
 
 function sleep(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms))
@@ -110,6 +118,7 @@ function makeMocks(overrides: {
   }
   const orderRemover: OrderRemover = {
     removeOrder: vi.fn().mockResolvedValue(undefined),
+    setFilled: vi.fn().mockResolvedValue(undefined),
   }
   return { publicClient, walletClient, orderRemover }
 }
@@ -117,7 +126,7 @@ function makeMocks(overrides: {
 // ─── Settler: successful settlement ──────────────────────────────────────────
 
 describe('Settler — successful settlement', () => {
-  it('calls verifyAndSettle with correct args and emits settled', async () => {
+  it('calls fillOrders with correct args and emits settled', async () => {
     const engine = makeEngine()
     const { publicClient, walletClient, orderRemover } = makeMocks()
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
@@ -127,7 +136,7 @@ describe('Settler — successful settlement', () => {
 
     const maker = makeOrder('ask1', 'ask')
     const taker = makeOrder('bid1', 'bid')
-    engine.emit('matched', maker, taker)
+    engine.emit('matched', maker, taker, FILL)
 
     // Allow the async queue to flush
     await sleep(50)
@@ -136,15 +145,16 @@ describe('Settler — successful settlement', () => {
     expect(walletClient.writeContract).toHaveBeenCalledOnce()
     const callArgs = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(callArgs.address).toBe(CLOB_ADDRESS)
-    expect(callArgs.functionName).toBe('verifyAndSettle')
+    expect(callArgs.functionName).toBe('fillOrders')
 
     // gas = estimatedGas * 1.2
     const estimated = await (publicClient.estimateContractGas as ReturnType<typeof vi.fn>)
       .mock.results[0].value as bigint
     expect(callArgs.gas).toBe((estimated * 120n) / 100n)
 
-    // args = [makerOrder, makerSig, takerOrder, takerSig]
-    const [makerArg, makerSig, takerArg, takerSig] = callArgs.args
+    // args = [makerOrder, makerSig, takerOrder, takerSig, tokens]
+    const [makerArg, makerSig, takerArg, takerSig, tokens] = callArgs.args
+    expect(tokens).toBe(FILL)
     expect(makerArg.maker).toBe(maker.maker)
     expect(takerArg.maker).toBe(taker.maker)
     expect(makerArg.amountIn).toBe(BigInt(maker.amountIn))
@@ -153,12 +163,32 @@ describe('Settler — successful settlement', () => {
     expect(makerSig).toBe(maker.signature)
     expect(takerSig).toBe(taker.signature)
 
-    // Both orders removed from the store
+    // Both orders fully filled → removed from the store
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask1', 'ask', 'mstr')
     expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid1', 'bid', 'mstr')
+    expect(orderRemover.setFilled).not.toHaveBeenCalled()
 
     // settled event emitted with tx hash
     expect(settled).toEqual([TX_HASH])
+  })
+
+  it('partial fill: the fully filled order is removed; the other keeps resting with its new filled and is released', async () => {
+    const engine = makeEngine()
+    const { publicClient, walletClient, orderRemover } = makeMocks()
+    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+    // Ask offers 1e18 (0.25e18 already filled earlier); bid wants only 0.25e18.
+    const ask = { ...makeOrder('ask-big', 'ask'), filled: (25n * 10n ** 16n).toString() }
+    const bid = { ...makeOrder('bid-small', 'bid'), minAmountOut: (25n * 10n ** 16n).toString() }
+    engine.emit('matched', ask, bid, 25n * 10n ** 16n)
+    await sleep(50)
+
+    expect((walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls[0][0].args[4]).toBe(25n * 10n ** 16n)
+    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+    expect(orderRemover.removeOrder).toHaveBeenCalledWith('bid-small', 'bid', 'mstr')
+    expect(orderRemover.setFilled).toHaveBeenCalledWith('ask-big', 5n * 10n ** 17n)
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-big')
+    expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('bid-small')
   })
 })
 
@@ -175,7 +205,7 @@ describe('Settler — failed transaction', () => {
     const settled: string[] = []
     settler.on('settled', h => settled.push(h))
 
-    engine.emit('matched', makeOrder('ask-rev', 'ask'), makeOrder('bid-rev', 'bid'))
+    engine.emit('matched', makeOrder('ask-rev', 'ask'), makeOrder('bid-rev', 'bid'), FILL)
     await sleep(50)
 
     // writeContract still called — we submitted the tx
@@ -196,7 +226,7 @@ describe('Settler — failed transaction', () => {
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-err', 'ask'), makeOrder('bid-err', 'bid'))
+    engine.emit('matched', makeOrder('ask-err', 'ask'), makeOrder('bid-err', 'bid'), FILL)
     await sleep(50)
 
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
@@ -211,7 +241,7 @@ describe('Settler — failed transaction', () => {
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-receipt', 'ask'), makeOrder('bid-receipt', 'bid'))
+    engine.emit('matched', makeOrder('ask-receipt', 'ask'), makeOrder('bid-receipt', 'bid'), FILL)
     await sleep(3000)
 
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
@@ -228,7 +258,7 @@ describe('Settler — failed transaction', () => {
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-gas', 'ask'), makeOrder('bid-gas', 'bid'))
+    engine.emit('matched', makeOrder('ask-gas', 'ask'), makeOrder('bid-gas', 'bid'), FILL)
 
     // withRetry retries 3× with exponential backoff; use generous wait
     await sleep(3000)
@@ -260,7 +290,7 @@ describe('Settler — deterministic revert handling', () => {
       tokenIn:  USDC_ADDRESS,
       tokenOut: '0x0000000000000000000000000000000000000001',
     })
-    engine.emit('matched', sellerOrder, buyerOrder)
+    engine.emit('matched', sellerOrder, buyerOrder, FILL)
 
     await sleep(3000)
 
@@ -285,7 +315,7 @@ describe('Settler — deterministic revert handling', () => {
 
     const orderA = makeOrder('ask-pf', 'ask', { maker: MAKER_A })
     const orderB = makeOrder('bid-pf', 'bid', { maker: MAKER_B })
-    engine.emit('matched', orderA, orderB)
+    engine.emit('matched', orderA, orderB, FILL)
 
     await sleep(3000)
 
@@ -307,7 +337,7 @@ describe('Settler — deterministic revert handling', () => {
 
     const orderA = makeOrder('ask-pf-err', 'ask', { maker: MAKER_A })
     const orderB = makeOrder('bid-pf-err', 'bid', { maker: MAKER_B })
-    engine.emit('matched', orderA, orderB)
+    engine.emit('matched', orderA, orderB, FILL)
 
     await sleep(3000)
 
@@ -324,7 +354,7 @@ describe('Settler — deterministic revert handling', () => {
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-pf-none', 'ask', { maker: MAKER_A }), makeOrder('bid-pf-none', 'bid', { maker: MAKER_B }))
+    engine.emit('matched', makeOrder('ask-pf-none', 'ask', { maker: MAKER_A }), makeOrder('bid-pf-none', 'bid', { maker: MAKER_B }), FILL)
 
     await sleep(3000)
 
@@ -332,14 +362,14 @@ describe('Settler — deterministic revert handling', () => {
     expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-pf-none', 'bid-pf-none')
   }, 10_000)
 
-  it('SlippageExceeded: nothing removed — pair marked incompatible, both released, no tx', async () => {
+  it.each(['SlippageExceeded', 'FillTooSmall'] as const)('%s: nothing removed — pair marked incompatible, both released, no tx', async (name) => {
     const engine = makeEngine()
     const { publicClient, walletClient, orderRemover } = makeMocks({
-      estimateContractGas: () => Promise.reject(makeRevertError('SlippageExceeded')),
+      estimateContractGas: () => Promise.reject(makeRevertError(name)),
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-slip', 'ask'), makeOrder('bid-slip', 'bid'))
+    engine.emit('matched', makeOrder('ask-slip', 'ask'), makeOrder('bid-slip', 'bid'), FILL)
 
     await sleep(3000)
 
@@ -356,7 +386,7 @@ describe('Settler — deterministic revert handling', () => {
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-generic', 'ask'), makeOrder('bid-generic', 'bid'))
+    engine.emit('matched', makeOrder('ask-generic', 'ask'), makeOrder('bid-generic', 'bid'), FILL)
 
     await sleep(3000)
 
@@ -481,9 +511,9 @@ describe('NonceQueue', () => {
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
     // Fire three matched events before any settlement resolves
-    engine.emit('matched', makeOrder('a1', 'ask'), makeOrder('b1', 'bid'))
-    engine.emit('matched', makeOrder('a2', 'ask'), makeOrder('b2', 'bid'))
-    engine.emit('matched', makeOrder('a3', 'ask'), makeOrder('b3', 'bid'))
+    engine.emit('matched', makeOrder('a1', 'ask'), makeOrder('b1', 'bid'), FILL)
+    engine.emit('matched', makeOrder('a2', 'ask'), makeOrder('b2', 'bid'), FILL)
+    engine.emit('matched', makeOrder('a3', 'ask'), makeOrder('b3', 'bid'), FILL)
 
     // Wait for all three sequential settlements (3 × ~10 ms + overhead)
     await sleep(200)
@@ -567,7 +597,7 @@ describe('Settler — whenIdle() / describePending()', () => {
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-idle', 'ask'), makeOrder('bid-idle', 'bid'))
+    engine.emit('matched', makeOrder('ask-idle', 'ask'), makeOrder('bid-idle', 'bid'), FILL)
 
     // Wait until the tx has been "submitted" (writeContract resolved) and the
     // settlement is now parked on the deferred receipt wait.
@@ -589,68 +619,55 @@ describe('Settler — whenIdle() / describePending()', () => {
 
 // ─── Settler: NonceUsed (duplicate resubmission after a restart) ─────────────
 
-describe('Settler — NonceUsed handling', () => {
+describe('Settler — order-state reverts (remaining() resync)', () => {
   const MAKER_A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
   const MAKER_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const
 
-  it('prunes ONLY the order whose nonce is spent on-chain and releases the other', async () => {
+  it.each(['FillExceedsRemaining', 'OrderInvalidated', 'OrderExpired', 'InvalidOrder'] as const)(
+    '%s: prunes ONLY the order with nothing left on-chain; resyncs + releases the other',
+    async (name) => {
+      const engine = makeEngine()
+      const reads: Array<{ functionName: string; args: readonly unknown[] }> = []
+      const { publicClient, walletClient, orderRemover } = makeMocks({
+        estimateContractGas: () => Promise.reject(makeRevertError(name)),
+        readContract: (a) => {
+          reads.push(a)
+          const [order] = a.args as [{ maker: string }]
+          // A's order is done on-chain; B's has 0.4e18 left (0.6e18 filled — e.g. a fill
+          // that landed just before a restart, before Redis was updated).
+          return Promise.resolve(order.maker === MAKER_A ? 0n : 4n * 10n ** 17n)
+        },
+      })
+      const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
+
+      engine.emit('matched', makeOrder('ask-done', 'ask', { maker: MAKER_A }), makeOrder('bid-left', 'bid', { maker: MAKER_B }), FILL)
+      await sleep(3000)
+
+      expect(walletClient.writeContract).not.toHaveBeenCalled()
+      expect(reads.every(r => r.functionName === 'remaining')).toBe(true)
+      expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
+      expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-done', 'ask', 'mstr')
+      expect(orderRemover.setFilled).toHaveBeenCalledWith('bid-left', 6n * 10n ** 17n)
+      expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-left')
+      expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-done')
+    },
+    10_000,
+  )
+
+  it('remaining() read throws → nothing removed, both released for retry', async () => {
     const engine = makeEngine()
-    const reads: Array<{ functionName: string; args: readonly unknown[] }> = []
     const { publicClient, walletClient, orderRemover } = makeMocks({
-      estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
-      readContract: (a) => {
-        reads.push(a)
-        const [user] = a.args as [string, bigint]
-        return Promise.resolve(user === MAKER_A)
-      },
-    })
-    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
-
-    engine.emit('matched', makeOrder('ask-nonce', 'ask', { maker: MAKER_A }), makeOrder('bid-nonce', 'bid', { maker: MAKER_B }))
-
-    await sleep(3000)
-
-    expect(walletClient.writeContract).not.toHaveBeenCalled()
-    expect(reads.every(r => r.functionName === 'usedNonces')).toBe(true)
-    expect(reads.map(r => r.args)).toContainEqual([MAKER_A, 1n])
-    expect(orderRemover.removeOrder).toHaveBeenCalledTimes(1)
-    expect(orderRemover.removeOrder).toHaveBeenCalledWith('ask-nonce', 'ask', 'mstr')
-    // The innocent counterparty's order stays in the book and can match again.
-    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('bid-nonce')
-    expect(engine.releasePendingSettlement).not.toHaveBeenCalledWith('ask-nonce')
-  }, 10_000)
-
-  it('usedNonces() read throws → nothing removed, both released for retry', async () => {
-    const engine = makeEngine()
-    const { publicClient, walletClient, orderRemover } = makeMocks({
-      estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
+      estimateContractGas: () => Promise.reject(makeRevertError('FillExceedsRemaining')),
       readContract: () => Promise.reject(new Error('RPC down')),
     })
     const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
 
-    engine.emit('matched', makeOrder('ask-nu-err', 'ask', { maker: MAKER_A }), makeOrder('bid-nu-err', 'bid', { maker: MAKER_B }))
-
-    await sleep(3000)
-
-    expect(walletClient.writeContract).not.toHaveBeenCalled()
-    expect(orderRemover.removeOrder).not.toHaveBeenCalled()
-    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-nu-err', 'bid-nu-err')
-  }, 10_000)
-
-  it('usedNonces() reports neither spent → nothing removed, both released for retry', async () => {
-    const engine = makeEngine()
-    const { publicClient, walletClient, orderRemover } = makeMocks({
-      estimateContractGas: () => Promise.reject(makeRevertError('NonceUsed')),
-      readContract: () => Promise.resolve(false),
-    })
-    const settler = new Settler(engine, CONFIG, publicClient, walletClient, orderRemover)
-
-    engine.emit('matched', makeOrder('ask-nu-none', 'ask'), makeOrder('bid-nu-none', 'bid'))
-
+    engine.emit('matched', makeOrder('ask-r-err', 'ask', { maker: MAKER_A }), makeOrder('bid-r-err', 'bid', { maker: MAKER_B }), FILL)
     await sleep(3000)
 
     expect(orderRemover.removeOrder).not.toHaveBeenCalled()
-    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-nu-none', 'bid-nu-none')
+    expect(orderRemover.setFilled).not.toHaveBeenCalled()
+    expect(engine.releasePendingSettlement).toHaveBeenCalledWith('ask-r-err', 'bid-r-err')
   }, 10_000)
 })
 
@@ -661,6 +678,8 @@ describe('RedisOrderRemover', () => {
     const redis = {
       del:  vi.fn().mockResolvedValue(1),
       zrem: vi.fn().mockResolvedValue(1),
+      get:  vi.fn(),
+      set:  vi.fn(),
     }
     const remover = new RedisOrderRemover(redis)
 
@@ -674,9 +693,28 @@ describe('RedisOrderRemover', () => {
     const redis = {
       del:  vi.fn().mockResolvedValue(1),
       zrem: vi.fn().mockResolvedValue(1),
+      get:  vi.fn(),
+      set:  vi.fn(),
     }
     await new RedisOrderRemover(redis).removeOrder('order-xyz', 'ask', 'mstr')
 
     expect(redis.zrem).toHaveBeenCalledWith('orderbook:mstr:asks', 'order-xyz')
+  })
+
+  it('setFilled rewrites the stored order with XX (never resurrects a removed order)', async () => {
+    const stored = { ...makeOrder('o1', 'ask'), market: 'mstr' }
+    const redis = {
+      del:  vi.fn(),
+      zrem: vi.fn(),
+      get:  vi.fn().mockResolvedValue(JSON.stringify(stored)),
+      set:  vi.fn().mockResolvedValue('OK'),
+    }
+    await new RedisOrderRemover(redis).setFilled('o1', 7n)
+    expect(redis.set).toHaveBeenCalledWith('orders:o1', JSON.stringify({ ...stored, filled: '7' }), 'XX')
+
+    redis.get.mockResolvedValue(null)
+    redis.set.mockClear()
+    await new RedisOrderRemover(redis).setFilled('gone', 7n)
+    expect(redis.set).not.toHaveBeenCalled()
   })
 })

@@ -42,5 +42,10 @@ Mobile layout, fee distributor UI, market listing UI, LP vault UI
 - Components take a `market: Market` prop. TradePanel signs with the EIP-712
   `verifyingContract` AND token addresses from the SAME market object (CLOBSettlement
   doesn't validate that tokens belong to its market); `useFeeBps(clobAddress)` is per market.
-- Order book: `GET /orderbook?market=<slug>`; liquidation keeper:
+- Order book: `GET /orderbook?market=<slug>`; sizes shown are REMAINING (size − `filled`,
+  batch-3 partial fills). `components/OpenOrders.tsx` lists the wallet's orders with on-chain
+  cancel (`lib/clobAbi.ts`: `cancelOrders`, `setMinNonce(Date.now())`) then
+  `POST /orders/sync`. Nonces are millisecond timestamps. TradePanel blocks orders under
+  `MIN_ORDER_TOKENS` (lib/constants.ts, 1 Upbet — keep in step with the order-book-server).
+- Liquidation keeper:
   `GET /claimable[?market=<slug>]` (entries carry `market`, `creditMarket`, `liquidationEngine`).

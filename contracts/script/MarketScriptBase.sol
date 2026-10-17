@@ -35,6 +35,9 @@ abstract contract MarketScriptBase is Script {
     uint256 constant DEFAULT_MAX_MARK_STEP = 0.05e18;
     uint256 constant DEFAULT_MIN_MARK_INTERVAL = 1 hours;
     address constant DEFAULT_KEEPER = 0x63F98358246D5860A5b4c85fBB7936494F4FeC54;
+    // The matching engine's settler wallet: CLOBSettlement OPERATOR_ROLE (only it may submit
+    // fills — docs/partial-fills-plan.md decision E). OPERATOR_ADDRESS overrides.
+    address constant DEFAULT_OPERATOR = 0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9;
 
     // Resolved config + deployed addresses live in storage (post-broadcast helpers read
     // them without blowing the stack — same pattern as Deploy.s.sol).
@@ -58,6 +61,7 @@ abstract contract MarketScriptBase is Script {
     address internal _liquidationEngine;
 
     address internal _keeperAddress;
+    address internal _operatorAddress;
     address internal _pauserAddress;
     address internal _oracleAttester;
     address internal _teamWallet;
@@ -78,6 +82,7 @@ abstract contract MarketScriptBase is Script {
     function _readOpsEnv() internal {
         _teamWallet = vm.envOr("TEAM_WALLET", _deployer);
         _keeperAddress = vm.envOr("KEEPER_ADDRESS", DEFAULT_KEEPER);
+        _operatorAddress = vm.envOr("OPERATOR_ADDRESS", DEFAULT_OPERATOR);
         _pauserAddress = vm.envOr("PAUSER_ADDRESS", _deployer);
         _oracleAttester = vm.envOr("ORACLE_ATTESTER_ADDRESS", _deployer);
         _depositCap = vm.envOr("DEPOSIT_CAP", DEFAULT_DEPOSIT_CAP);
@@ -143,6 +148,7 @@ abstract contract MarketScriptBase is Script {
         insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(), address(engine));
 
         market.grantRole(market.KEEPER_ROLE(), _keeperAddress);
+        clob.grantRole(clob.OPERATOR_ROLE(), _operatorAddress);
         market.grantRole(market.PAUSER_ROLE(), _pauserAddress);
         oracleRouter.grantRole(oracleRouter.ORACLE_ROLE(), _oracleAttester);
 
@@ -207,6 +213,7 @@ abstract contract MarketScriptBase is Script {
 
         // Ops roles
         require(market.hasRole(market.KEEPER_ROLE(), _keeperAddress), "assert: KEEPER_ROLE");
+        require(clob.hasRole(clob.OPERATOR_ROLE(), _operatorAddress), "assert: clob OPERATOR_ROLE");
         require(market.hasRole(market.PAUSER_ROLE(), _pauserAddress), "assert: PAUSER_ROLE");
 
         // Fee config
@@ -309,6 +316,7 @@ abstract contract MarketScriptBase is Script {
         vm.serializeUint(obj, "maxMarkStep", _maxMarkStep);
         vm.serializeUint(obj, "minMarkInterval", _minMarkInterval);
         vm.serializeAddress(obj, "keeperAddress", _keeperAddress);
+        vm.serializeAddress(obj, "operatorAddress", _operatorAddress);
         vm.serializeAddress(obj, "pauserAddress", _pauserAddress);
         vm.serializeAddress(obj, "oracleAttester", _oracleAttester);
         vm.serializeAddress(obj, "teamWallet", _teamWallet);

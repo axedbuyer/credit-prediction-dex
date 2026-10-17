@@ -32,6 +32,29 @@ export const CREDIT_MARKET_ABI = [
   },
 ] as const
 
+// CLOBSettlement.remaining(order) — tokens still fillable (0 once cancelled,
+// invalidated by setMinNonce, expired, budget-exhausted or fully filled).
+export const CLOB_REMAINING_ABI = [
+  {
+    name: 'remaining',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [{
+      name: 'order', type: 'tuple', components: [
+        { name: 'maker', type: 'address' }, { name: 'tokenIn', type: 'address' }, { name: 'tokenOut', type: 'address' },
+        { name: 'amountIn', type: 'uint256' }, { name: 'minAmountOut', type: 'uint256' },
+        { name: 'expiry', type: 'uint256' }, { name: 'nonce', type: 'uint256' },
+      ],
+    }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const
+
+export interface OrderFields {
+  maker: Address; tokenIn: Address; tokenOut: Address
+  amountIn: bigint; minAmountOut: bigint; expiry: bigint; nonce: bigint
+}
+
 export const ERC20_ABI = [
   {
     name: 'balanceOf',
@@ -73,6 +96,8 @@ export interface IChainReader {
   previewFunding(maker: Address, amount: bigint, isYes: boolean): Promise<bigint>
   fundingDebt(maker: Address): Promise<bigint>
   yesBalanceOf(maker: Address): Promise<bigint>
+  /** CLOBSettlement.remaining(order) on `clob` (POST /orders/sync). Optional: test doubles may omit it. */
+  orderRemaining?(clob: Address, order: OrderFields): Promise<bigint>
 }
 
 export interface ChainReaderConfig {
@@ -112,6 +137,16 @@ export class ViemChainReader implements IChainReader {
       abi:          CREDIT_MARKET_ABI,
       functionName: 'fundingDebt',
       args:         [maker],
+    }) as bigint
+  }
+
+  async orderRemaining(clob: Address, order: OrderFields): Promise<bigint> {
+    const { maker, tokenIn, tokenOut, amountIn, minAmountOut, expiry, nonce } = order
+    return await this.publicClient.readContract({
+      address:      clob,
+      abi:          CLOB_REMAINING_ABI,
+      functionName: 'remaining',
+      args:         [{ maker, tokenIn, tokenOut, amountIn, minAmountOut, expiry, nonce }],
     }) as bigint
   }
 

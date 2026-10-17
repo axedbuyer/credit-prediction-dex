@@ -87,7 +87,7 @@ async function start() {
   )
 
   // The settler subscribes to 'matched' in its constructor and submits
-  // CLOBSettlement.verifyAndSettle() on-chain (to the pair's own market's CLOB).
+  // CLOBSettlement.fillOrders() on-chain (to the pair's own market's CLOB).
   // Without credentials, matches are only logged (useful for dry-running the
   // engine against a book) — in that mode there's no settlement queue or Redis
   // connection for shutdown to drain.
@@ -132,7 +132,7 @@ async function start() {
   // ─── Graceful shutdown ──────────────────────────────────────────────────────
   // Every git push redeploys this service (e.g. on Railway) by signalling the
   // running process — without this, a redeploy can land mid-settlement: after a
-  // verifyAndSettle tx is submitted but before its receipt is processed and the
+  // fillOrders tx is submitted but before its receipt is processed and the
   // filled orders are pruned from Redis. Draining here (stop polling → await the
   // in-flight cycle → await the settler's queue → quit Redis) closes that window;
   // see src/shutdown.ts for the sequence and SHUTDOWN_TIMEOUT_MS for the bound.

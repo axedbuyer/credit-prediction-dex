@@ -51,6 +51,7 @@ interface StoredOrderFixture {
   side: 'bid' | 'ask'
   price: number
   timestamp: number
+  filled?: string
 }
 
 // Comfortably beyond STALE_EXPIRY_BUFFER_SEC (1h) so fixtures aren't
@@ -245,6 +246,28 @@ describe('ClobYesSeller', () => {
     expect(res).toEqual({ action: 'unchanged', amount: 5_000_000n, priceWad: MARK_23PCT })
     expect(fake.postedOrders).toHaveLength(0)
     expect(fake.deleteCalls).toHaveLength(0)
+  })
+
+  it('batch 3: a partly filled own ask counts only its REMAINING size toward coverage', async () => {
+    // 8 YES offered, 3 already filled → 5 still resting == the 5 YES the bot now holds.
+    fake.orderbook.bids = []
+    fake.orderbook.asks = [yesAsk(8_000_000n, MARK_23PCT, { filled: '3000000' })]
+    const seller = makeSeller(fake)
+
+    const res = await seller.sell({ yesAmount: 5_000_000n, markWad: MARK_23PCT })
+
+    expect(res).toEqual({ action: 'unchanged', amount: 5_000_000n, priceWad: MARK_23PCT })
+    expect(fake.postedOrders).toHaveLength(0)
+  })
+
+  it('batch 3: ignores a fully filled bid when choosing the best bid', async () => {
+    fake.orderbook.bids = [yesBid(5_000_000n, 250_000_000_000_000_000n, { filled: '5000000' })]
+    fake.orderbook.asks = []
+    const seller = makeSeller(fake)
+
+    const res = await seller.sell({ yesAmount: 5_000_000n, markWad: MARK_23PCT })
+
+    expect(res.action).toBe('rested')   // the 25c bid is used up — nothing to cross
   })
 
   it('cancels a stale own ask (wrong price) and replaces it, signing a valid cancel', async () => {

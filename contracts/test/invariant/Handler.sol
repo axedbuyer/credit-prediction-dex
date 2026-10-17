@@ -232,7 +232,7 @@ contract Handler is Test {
         uint256 elapsed = block.timestamp - market.lastFundingTime();
         uint256 projectedCum = market.cumulativeFundingPerYES() + market.currentCarryRate() * elapsed / 365 days;
 
-        uint256 yesOwed = yesBal * (projectedCum - market.fundingSnapshot(user)) / 1e18;
+        uint256 yesOwed = _ceil1e18(yesBal * (projectedCum - market.fundingSnapshot(user))); // YES debit rounds up
         uint256 noCredit = noBal * (projectedCum - market.snapNO(user)) / 1e18;
         uint256 debit = market.fundingDebt(user) + yesOwed;
 
@@ -380,7 +380,8 @@ contract Handler is Test {
         uint256 sideSeed,
         uint256 sellerIsMakerSeed,
         uint256 amountSeed,
-        uint256 priceFracSeed
+        uint256 priceFracSeed,
+        uint256 fillSeed
     ) external trackFlagged {
         TradeVars memory t;
         {
@@ -417,9 +418,27 @@ contract Handler is Test {
 
         (CLOBSettlement.Order memory makerOrder, bytes memory makerSig, CLOBSettlement.Order memory takerOrder, bytes memory takerSig) = _buildAndSign(t);
 
+        // Batch 3: fill in one piece (1/3 of runs) or two pieces of random size, so
+        // partial fills, pro-rata debt collection and remaining-size tracking all run
+        // under every invariant.
+        uint256 first = fillSeed % 3 == 0 ? t.amount : bound(fillSeed, 1, t.amount);
+        _fill(makerOrder, makerSig, takerOrder, takerSig, first, sellerFlagged || buyerFlagged);
+        if (first < t.amount && fillSeed % 2 == 0) {
+            _fill(makerOrder, makerSig, takerOrder, takerSig, t.amount - first, sellerFlagged || buyerFlagged);
+        }
+    }
+
+    function _fill(
+        CLOBSettlement.Order memory makerOrder,
+        bytes memory makerSig,
+        CLOBSettlement.Order memory takerOrder,
+        bytes memory takerSig,
+        uint256 tokens,
+        bool anyFlagged
+    ) internal {
         vm.recordLogs();
-        try clob.verifyAndSettle(makerOrder, makerSig, takerOrder, takerSig) {
-            if (sellerFlagged || buyerFlagged) ghost_frozenTradeSuccesses++;
+        try clob.fillOrders(makerOrder, makerSig, takerOrder, takerSig, tokens) {
+            if (anyFlagged) ghost_frozenTradeSuccesses++;
             _trackInsuranceFee();
             _record("clobTrade", true);
         } catch {
@@ -497,7 +516,7 @@ contract Handler is Test {
     // required suite change #5): a YES holder approaching the seizure boundary
     // does a TINY CLOB buy of NO (price == amount, so fee == 0 regardless of
     // feeBps -- keeps this action fee-agnostic) right before it would cross --
-    // exactly the F4 mechanism, since CLOBSettlement.verifyAndSettle runs
+    // exactly the F4 mechanism, since CLOBSettlement.fillOrders runs
     // settleFunding(buyer) on the actor, folding its accrued YES debit into
     // fundingDebt and resetting fundingSnapshot to now. Pre-fix this reset the
     // trigger's clock to ~0 (isSeizable never saw the ledger debt); post-fix
@@ -543,7 +562,9 @@ contract Handler is Test {
         bytes memory sellSig = _sign(keyOf[seller], sellOrder);
         bytes memory buySig = _sign(keyOf[a], buyOrder);
 
-        try clob.verifyAndSettle(sellOrder, sellSig, buyOrder, buySig) {
+        // Buyer as maker: fills price at the maker's limit, and the zero-floor sell
+        // would price at 0 USDC (FillTooSmall).
+        try clob.fillOrders(buyOrder, buySig, sellOrder, sellSig, amount) {
             _record("nearBoundaryTinyBuy", true);
         } catch {
             _record("nearBoundaryTinyBuy", false);
@@ -996,7 +1017,7 @@ contract Handler is Test {
             _record("scenarioFeeTrade", false);
             return;
         }
-        this.clobTrade(sellerSeed, buyerSeed, 0, 0, amountSeed, 300e15);
+        this.clobTrade(sellerSeed, buyerSeed, 0, 0, amountSeed, 300e15, 0); // fillSeed 0 = whole fill
         _record("scenarioFeeTrade", true);
     }
 
@@ -1069,4 +1090,17 @@ contract Handler is Test {
             );
         }
     }
+
+    // Whole-order fill size in outcome tokens (CLOBSettlement.tokenQuantity),
+    // computed locally so it never consumes a pending vm.expectRevert.
+    function _qty(CLOBSettlement.Order memory o) internal view returns (uint256) {
+        return o.tokenIn == address(usdc) ? o.minAmountOut : o.amountIn;
+    }
+
+
+    // CreditMarket._yesDebit: a YES debit rounds UP (in collateral's favour).
+    function _ceil1e18(uint256 x) internal pure returns (uint256) {
+        return x == 0 ? 0 : (x - 1) / 1e18 + 1;
+    }
+
 }

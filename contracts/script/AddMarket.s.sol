@@ -56,6 +56,7 @@ contract AddMarket is MarketScriptBase {
         console.log("Registry     :", _registry);
         console.log("InsuranceFund:", _insuranceFund, "(shared)");
         console.log("Keeper       :", _keeperAddress);
+        console.log("Operator     :", _operatorAddress);
         console.log("Pauser       :", _pauserAddress);
         console.log("Oracle       :", _oracleAttester);
         console.log("DepositCap   :", _depositCap);

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Batch-2 redeploy, phase 1: wind down the batch-1 markets (docs/redeploy-batch2-runbook.md).
+# Wind down a superseded market batch: batch-1 markets in the batch-2 redeploy
+# (docs/redeploy-batch2-runbook.md); batch-2 markets in batch 3 with
+# OLD_DEPLOYMENTS=contracts/deployments/base-sepolia/archive/batch2
+# (docs/redeploy-batch3-runbook.md).
 # Per old market: redeem the deployer's complete sets (USDC back), pause the CreditMarket,
 # deactivate it in the OLD registry, and revoke the old LiquidationEngine's LIQUIDATOR_ROLE
-# on the shared InsuranceFund. Reads addresses from the ARCHIVED batch-1 deployment files.
+# on the shared InsuranceFund. Reads addresses from the ARCHIVED deployment files
+# (OLD_DEPLOYMENTS, default the batch-1 archive).
 #
 #   scripts/redeploy/batch2-wind-down.sh <rpc-url>        (needs DEPLOYER_PRIVATE_KEY in env)
 #
@@ -12,7 +16,8 @@ set -euo pipefail
 RPC=${1:?usage: batch2-wind-down.sh <rpc-url>}
 : "${DEPLOYER_PRIVATE_KEY:?export DEPLOYER_PRIVATE_KEY (contracts/.env)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OLD="$ROOT/contracts/deployments/base-sepolia/archive/batch1"
+OLD="${OLD_DEPLOYMENTS:-$ROOT/contracts/deployments/base-sepolia/archive/batch1}"
+[[ "$OLD" = /* ]] || OLD="$ROOT/$OLD"
 CAST=${CAST:-$HOME/.foundry/bin/cast}
 j() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
 send() { "$CAST" send "$@" --private-key "$DEPLOYER_PRIVATE_KEY" --rpc-url "$RPC" >/dev/null; }

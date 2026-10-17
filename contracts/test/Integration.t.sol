@@ -51,6 +51,7 @@ contract IntegrationTest is Test {
             admin, address(usdc), address(yesToken), address(noToken), MARK, 1 days
         );
         clob   = new CLOBSettlement(address(market), admin);
+        clob.grantRole(clob.OPERATOR_ROLE(), admin);
         router = new OracleRouter(admin, address(market));
 
         // ── grant roles ───────────────────────────────────────────────────
@@ -155,7 +156,7 @@ contract IntegrationTest is Test {
         CLOBSettlement.Order memory b1 = _order(
             bob,   address(usdc),    address(noToken), 230e18, 230e18, expiry1, 0
         );
-        clob.verifyAndSettle(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1));
+        clob.fillOrders(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1), _qty(a1));
 
         // post-trade-1 balances
         assertEq(noToken.balanceOf(alice), 0,         "alice sold all NO");
@@ -178,7 +179,7 @@ contract IntegrationTest is Test {
         CLOBSettlement.Order memory a2 = _order(
             alice, address(usdc),    address(noToken), 230e18, 230e18, expiry2, 1
         );
-        clob.verifyAndSettle(b2, _sign(bobKey, b2), a2, _sign(aliceKey, a2));
+        clob.fillOrders(b2, _sign(bobKey, b2), a2, _sign(aliceKey, a2), _qty(b2));
 
         // alice: 230 YES + 230 NO + 770 USDC — fully balanced for redeem
         assertEq(yesToken.balanceOf(alice), 230e18,   "alice YES unchanged");
@@ -249,7 +250,7 @@ contract IntegrationTest is Test {
         CLOBSettlement.Order memory bo = _order(
             bob,   address(usdc),    address(noToken), 230e18, 230e18, expiry, 0
         );
-        clob.verifyAndSettle(ao, _sign(aliceKey, ao), bo, _sign(bobKey, bo));
+        clob.fillOrders(ao, _sign(aliceKey, ao), bo, _sign(bobKey, bo), _qty(ao));
 
         // alice: 230 YES, 0 NO, 1 000 USDC
         // bob:   0 YES, 230 NO, 770 USDC
@@ -311,6 +312,13 @@ contract IntegrationTest is Test {
                       + usdc.balanceOf(address(market));
         assertEq(total, 2_001e18, "USDC invariant: total supply conserved through credit event");
     }
+
+    // Whole-order fill size in outcome tokens (CLOBSettlement.tokenQuantity),
+    // computed locally so it never consumes a pending vm.expectRevert.
+    function _qty(CLOBSettlement.Order memory o) internal view returns (uint256) {
+        return o.tokenIn == address(usdc) ? o.minAmountOut : o.amountIn;
+    }
+
 }
 
 // ─── v1b lifecycle integration tests ─────────────────────────────────────────
@@ -355,6 +363,7 @@ contract IntegrationV1bTest is Test {
             admin, address(usdc), address(yesToken), address(noToken), MARK_5PCT, 1 days
         );
         clob              = new CLOBSettlement(address(market), admin);
+        clob.grantRole(clob.OPERATOR_ROLE(), admin);
         insuranceFund     = new InsuranceFund(admin, address(usdc));
         liquidationEngine = new LiquidationEngine(address(market), address(insuranceFund));
 
@@ -456,7 +465,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory b1 = _order(
             bob,   address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry, 0
         );
-        clob.verifyAndSettle(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1));
+        clob.fillOrders(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1), _qty(a1));
 
         assertEq(noToken.balanceOf(alice),  0,        "alice sold all NO");
         assertEq(noToken.balanceOf(bob),    NOTIONAL, "bob holds 100 NO");
@@ -564,7 +573,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory b1 = _order(
             bob,   address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry1, 0
         );
-        clob.verifyAndSettle(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1));
+        clob.fillOrders(a1, _sign(aliceKey, a1), b1, _sign(bobKey, b1), _qty(a1));
 
         assertEq(noToken.balanceOf(bob),    NOTIONAL, "bob holds 100 NO");
         assertEq(yesToken.balanceOf(alice), NOTIONAL, "alice holds 100 YES");
@@ -622,7 +631,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory a2 = _order(
             alice, address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry2, 1
         );
-        clob.verifyAndSettle(b2, _sign(bobKey, b2), a2, _sign(aliceKey, a2));
+        clob.fillOrders(b2, _sign(bobKey, b2), a2, _sign(aliceKey, a2), _qty(b2));
 
         // Funding debt is now settled into fundingDebt[alice] by the sync.
         uint256 aliceUsdcBeforeRedeem = usdc.balanceOf(alice);
@@ -682,7 +691,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory b0 = _order(
             bob, address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry0, 0
         );
-        clob.verifyAndSettle(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0));
+        clob.fillOrders(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0), _qty(a0));
 
         // 300 days: not yet seizable at 5% mark (~363-day runway).
         vm.warp(block.timestamp + 300 days);
@@ -700,7 +709,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory a1 = _order(
             alice, address(usdc), address(noToken), tinyAmt, tinyAmt, expiry1, 1
         );
-        clob.verifyAndSettle(b1, _sign(bobKey, b1), a1, _sign(aliceKey, a1));
+        clob.fillOrders(b1, _sign(bobKey, b1), a1, _sign(aliceKey, a1), _qty(b1));
 
         assertGt(market.fundingDebt(alice), 0, "the trade folded the debit into fundingDebt");
         assertEq(market.fundingSnapshot(alice), market.cumulativeFundingPerYES(),
@@ -734,7 +743,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory b0 = _order(
             bob, address(usdc), address(noToken), NOTIONAL, NOTIONAL, expiry0, 0
         );
-        clob.verifyAndSettle(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0));
+        clob.fillOrders(a0, _sign(aliceKey, a0), b0, _sign(bobKey, b0), _qty(a0));
 
         vm.warp(block.timestamp + 100 days);
         market.accrueFunding();
@@ -748,7 +757,7 @@ contract IntegrationV1bTest is Test {
         CLOBSettlement.Order memory a1 = _order(
             alice, address(usdc), address(noToken), tinyAmt, tinyAmt, expiry1, 1
         );
-        clob.verifyAndSettle(b1, _sign(bobKey, b1), a1, _sign(aliceKey, a1));
+        clob.fillOrders(b1, _sign(bobKey, b1), a1, _sign(aliceKey, a1), _qty(b1));
 
         uint256 debtAfterTrade = market.fundingDebt(alice);
         assertGt(debtAfterTrade, 0, "trade recorded a ledger debit");
@@ -764,4 +773,11 @@ contract IntegrationV1bTest is Test {
         assertEq(market.owed(alice), debtAfterTrade + liveAccrual,
             "owed() == fundingDebt + live accrual on current YES balance since the reset snapshot");
     }
+
+    // Whole-order fill size in outcome tokens (CLOBSettlement.tokenQuantity),
+    // computed locally so it never consumes a pending vm.expectRevert.
+    function _qty(CLOBSettlement.Order memory o) internal view returns (uint256) {
+        return o.tokenIn == address(usdc) ? o.minAmountOut : o.amountIn;
+    }
+
 }

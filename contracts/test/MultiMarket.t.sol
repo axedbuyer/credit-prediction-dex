@@ -135,7 +135,7 @@ contract MultiMarketTest is Test {
         address buyer = vm.addr(buyerKey);
         CLOBSettlement.Order memory mo = _order(buyer, address(usdc), address(s.yes), price, amt, nonce);
         CLOBSettlement.Order memory to_ = _order(seller, address(s.yes), address(usdc), amt, price, nonce);
-        s.clob.verifyAndSettle(mo, _sign(s.clob, buyerKey, mo), to_, _sign(s.clob, sellerKey, to_));
+        s.clob.fillOrders(mo, _sign(s.clob, buyerKey, mo), to_, _sign(s.clob, sellerKey, to_), _qty(mo));
     }
 
     // ── registry sanity ─────────────────────────────────────────────────────────
@@ -227,19 +227,19 @@ contract MultiMarketTest is Test {
         bytes memory tSig = _sign(A.clob, bobKey, to_);
 
         vm.expectRevert(CLOBSettlement.InvalidSignature.selector);
-        B.clob.verifyAndSettle(mo, mSig, to_, tSig);
+        B.clob.fillOrders(mo, mSig, to_, tSig, _qty(mo));
 
         // the same A-signed orders (A's tokens) DO settle on A
         CLOBSettlement.Order memory mo2 = _order(alice, address(usdc), address(A.yes), price, AMT, 8);
         CLOBSettlement.Order memory to2 = _order(bob, address(A.yes), address(usdc), AMT, price, 8);
-        A.clob.verifyAndSettle(mo2, _sign(A.clob, aliceKey, mo2), to2, _sign(A.clob, bobKey, to2));
+        A.clob.fillOrders(mo2, _sign(A.clob, aliceKey, mo2), to2, _sign(A.clob, bobKey, to2), _qty(mo2));
         assertEq(A.yes.balanceOf(alice), AMT);
 
         // and an A-signed order replayed on B (same order contents) is rejected too
         bytes memory m2Sig = _sign(A.clob, aliceKey, mo2);
         bytes memory t2Sig = _sign(A.clob, bobKey, to2);
         vm.expectRevert(CLOBSettlement.InvalidSignature.selector);
-        B.clob.verifyAndSettle(mo2, m2Sig, to2, t2Sig);
+        B.clob.fillOrders(mo2, m2Sig, to2, t2Sig, _qty(mo2));
     }
 
     // B's CLOB can never move A's tokens: it has no CLOB_ROLE on them.
@@ -254,7 +254,7 @@ contract MultiMarketTest is Test {
         bytes memory mSig = _sign(B.clob, aliceKey, mo);
         bytes memory tSig = _sign(B.clob, bobKey, to_);
         vm.expectRevert();
-        B.clob.verifyAndSettle(mo, mSig, to_, tSig);
+        B.clob.fillOrders(mo, mSig, to_, tSig, _qty(mo));
         assertEq(A.yes.balanceOf(bob), AMT);
         assertEq(A.yes.balanceOf(alice), 0);
 
@@ -280,7 +280,7 @@ contract MultiMarketTest is Test {
         A.market.clearLiquidatedPosition(bob, alice);
         vm.prank(address(B.clob));
         vm.expectRevert();
-        A.market.markDebtCollected(bob);
+        A.market.collectDebt(bob, 0);
     }
 
     // ── a credit event in A leaves B fully operational ──────────────────────────
@@ -381,4 +381,11 @@ contract MultiMarketTest is Test {
         assertFalse(B.market.claimable(alice));
         assertEq(usdc.balanceOf(address(A.market)), aBal, "cure in B did not touch A collateral");
     }
+
+    // Whole-order fill size in outcome tokens (CLOBSettlement.tokenQuantity),
+    // computed locally so it never consumes a pending vm.expectRevert.
+    function _qty(CLOBSettlement.Order memory o) internal view returns (uint256) {
+        return o.tokenIn == address(usdc) ? o.minAmountOut : o.amountIn;
+    }
+
 }

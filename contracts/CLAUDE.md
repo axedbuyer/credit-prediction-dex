@@ -11,7 +11,8 @@ Parent spec: see root CLAUDE.md
 src/CreditMarket.sol      — main contract
 src/YESToken.sol          — ERC-20, transfer restricted to CLOB_ROLE
 src/NOToken.sol           — ERC-20, transfer restricted to CLOB_ROLE
-src/CLOBSettlement.sol    — EIP-712 order settlement
+src/CLOBSettlement.sol    — EIP-712 order settlement; batch 3: partial fills (`fillOrders`,
+                            OPERATOR_ROLE only), `cancelOrders` / `setMinNonce`, `remaining`
 src/OracleRouter.sol      — credit event trigger
 src/InsuranceFund.sol     — USDC reserve with timelock (ONE, shared by all markets)
 src/LiquidationEngine.sol — formulaic claim of flagged YES positions
