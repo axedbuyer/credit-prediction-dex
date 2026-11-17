@@ -4,17 +4,16 @@ Status: approved for scope 2026-07-06. **Phase 1 is done** (2026-09-25); **Phase
 (2026-10-13; only a few mainnet loose ends noted inline); Phase 3 is half done (both contract guard-rails, the
 invariant suite and the F1/F2/F4 fixes shipped in the 2026-10-01 batch-1 redeploy — the Safe
 role ceremony, audit and legal read are open); Phase 4 not started. Items marked ✅ are
-shipped. Last reviewed 2026-10-13.
+shipped. Last reviewed 2026-11-17 (current state and open-work order: `docs/HANDOVER.md`).
 Decisions locked: external audit (booked early, no budget cap set) · Railway hosting for
 Phase 1 · `setMark` max-Δ bound and `depositCap` contract changes are in scope.
 
 ## Where we are
 
 *Originally written 2026-07-06, when nothing had touched a real network. Current state
-(2026-10-13):* **three markets are live on Base Sepolia** — MSTR (the batch-1 contract set,
-redeployed 2026-10-01 with the unified `owed()` fix, `depositCap` and bounded `setMark`),
-CoreWeave and Turkey (added 2026-10-03 via `AddMarket.s.sol` + `MarketRegistry`
-`0xdF1A…5720`); all 22 contract addresses are verified on Blockscout. Five backend
+(2026-11-17):* **three markets are live on Base Sepolia** — MSTR, CoreWeave and Turkey, each
+a batch-3 contract set (2026-10-17: partial fills, on-chain cancel, carry formula, unified
+`owed()` fix, `depositCap`, bounded `setMark`) under `MarketRegistry` `0xA7bc…69b1`; all source-verified on Blockscout. Five backend
 services run on Railway in registry mode (order-book-server, matching-engine,
 funding-keeper, liquidation-keeper, liquidator-bot), the frontend is live on Vercel in
 registry mode, books are seeded, CI runs forge + vitest + frontend type-check on every
@@ -33,8 +32,9 @@ from `Transfer` events (requirement 1 below).
    — keepers must index YES holders from
    `Transfer`/`TokensMinted` events (startup backfill + live polling), replacing
    `TRACKED_HOLDERS`. Correctness, not polish.
-2. **Key & role ceremony** — deploy a Safe (2-of-3). New `TransferRoles.s.sol` moves
-   `DEFAULT_ADMIN_ROLE` on all seven contracts, `ORACLE_ROLE` (credit-event
+2. **Key & role ceremony** (not started — `TransferRoles.s.sol` does not exist yet) — deploy a
+   Safe (2-of-3). New `TransferRoles.s.sol` moves `DEFAULT_ADMIN_ROLE` on every per-market
+   contract, the MarketRegistry and the shared InsuranceFund, `ORACLE_ROLE` (credit-event
    attestation), and `PAUSER_ROLE` to the Safe. Keeper and settler get dedicated
    low-balance hot EOAs holding only their operational role. Deployer renounces
    everything.
@@ -44,7 +44,7 @@ from `Transfer` events (requirement 1 below).
    Slither clean (✅ first pass
    2026-09-26: 0 real High/Medium — `docs/security/slither-2026-09-26.md`), and an **external
    audit** (see Phase 3). ✅ F1/F2/F4 fixed (unified `owed()`) and deployed in the 2026-10-01
-   batch-1 redeploy; the suite now runs per market (2-market invariant suite, 201 forge tests).
+   batch-1 redeploy; the suite now runs per market (2-market invariant suite; 225 forge tests as of batch 3).
    Audit: **deliberately deferred by the owner** — not booked yet. `depositCap` stays in regardless — audited code still launches
    capped; the cap rises with track record.
 4. **Credit-event dress rehearsal on Base Sepolia** — full lifecycle on the public
@@ -82,8 +82,8 @@ from `Transfer` events (requirement 1 below).
 - ✅ Graceful shutdown on all services (drain in-flight settlement before exit;
   2026-09-26 — plus `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`).
 - ✅ `/health` on order-book-server (checks Redis) and matching-engine (2026-10-13: loop
-  staleness → 503, per-market errors, settler ETH). Its Railway domain + uptime check are
-  pending an owner decision on public health URLs.
+  staleness → 503, per-market errors, settler ETH). ✅ Public read-only
+  `/health` domain + uptime check (2026-10-14).
 - ✅ Retry-and-alert wrapper on funding-keeper (2026-10-13): bounded backoff for
   transient errors, landed-attempt detection (no double submit), one `[ALERT]` log line
   per failed market, hourly low-ETH alert, `alerts` in its internal /health.

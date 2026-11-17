@@ -12,7 +12,8 @@ src/CreditMarket.sol      — main contract
 src/YESToken.sol          — ERC-20, transfer restricted to CLOB_ROLE
 src/NOToken.sol           — ERC-20, transfer restricted to CLOB_ROLE
 src/CLOBSettlement.sol    — EIP-712 order settlement; batch 3: partial fills (`fillOrders`,
-                            OPERATOR_ROLE only), `cancelOrders` / `setMinNonce`, `remaining`
+                            OPERATOR_ROLE only), `cancelOrders` / `setMinNonce`, `remaining`;
+                            rejects pairs that aren't {USDC, this market's YES/NO}
 src/OracleRouter.sol      — credit event trigger
 src/InsuranceFund.sol     — USDC reserve with timelock (ONE, shared by all markets)
 src/LiquidationEngine.sol — formulaic claim of flagged YES positions
@@ -20,7 +21,10 @@ src/MarketRegistry.sol    — (multi-market) slug → per-market contract set; e
                             (only `active` is mutable; register() verifies the set is wired
                             to itself and to the shared USDC/InsuranceFund)
 
-script/Deploy.s.sol              — legacy single-market deploy (the live MSTR set; flat JSON)
+script/Deploy.s.sol              — legacy single-set + InsuranceFund deploy (batch-1 shape, flat
+                                   JSON; also what `make deploy-mainnet` runs)
+script/DeployEmptyRegistry.s.sol — fresh MarketRegistry on the existing USDC + InsuranceFund
+                                   (batches 2/3: then AddMarket.s.sol per market)
 script/DeployMarketRegistry.s.sol — deploys MarketRegistry, registers the existing set as `mstr`
 script/AddMarket.s.sol           — env-driven: deploys + wires + registers one more market
                                    against the shared InsuranceFund
