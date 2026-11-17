@@ -134,8 +134,10 @@ for m in mstr crwv try; do ORDER_BOOK_URL=https://order-book-server-production-9
   - `sepolia-cancel-check.ts` passed on all three markets. Its first run exposed a stale
     read from the public RPC right after the receipt; OpenOrders and the check now retry
     the sync (PR #18).
-- **Not yet done:** Blockscout verification is rate-limited ("Too many requests") —
-  retry one contract at a time later.
+- **Blockscout:** rate-limited on 2026-10-17; all 19 contracts verified 2026-11-17 (constructor
+  args from the broadcast records' CREATE `arguments`: `DeployEmptyRegistry.s.sol` run
+  `1792203295039`, `AddMarket.s.sol` runs `1792203365900` / `…433662` / `…501486` for
+  mstr / crwv / try; submissions 20–45s apart hit no 429s).
 
 ## 7. After
 

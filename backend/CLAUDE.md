@@ -3,12 +3,15 @@
 Parent spec: see root CLAUDE.md
 
 ## Stack
-Node.js 20, TypeScript, Fastify, Redis, viem, node-cron
+Node.js 20, TypeScript, Fastify, Redis, viem, node-cron (keepers)
 
 ## Services
 order-book-server/    — REST API for orders (Fastify + Redis), many markets
 matching-engine/      — price-time priority CLOB matcher + on-chain settler, many markets
-keepers/              — funding accrual cron job
+keepers/              — funding-keeper.ts (accrual + seizure flagging), liquidation-keeper.ts
+                        (GET /claimable), liquidator-bot.ts (+ clob-seller.ts: claims and
+                        resells flagged positions), holder-index.ts (YES holder discovery)
+shared/               — canonical registry.ts (copied into each service by sync-registry.sh)
 
 ## Multi-market (order-book-server + matching-engine)
 
@@ -77,7 +80,7 @@ CI fails on drift).
   is resynced; SlippageExceeded / FillTooSmall never prune (`engine.markIncompatible`, 10-min TTL,
   both released); a failed or ambiguous chain read releases both for retry. Root CLAUDE.md "Order
   removal policy".
-- **Defense in depth (CLOBSettlement does not validate order tokens):** before any gas estimate the
+- **Defense in depth** (since batch 3 `fillOrders` also rejects bad pairs on-chain): before any gas estimate the
   settler requires both orders to be exactly {USDC, that market's YES or NO}, on the SAME outcome
   token, opposite sides, same market; otherwise it prunes both WITHOUT submitting and logs loudly.
   An order whose market is unknown to the settler's directory is released, not pruned.
