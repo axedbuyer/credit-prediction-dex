@@ -38,10 +38,11 @@ Mobile layout, fee distributor UI, market listing UI, LP vault UI
   The ONLY place entity names live; display name = registry `entityName`.
 - Routes: `/` market list; `/market/[id]` (id = slug); `/portfolio` aggregates all
   markets; `/liquidate` flagged positions across markets (claim → that market's
-  LiquidationEngine); `/admin` has a market picker.
+  LiquidationEngine); `/admin` has a market picker; `/docs/*` user docs (incl.
+  `contract-addresses` — update it after every redeploy).
 - Components take a `market: Market` prop. TradePanel signs with the EIP-712
-  `verifyingContract` AND token addresses from the SAME market object (CLOBSettlement
-  doesn't validate that tokens belong to its market); `useFeeBps(clobAddress)` is per market.
+  `verifyingContract` AND token addresses from the SAME market object (defence in depth —
+  since batch 3 `fillOrders` also rejects tokens from another market); `useFeeBps(clobAddress)` is per market.
 - Order book: `GET /orderbook?market=<slug>`; sizes shown are REMAINING (size − `filled`,
   batch-3 partial fills). `components/OpenOrders.tsx` lists the wallet's orders with on-chain
   cancel (`lib/clobAbi.ts`: `cancelOrders`, `setMinNonce(Date.now())`) then

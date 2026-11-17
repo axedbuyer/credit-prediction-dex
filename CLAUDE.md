@@ -1,56 +1,40 @@
-# Credit Prediction DEX — Project Context for Claude Code
+# Pari (credit-prediction-dex) — Project Context for Claude Code
+
+This root doc is the **canonical product/economics spec**. If code and this doc disagree,
+treat it as a bug in the code. Current ops state, wallets, hosting and open work live in
+`docs/HANDOVER.md`; per-directory stack notes in `contracts/`, `backend/`, `frontend/CLAUDE.md`.
 
 ## What We're Building
 
-A fully-collateralized perpetual prediction market on corporate and sovereign credit default
-probability. Users trade YES/NO tokens on the question:
+A fully-collateralized perpetual prediction market on corporate and sovereign credit default.
+Users trade YES/NO tokens on:
 
 > "Will [Entity] have a credit event in the next 12 months?"
 
-The price of a YES token = the market's probability of a credit event in the next 12
-months. The carry rate is set so this holds exactly (see "Carry rate" under Funding Model).
-Position economics are equivalent to a zero-recovery perpetual CDS, structured and
-presented as a prediction market.
+The price of a YES token = the market's probability of a credit event in the next 12 months
+(the carry rate is set so this holds exactly — see "Carry rate"). Position economics are a
+zero-recovery perpetual CDS, structured and presented as a prediction market.
 
-**Token model (Polymarket-style):** users deposit USDC and receive ERC-20 YES + NO tokens
-1:1 with their deposit. These tokens trade on the CLOB. On credit event: YES redeems 1:1
-for USDC, NO redeems at $0.
+**Token model (Polymarket-style):** deposit USDC → receive ERC-20 YES + NO 1:1. They trade
+on an off-chain CLOB with on-chain settlement. On a credit event YES redeems 1:1 for USDC,
+NO for $0. (Custom ERC-20 rather than Gnosis CTF/ERC-1155: simpler, auto-visible in
+wallets, same economics; CTF is a V2 option.)
 
-Note: Polymarket uses Gnosis CTF (ERC-1155). We use custom ERC-20 for MVP — simpler to
-build, better wallet visibility (auto-appears in MetaMask), same economic model. Migrate to
-CTF in V2 if needed.
+## Current State (2026-11-17)
 
-**Funding model (mirrored index + formulaic liquidation):** see the "Funding Model" section
-below for the full spec — display layer, seizure trigger, and LiquidationEngine.sol's
-formulaic (no Dutch auction) claim price.
-
-**Status:** base MVP + funding model + off-chain services + trading fees are built and
-tested — 151 contract tests (incl. a stateful invariant suite), 319 off-chain tests, verified end-to-end with a 12/12 anvil
-smoke test (plus a 20/20 fee smoke). Target network is Base Sepolia (testnet) ahead of
-Base mainnet. All seven contracts were freshly redeployed to Base Sepolia on 2026-10-01
-(batch 1, `docs/redeploy-batch1-runbook.md`): the unified `owed()` fix, a 50,000 USDC
-`depositCap`, bounded keeper `setMark`, fee 50 bps 50/50 — addresses in
-`contracts/deployments/base-sepolia.json`. **Multi-market (MSTR, CoreWeave, Turkey) is built and merged to `main`
-(2026-10-03); its contracts are DEPLOYED to Base Sepolia and the Railway services
-and frontend run in registry mode since 2026-10-03** — 210 contract tests (incl. a 2-market invariant suite), 440
-off-chain tests (2026-10-13), 11/11 multi-market anvil smoke (`scripts/smoke/run-smoke.sh`, ~1 min).
-**Batch 2 (2026-10-15):** the carry-formula change (carry = −(1 − m)·ln(1 − m), see
-"Carry rate") shipped as a fresh contract set for every market under MarketRegistry
-`0xF650221216c76Bb775cd42211aFcb7a3c99f99A0` (runbook `docs/redeploy-batch2-runbook.md`;
-superseded by batch 3). The batch-1
-markets and registry `0xdF1A…5720` are paused and inactive (archived in
-`deployments/base-sepolia/archive/batch1/`). Without `MARKET_REGISTRY_ADDRESS` /
-`NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` every service falls back to legacy single-market
-(`mstr`) mode; rollout runbook `docs/multi-market-cutover.md`. **Batch 3 LIVE (2026-10-17):** partial fills
-(`fillOrders`, operator-only), on-chain cancel (`cancelOrders` / `setMinNonce`), pro-rata YES
-carry-debt collection (`CreditMarket.collectDebt`), YES debits rounded up, 1-Upbet minimum
-order — a fresh contract set for every market under a NEW MarketRegistry
-`0xA7bcc124aF821388886012B905Ba8cF4B79469b1` (runbook + record `docs/redeploy-batch3-runbook.md`);
-the batch-2 markets and registry `0xF650…99A0` are paused and inactive (archived in
-`deployments/base-sepolia/archive/batch2/`). **Ops hardening
-(2026-10-13):** matching-engine `GET /health`, funding-keeper retry + `[ALERT]` logs, hourly
-uptime checks for the liquidator bot + hot-wallet gas, and mainnet *plumbing* only
-(`CHAIN_ID`/`RPC_URL`/`NEXT_PUBLIC_CHAIN_ID`, `make deploy-mainnet` guard) — nothing on mainnet.
+- **Base Sepolia (testnet) only — nothing on mainnet.** Batch-3 contracts live since
+  2026-10-17 under MarketRegistry `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`; three
+  markets (MSTR, CoreWeave, Turkey). Addresses: `contracts/deployments/base-sepolia/`. Older
+  contract sets are paused + inactive (`deployments/base-sepolia/archive/`).
+- Five backend services on Railway + frontend on Vercel, all in registry mode; pushes to
+  `main` auto-deploy them. Hourly-scheduled uptime workflow.
+- Tests: `cd contracts && forge test` (incl. stateful invariant suites);
+  vitest in `backend/{order-book-server,matching-engine,keepers}`; multi-market anvil smoke
+  `scripts/smoke/run-smoke.sh` (≈1 min). Frontend: type-check only. Counts: `docs/HANDOVER.md`.
+- Mainnet blockers (Safe role ceremony, credit-event dress rehearsal, audit — deferred by
+  the owner — legal read, unsafe deploy-script defaults): `docs/HANDOVER.md` "Open work".
+- Redeploying: `docs/redeploy-guide.md` + the latest `docs/redeploy-batch*-runbook.md`. Any
+  CreditMarket change means a full new contract set per market under a new registry.
 
 ---
 
@@ -58,483 +42,373 @@ uptime checks for the liquidator bot + hot-wallet gas, and mainnet *plumbing* on
 
 | Decision | Value |
 |---|---|
-| Chain (MVP) | Base (EVM standard) |
+| Chain | Base (EVM); Base Sepolia until mainnet |
 | Collateral | USDC only |
-| Settlement | YES/NO ERC-20 tokens — YES redeems 1:1 USDC on credit event, NO redeems $0 |
-| Recovery rate | Zero — YES settles at $1.00 on credit event, NO at $0.00 |
-| Funding | cumFundingPerYES == cumFundingPerNO always (complete-set invariant); settled in USDC on close/redeem/settle/liquidation |
+| Settlement | YES/NO ERC-20 — YES redeems 1:1 USDC on credit event, NO redeems $0 |
+| Recovery rate | Zero — YES settles at $1.00, NO at $0.00 |
+| Funding | `cumulativeFundingPerYES == cumFundingPerNO` always (complete-set invariant); settled in USDC on close/redeem/settle/liquidation |
 | Seizure trigger | m ≤ 1.03 × f_next, evaluated one epoch ahead (3% buffer, cost-basis-independent) |
-| Liquidation | Formulaic price = funding owed; YES token TRANSFERS to liquidator (never burned); NO untouched |
-| Price primitive | 12-month default probability (%) — m = 1 − e^(−h) for hazard h |
-| Carry rate | carry = h × (1 − m) = −(1 − m)·ln(1 − m) per year (`CreditMarket.carryRateFor`); fair carry for a holder who stands to gain 1 − m on default, so price = probability exactly |
-| Liquidity mechanism | Polymarket-style off-chain CLOB, on-chain USDC settlement |
-| Trading fee | 50 bps × min(p, 1−p) × Q, charged ONLY on the carry-earning side (YES sells + NO buys); YES buys + NO sells are fee-free; split 50/50 team wallet / InsuranceFund, admin-editable via CLOBSettlement.setFeeConfig |
-| Protocol token | None |
-| Leverage | None — fully collateralized |
-| LP vault | None in MVP — team wallet seeds initial liquidity |
+| Liquidation | Formulaic price = funding owed; YES TRANSFERS to the liquidator (never burned); NO untouched |
+| Price primitive | 12-month default probability m = 1 − e^(−h) for hazard h |
+| Carry rate | carry = h × (1 − m) = −(1 − m)·ln(1 − m) per year (`CreditMarket.carryRateFor`) |
+| Liquidity | Polymarket-style off-chain CLOB, on-chain USDC settlement; team wallet seeds quotes |
+| Trading fee | 50 bps × min(p, 1−p) × Q, ONLY on the carry-earning side (YES sells + NO buys); split 50/50 team wallet / InsuranceFund; admin-editable |
+| Leverage / protocol token / LP vault | None — fully collateralized, no token, no vault |
 
 ---
 
-## MVP Scope — Launch Markets (multi-market, admin-listed)
+## Markets (multi-market, admin-listed)
 
-Several reference entities, each its own independent market — "Will [Entity] have a credit
-event in the next 12 months?" — on one Pari deployment. Every market keeps the economics in
-this doc unchanged, and **all 10 hard invariants hold per market**. Design + phased plan:
-`docs/multi-market-design.md` (decisions D1–D6 locked 2026-10-01). Listing is admin-only
-(forge script + `MarketRegistry`); permissionless listing stays out.
+Each market is independent; **all 10 hard invariants hold per market**. Listing is
+admin-only (forge script + `MarketRegistry`); no permissionless listing.
 
-| Slug | Entity (UI name) | Type | Ticker | Credit events covered | Initial mark |
+| Slug | Entity (UI name) | Type | Ticker | Credit events covered | Seed mark |
 |---|---|---|---|---|---|
-| `mstr` | MicroStrategy (MicroStrategy Incorporated) | corporate | MSTR | Bankruptcy, Failure to Pay | 23% (batch-2 contracts since 2026-10-15) |
+| `mstr` | MicroStrategy (MicroStrategy Incorporated) | corporate | MSTR | Bankruptcy, Failure to Pay | 23% |
 | `crwv` | CoreWeave (CoreWeave, Inc.) | corporate | CRWV | Bankruptcy, Failure to Pay | 10% |
 | `try` | Turkey (Republic of Turkey) | sovereign | TRY | Failure to Pay, Repudiation/Moratorium, Restructuring | 2% |
 
-**Per-market config (launch):** `depositCap` 50,000 USDC; keeper `setMark` bounds ≤ 5 points
-per update, ≥ 1h apart; trading fee 50 bps, 50/50 team wallet / shared InsuranceFund.
-**Network:** Base Sepolia (testnet), then Base mainnet.
-**Initial seed price:** set manually by the team per market (reference the entity's CDS
-spread from TradFi sources). Credit-event types are display copy + attestation runbook
-only — nothing on-chain encodes them (OracleRouter has a single `confirmCreditEvent()`).
+**Per-market config:** `depositCap` 50,000 USDC; keeper `setMark` ≤ 5 points per update,
+≥ 1h apart (admin `adminSetMark` bypasses); fee 50 bps, 50/50 team wallet / shared
+InsuranceFund. Seed marks are set manually per market from the entity's CDS spread
+(`m = 1 − exp(−s/(1−R))`); current ones are placeholders. Credit-event types are display
+copy + attestation runbook only — nothing on-chain encodes them (OracleRouter has a single
+`confirmCreditEvent()`). Keep listings well below m ≈ 63% (carry falls above it).
 
-### Multi-market topology (locked decisions, 2026-10-01)
-
+**Topology (decisions D1–D5, `docs/multi-market-design.md`):**
 - **D1 — one contract set per market + on-chain `MarketRegistry`.** Each market = its own
   CreditMarket, YES, NO, CLOBSettlement, OracleRouter, LiquidationEngine, deployed by
-  `AddMarket.s.sol`. CreditMarket logic is reused unchanged; one market's collateral can
-  never pay another's holders. No on-chain factory (creation-code size). Registry entries
-  are **immutable once registered** — the admin may only toggle `active`. MSTR's batch-1
-  addresses are registered as market #1 with no redeploy.
-- **D2 — one shared InsuranceFund.** Its `LIQUIDATOR_ROLE` is granted to every market's
-  LiquidationEngine and every CLOB routes its fee share to it. Each draw is a USDC transfer
-  fund → that market's CreditMarket, so per-market draws are attributable off-chain.
+  `AddMarket.s.sol`. One market's collateral can never pay another's holders. No on-chain
+  factory. Registry entries are **immutable once registered** — the admin may only toggle
+  `active`. Tokens are named `YES-<TICKER>` / `NO-<TICKER>`.
+- **D2 — one shared InsuranceFund.** Its `LIQUIDATOR_ROLE` goes to every market's
+  LiquidationEngine and every CLOB routes its fee share to it; each draw is a USDC transfer
+  to that market's CreditMarket, so draws are attributable per market.
 - **D3 — one CLOBSettlement per market.** Per-market EIP-712 domain (an order signed for
-  market A can never settle on B) and per-market fee config; users approve USDC per market.
-  A shared registry-aware CLOB is a v2 candidate.
-- **D4 — one keeper, one settler, one liquidator wallet across all markets**; deployer is
-  attester on every OracleRouter until the Safe ceremony. Liquidator float ≥ the largest
-  single claim across markets.
-- **D5 — the registry is the discovery source of truth.** On-chain: slug, entity name,
-  entity type, the six contract addresses, `active`. The frontend reads one
-  `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`; backends read and periodically refresh the
-  registry instead of per-contract address env vars. Long-form copy (description, CDS
-  reference, credit-event wording) lives in a frontend file keyed by slug, with a generic
-  fallback so a new market renders without a rebuild.
-- **Token naming:** new markets' tokens are `YES-<TICKER>` / `NO-<TICKER>`; MSTR's batch-1
-  tokens keep `YES` / `NO` (cosmetic).
+  market A can never settle on B), per-market fee config, per-market USDC approvals.
+- **D4 — one keeper, one settler, one liquidator wallet across all markets.** Liquidator
+  float ≥ the largest single claim across markets.
+- **D5 — the registry is the discovery source of truth.** On-chain: slug, entity name/type,
+  the six addresses, `active`. Services and the frontend read one registry address
+  (`MARKET_REGISTRY_ADDRESS` / `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`); without it they fall
+  back to legacy one-market `mstr` mode. Long-form copy lives in `frontend/lib/marketCopy.ts`
+  with a corporate/sovereign fallback, so a new market renders without a rebuild.
 
 ---
 
 ## Architecture
 
-Per-directory `CLAUDE.md` files exist in `contracts/`, `backend/`, `frontend/` with
-directory-specific stack notes; this root doc is the canonical product/economics spec.
-
-### Smart Contracts (`contracts/src/`)
+### Smart contracts (`contracts/src/`)
 
 ```
 CreditMarket.sol      — mints/burns YES+NO, holds USDC collateral, funding accrual/ledger,
-                        seizure trigger, flag-lock/cure, pause
-YESToken.sol          — ERC-20, minted by CreditMarket; transfer restricted to CLOB_ROLE
-NOToken.sol           — ERC-20, minted by CreditMarket; transfer restricted to CLOB_ROLE
-CLOBSettlement.sol    — validates EIP-712 orders, atomically swaps tokens ↔ USDC, settles
-                        funding for both parties
-OracleRouter.sol      — receives credit event attestations, triggers settlement
-InsuranceFund.sol     — USDC reserve, timelock-gated withdrawals, covers liquidation
-                        tail-case shortfalls
-LiquidationEngine.sol — formulaic claim of seizure-flagged YES positions (no Dutch
-                        auction); YES token transfers, never burned
-MarketRegistry.sol    — (multi-market) admin-owned slug → market contract set
-                        + minimal metadata; entries immutable, `active` toggle only
+                        seizure trigger, flag-lock/cure, collectDebt, pause
+YESToken.sol          — ERC-20, minted by CreditMarket; transfers restricted (see below)
+NOToken.sol           — ERC-20, minted by CreditMarket; transfers restricted
+CLOBSettlement.sol    — EIP-712 orders, partial fills (operator-only), on-chain cancel,
+                        trading fee, settles funding for both parties
+OracleRouter.sol      — credit-event attestation (ORACLE_ROLE) → triggers settlement
+InsuranceFund.sol     — shared USDC reserve; covers liquidation tail-case shortfalls;
+                        timelocked admin withdrawals (unused in MVP — fund only receives)
+LiquidationEngine.sol — formulaic claim of seizure-flagged YES positions; YES transfers
+MarketRegistry.sol    — slug → per-market contract set + metadata; immutable, `active` toggle
 ```
 
-One full set of the per-market contracts above (all but InsuranceFund, which is shared)
-exists per market — see "Multi-market topology" above.
+Scripts: `AddMarket.s.sol` (one market against an existing registry + fund),
+`DeployEmptyRegistry.s.sol` (fresh registry, used for batches 2/3), legacy `Deploy.s.sol`
+(single set + InsuranceFund) + `DeployMarketRegistry.s.sol`. Details: `contracts/CLAUDE.md`.
 
-**Not needed in MVP:** MarketFactory.sol (markets are added by forge script + registry), LiquidityVault.sol
-(team wallet is liquidity), ISDARelayer.sol (multisig oracle only), BondModule.sol (no
-permissionless listing), FundingBuffer.sol (v2 only).
+**Contract standards:**
+- Solidity 0.8.24, Foundry, OpenZeppelin v5 (`AccessControl`, `ReentrancyGuard`,
+  `Pausable`) — plain contracts, no proxies/upgradeability. Solady `lnWad` for the carry rate.
+- Roles — CreditMarket: `DEFAULT_ADMIN_ROLE`, `ORACLE_ROLE`, `KEEPER_ROLE`, `PAUSER_ROLE`,
+  `CLOB_ROLE`, `LIQUIDATOR_ROLE`. YES/NO: `MINTER_ROLE`, `BURNER_ROLE`, `CLOB_ROLE`.
+  CLOBSettlement: `OPERATOR_ROLE` (the only filler). InsuranceFund: `LIQUIDATOR_ROLE`.
+  OracleRouter: `ORACLE_ROLE` (attester).
+- `ReentrancyGuard` on every function that moves USDC or YES/NO. **Pull-over-push** for all
+  USDC payouts — never push to arbitrary addresses.
+- **YES/NO transfers are restricted** via the OZ v5 `_update()` override: only `CLOB_ROLE`
+  (CLOBSettlement, and LiquidationEngine's `forcedTransfer`) and CreditMarket may move
+  tokens. Direct wallet-to-wallet transfers revert, so every movement passes a
+  funding-sync path. Never loosen this.
+- `Pausable` on CreditMarket (PAUSER_ROLE halts the market during a determination window).
+- Emit events on every state change. CreditMarket: TokensMinted, TokensRedeemed,
+  YESSettled, FundingAccrued, MarkUpdated, CreditEventTriggered, FlaggedClaimable,
+  FundingSettled, PositionCured (+ config events). CLOBSettlement: OrderFilled,
+  OrderCancelled, MinNonceUpdated, FeeCharged, FeeConfigUpdated. LiquidationEngine:
+  Liquidated. MarketRegistry: MarketRegistered, MarketActiveSet.
+- **Decimals quirk:** YES/NO report `decimals() == 18`, but every amount is raw 6-decimal
+  USDC scale. Never normalize by 1e18.
 
-### Token Model
+### Token model and core math
 
-Minting is 1:1 complete-set: depositing N USDC mints N YES + N NO (`CreditMarket.mint`) —
-`currentMark` is the CLOB price of YES, not the mint ratio. Redeeming burns an equal YES+NO
-pair for 1 USDC each (`CreditMarket.redeem`, pre-settlement only). After a confirmed credit
-event, `settleYES` burns YES at 1 USDC each; NO gets nothing.
+- **Mint** (`CreditMarket.mint`): N USDC → N YES + N NO (1:1 complete set; `currentMark` is
+  the CLOB price of YES, not the mint ratio).
+- **Redeem** (`redeem`, pre-settlement only): burn N YES + N NO → N USDC.
+- **Credit event** (`settleYES`): YES burns at 1 USDC each; NO gets nothing.
+- `YES.totalSupply() == NO.totalSupply()` ALWAYS.
+- **CLOB price:** buying/selling YES at P USDC per token, 0 < P < 1; P is the
+  market-implied probability of a credit event in the next 12 months.
+- Funding is tracked by `cumulativeFundingPerYES` / `cumFundingPerNO` (monotonic indices)
+  and per user `fundingSnapshot` / `snapNO` / `fundingDebt`; entry point
+  `settleFunding(user)`. See "Funding Model".
 
-YES/NO override `_update()` (OZ v5): only `CLOB_ROLE` (CLOBSettlement, and
-LiquidationEngine's `forcedTransfer`) and CreditMarket may move tokens — direct
-wallet-to-wallet transfers revert, so every movement goes through a funding-sync path.
-`CreditMarket` tracks `cumulativeFundingPerYES`/`cumFundingPerNO` (monotonic indices) and,
-per user, `fundingSnapshot`/`snapNO`/`fundingDebt` — see "Funding Model" below for the full
-ledger semantics; the entry point is `settleFunding(user)`.
-
-### CLOB Architecture (Polymarket-style)
-
-Off-chain matching, on-chain USDC settlement:
+### CLOB (off-chain matching, on-chain settlement)
 
 ```
-User signs EIP-712 limit order (tokenIn, tokenOut, amountIn, minAmountOut, expiry, nonce)
-        ↓ submitted to order-book-server (REST) ↓ matching engine matches buy/sell ↓
-Matched pair + fill size submitted to CLOBSettlement.sol on-chain (OPERATOR_ROLE only),
-which verifies both signatures and each order's remaining size, settles funding for both
-parties (CreditMarket.settleFunding), then atomically transfers YES/NO from seller to buyer
-and USDC from buyer to seller. Orders fill in pieces (batch 3).
+User signs EIP-712 order → POST /order (order-book-server) → matching engine pairs orders
+→ CLOBSettlement.fillOrders (OPERATOR_ROLE = the settler) verifies both signatures and
+remaining sizes, settles funding for both parties, then atomically swaps tokens ↔ USDC.
 ```
 
-**Order struct (EIP-712 typed data, wire format):**
+**Order struct (EIP-712, wire format) — signatures are detached, not embedded:**
 ```solidity
 struct Order {
     address maker;
-    address tokenIn;      // USDC (buying tokens) or YES/NO address (selling tokens)
-    address tokenOut;     // YES or NO address (buying) or USDC (selling)
+    address tokenIn;      // USDC (buying) or YES/NO (selling)
+    address tokenOut;     // YES/NO (buying) or USDC (selling)
     uint256 amountIn;
-    uint256 minAmountOut; // encodes limit price
+    uint256 minAmountOut; // encodes the limit price
     uint256 expiry;
-    uint256 nonce;
+    uint256 nonce;        // millisecond timestamp
 }
 ```
-The signature is passed alongside the order, not embedded in it: on-chain
-`CLOBSettlement.fillOrders(Order makerOrder, bytes makerSig, Order takerOrder, bytes
-takerSig, uint256 tokens)` takes this 7-field `Order` plus two detached signatures and the
-fill size in outcome tokens (selector `0x96c8e34a`). Off-chain callers must match this exact
-ABI shape. (Batch 1/2 contracts had whole-order `verifyAndSettle`, selector `0x538df8d8`.)
+`fillOrders(Order makerOrder, bytes makerSig, Order takerOrder, bytes takerSig, uint256 tokens)`,
+selector `0x96c8e34a`. Off-chain callers must match this exact ABI shape (a past 8-field
+encoding made every settlement revert). `fillOrders` rejects any pair that isn't one USDC
+leg + THIS market's YES or NO (`MismatchedPair` / `InvalidTokenPair`); the order-book server,
+settler and frontend also enforce it.
 
-**Partial fills (batch 3, `docs/partial-fills-plan.md`):** an order's size is its outcome
-tokens (a bid's `minAmountOut`, an ask's `amountIn`); `filled[hash]` tracks tokens filled
-and `spent[hash]` the USDC a buy order has paid (hard cap: its signed `amountIn`).
+**Partial fills (`docs/partial-fills-plan.md`):**
+- An order's size is in outcome tokens (a bid's `minAmountOut`, an ask's `amountIn`);
+  `filled[hash]` tracks tokens filled, `spent[hash]` the USDC a buy order has paid (hard cap:
+  its signed `amountIn`).
 - **Price:** each fill runs at the MAKER's (earlier order's) limit, pro rata, rounded in the
   maker's favour — a YES seller's ceil(q × minAmountOut / amountIn); a NO seller's net limit
-  grossed up by `minGrossForNet`; a maker buyer's ceil(q × amountIn / minAmountOut) — and
-  never above the buyer's pro-rata limit or unspent budget. The seller's pro-rata floor
-  (gross for YES, net of fee for NO) must hold or the fill reverts SlippageExceeded; a fill
-  that prices to 0 reverts FillTooSmall.
-- **Only the operator fills** (`OPERATOR_ROLE` = the matching-engine settler; decision E).
+  grossed up by `minGrossForNet`; a maker buyer's ceil(q × amountIn / minAmountOut) — never
+  above the buyer's pro-rata limit or unspent budget. The seller's pro-rata floor (gross for
+  YES, net of fee for NO) must hold or the fill reverts `SlippageExceeded`; a fill that prices
+  to 0 reverts `FillTooSmall`.
 - **Cancel:** `cancelOrders(Order[])` (maker only; marks them fully filled) or
-  `setMinNonce(n)` (retires every order of the maker with nonce < n; must increase). Nonces
-  are millisecond timestamps so `setMinNonce(Date.now())` cancels everything signed so far.
-  `remaining(order)` = tokens still fillable (0 once expired/cancelled/spent/filled).
-- **Minimum order:** 1 Upbet/Downbet (order-book-server `MIN_ORDER_TOKENS`, default
-  1_000_000); there is no on-chain minimum.
+  `setMinNonce(n)` (retires every order with nonce < n; must increase) —
+  `setMinNonce(Date.now())` cancels everything signed so far. `remaining(order)` = tokens
+  still fillable (0 once expired/cancelled/spent/filled). `DELETE /order/:id` is off-chain
+  only; the binding cancel is on-chain.
+- **Minimum order:** 1 Upbet/Downbet (`MIN_ORDER_TOKENS` = 1_000_000, order-book-server +
+  frontend); no on-chain minimum.
 
-**Order removal policy:** the platform removes a user's resting order only (a) when it is
-filled or cancelled, or (b) for a published, objective reason about THAT order or its maker's
-own state — expired, cancelled on-chain or fully filled (`remaining() == 0`), maker's position flagged (PositionFrozen), a YES
-sale that can't cover the maker's own carry debt (FundingShortfall), or legs that aren't
-{USDC, one market's YES/NO}. Never because of another trader's order or a guess: an
-incompatibility between two valid orders (SlippageExceeded) skips the pair, and an
+**Order removal policy (user-protection rule — never violate):** the platform removes a
+user's resting order only (a) when it is filled or cancelled, or (b) for a published,
+objective reason about THAT order or its maker's own state — expired, cancelled on-chain or
+fully filled (`remaining() == 0`), maker's position flagged (`PositionFrozen`), a YES sale that
+can't cover the maker's own carry debt (`FundingShortfall`), or legs that aren't {USDC, one
+market's YES/NO}. Never because of another trader's order or a guess: an incompatibility
+between two valid orders (`SlippageExceeded`, `FillTooSmall`) skips the pair, and an
 ambiguous or failed chain read releases both orders for a retry.
 
 ### Trading fee (CLOBSettlement)
 
 ```
-fee = feeBps × min(p, 1−p) × Q  — computed on-chain as
-      feeBps × min(tradePrice, amount − tradePrice) / 10_000
+fee = feeBps × min(p, 1−p) × Q   — on-chain: feeBps × min(tradePrice, amount − tradePrice) / 10_000
       (Q tokens carry Q USDC of notional; tradePrice is the buyer's gross USDC leg)
 ```
+- **Who pays:** ONLY the carry-earning side — the YES seller and the NO buyer. YES buys and
+  NO sells are fee-free. Maker/taker is irrelevant.
+- **Why min(p, 1−p):** "buy NO at 1−p" ≡ "mint + sell YES at p"; the min-side base makes both
+  routes cost the same, so mint can't dodge the fee.
+- **YES sale:** the fee is deducted from proceeds like the funding debit; the Option B
+  safeguard covers it — `tradePrice < debtShare + fee` reverts `FundingShortfall` with the
+  position unchanged.
+- **NO buy:** the contract never pulls more than a signed `amountIn` (`spent` caps it across
+  fills), so the buyer signs a GROSS amount (cost + fee), sized via the exact piecewise
+  inversion `minGrossForNet`; the fee-free seller's pro-rata `minAmountOut` is checked
+  against the NET amount.
+- **Three implementations must stay in lockstep:** `CLOBSettlement.tradeFee` (source of
+  truth), `backend/order-book-server/src/fee.ts`, `frontend/lib/feeMath.ts`. The RATE is
+  read live from `CLOBSettlement.feeBps()` (60s refresh); `FEE_BPS` / `NEXT_PUBLIC_FEE_BPS`
+  are fallbacks only, and the frontend refuses to sign NO buys until the live rate loads.
+- **Routing:** `insuranceShareBps` to InsuranceFund, the rest to teamWallet. Admin-editable
+  via `setFeeConfig` (DEFAULT_ADMIN_ROLE, `MAX_FEE_BPS` = 500); the constructor leaves the fee
+  at 0 until configured. **Fees never touch CreditMarket collateral.**
+- Off-chain, NO bids are stored at their NET price (the sorting/crossing basis).
 
-- **Who pays:** ONLY the carry-earning side — the YES seller and the NO buyer. YES buys
-  and NO sells (flows that take on the funding-paying side) are fee-free. Maker/taker
-  is irrelevant.
-- **Why min(p, 1−p):** "buy NO at 1−p" ≡ "mint + sell YES at p" — the min-side base makes
-  both routes cost the same fee, so mint can't be used to dodge it. (Measuring p on the
-  gross leg is a second-order feeBps² deviation, accepted for on-chain simplicity.)
-- **YES sale:** fee is deducted from seller proceeds exactly like the funding debit;
-  the Option B safeguard extends to it — `tradePrice < debtShare + fee` (the fill's
-  pro-rata share of the debit, see "Funding settlement points") reverts FundingShortfall
-  with the position unchanged.
-- **NO buy:** the contract can never pull USDC beyond a signed amountIn (`spent` caps it
-  across partial fills), so the buyer's signed `amountIn` is GROSS (position cost + fee);
-  the fee-free seller's pro-rata `minAmountOut` is checked against the NET amount (revert
-  SlippageExceeded otherwise). The frontend
-  sizes gross via the exact piecewise inversion `minGrossForNet` (lib/feeMath.ts,
-  mirrored in order-book-server/src/fee.ts — keep all three in lockstep with
-  CLOBSettlement.tradeFee).
-- **Routing:** fee splits `insuranceShareBps` to InsuranceFund, remainder to teamWallet
-  (launch: 50 bps, 50/50). Admin-editable via `setFeeConfig` (DEFAULT_ADMIN_ROLE,
-  MAX_FEE_BPS = 500 cap); constructor leaves fee at 0 until configured. Fees NEVER touch
-  CreditMarket collateral.
-- **Off-chain:** order-book-server stores NO bids at their NET price (sorting/crossing
-  basis; the rate is read live from CLOBSettlement.feeBps() and refreshed every 60s —
-  FEE_BPS env is only the RPC-outage fallback, surfaced on GET /health) and includes the fee in the YES-sell
-  FundingShortfall pre-filter + minSellProceeds hint. A pair that still reverts
-  SlippageExceeded (the NO-sale net-of-fee check) is skipped by the matching engine,
-  never pruned — see "Order removal policy" below.
+### Backend services (`backend/`, details in `backend/CLAUDE.md`)
 
-### Backend Services
+Every service serves all markets from one process via `MarketDirectory`
+(`backend/shared/registry.ts`, copied into each service by `sync-registry.sh`; CI fails on
+drift).
 
-Every service serves ALL markets from one process, discovered via `MarketDirectory`
-(`backend/shared/registry.ts`, copied per service by `sync-registry.sh`, CI-checked):
-registry mode when `MARKET_REGISTRY_ADDRESS` is set, else legacy one-market `mstr` mode
-from the old single-set env vars. Per-service multi-market detail: `backend/CLAUDE.md`.
+| Service | Role |
+|---|---|
+| `order-book-server` | REST: `GET /markets`, `GET /orderbook?market=`, `POST /order`, `DELETE /order/:id`, `POST /orders/sync`, `GET /health`. Derives the market from the order's token; rejects bad pairs, orders under the minimum, flagged makers (`PositionFrozen`) and un-fundable YES sells (`FundingShortfall` + `minSellProceeds`). Chain pre-filters fail open — the on-chain check is the backstop. Redis books `orderbook:<slug>:*`. Rate-limited per client IP. |
+| `matching-engine` | Price-time priority per market; the earlier order is the maker; fill size = min of both remaining sizes. Settles via `fillOrders`, records `filled`. Revert handling follows the Order removal policy. `GET /health` (503 when the loop is stale). |
+| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger. Retries transient errors without double-sending; `[ALERT]` log on failure. |
+| `keepers/liquidation-keeper` | `GET /claimable[?market=]` — flagged positions + formulaic price P. Does not claim (claiming is permissionless). |
+| `keepers/liquidator-bot` | Team liquidator of last resort: claims EVERY flagged position promptly, profitable or not (stalls cost the InsuranceFund) — simulates first, uses only `claim()`, alerts on a short float / short InsuranceFund / pending motion — then sells the Upbet on the CLOB (crosses bids down to mark − `SELL_MAX_DISCOUNT_BPS` (3%), else rests at the mark). |
 
-```
-/order-book-server  — REST: GET /markets, GET /orderbook?market=<slug> (no param = mstr),
-                      POST /order (market derived from the order's token; 400
-                      InvalidTokenPair / UnknownMarket / MarketInactive), DELETE /order/:id,
-                      GET /health (per-market fee). Redis books namespaced
-                      orderbook:<slug>:*; a recurring sweep migrates legacy keys
-                      (mutations rate-limited per client IP). POST /order rejects
-                      orders under 1 Upbet (400 BelowMinOrderSize, MIN_ORDER_TOKENS);
-                      POST /orders/sync {market, maker} drops that maker's orders whose
-                      on-chain remaining() is 0 (after an on-chain cancel). Stored
-                      orders carry `filled` (partial fills). POST /order
-                      pre-filters against chain state (src/chain.ts, IChainReader/viem):
-                      rejects flagged/claimable makers (PositionFrozen) and un-fundable
-                      YES sells (FundingShortfall + minSellProceeds); fails open on RPC
-                      error, on-chain check backstops.
-/matching-engine    — price-time priority matching; the earlier order is the maker, fill
-                      size = min of both orders' remaining tokens (size − filled);
-                      submits via CLOBSettlement.fillOrders (settler = OPERATOR_ROLE),
-                      then records `filled` (removes the order once fully filled).
-                      Decodes reverts at gas-estimation: FundingShortfall/PositionFrozen
-                      prune ONLY the order whose own state caused it; FillExceedsRemaining/
-                      OrderInvalidated/OrderExpired/InvalidOrder re-read remaining() and
-                      prune at 0 or resync `filled`; SlippageExceeded/FillTooSmall mark
-                      the pair incompatible and keep both resting (other reverts keep the
-                      retry behavior; see "Order removal policy"). Wires the settler when SETTLER_PRIVATE_KEY +
-                      RPC_URL (or BASE_SEPOLIA_RPC_URL) are set (log-only fallback
-                      otherwise). GET /health on HEALTH_PORT (3005): 503 "stale" when the
-                      match loop hasn't completed a cycle in max(5×poll, 30s); per-market
-                      lastError/settled/pruned; settler ETH + settlerLowBalance.
-                      Matches each market's book independently and settles on that
-                      market's CLOB; refuses (prunes) any pair whose tokens aren't exactly
-                      {USDC, that market's YES/NO} — CLOBSettlement itself doesn't check.
-/funding-keeper     — accrueFunding() every epoch; flags (locks) any position
-                      breaching the seizure trigger. Every active market, sequentially,
-                      one market's failure isolated from the others. Transient RPC/nonce
-                      errors retry with backoff (ACCRUE_MAX_ATTEMPTS, never re-sends an
-                      accrual/flag that already landed); a market that still fails logs
-                      one `[ALERT]` line; low keeper ETH alerts hourly (KEEPER_MIN_ETH).
-/liquidation-keeper — exposes GET /claimable[?market=<slug>] (flagged positions +
-                      formulaic price P, each tagged market/creditMarket/liquidationEngine);
-                      does not claim itself — claiming is permissionless.
-                      Both keepers discover YES holders from the token's Transfer
-                      events (keepers/holder-index.ts; startup backfill + incremental
-                      sync, progress in Redis) — no hand-maintained holder list.
-/liquidator-bot     — (keepers/liquidator-bot.ts) the team's liquidator of last resort:
-                      claims EVERY flagged position promptly, profitable or not
-                      (stalls are what cost the InsuranceFund), simulating first and
-                      alerting on a short float / short InsuranceFund / motion; then
-                      sells the Upbet via clob-seller.ts — crosses the best bid down to
-                      mark − SELL_MAX_DISCOUNT_BPS (3%), else rests an ask at the mark.
-                      Own hot wallet; uses only claim() (works on old + fixed contracts).
-                      All markets from one USDC float (alert vs the largest single claim)
-                      and the SHARED InsuranceFund (alert vs concurrent tail shortfalls).
-/oracle-monitor     — placeholder for ISDA DC scraper (manual multisig in MVP).
-```
+Both keepers discover YES holders from `Transfer` events (`keepers/holder-index.ts`); the
+holder set only grows, by design. There is no oracle service — credit events are attested
+manually (deployer EOA today; a Safe before mainnet).
 
-### Frontend (Next.js 14)
+### Frontend (`frontend/`, Next.js 14 — details in `frontend/CLAUDE.md`)
 
-```
-/app: / (market list), /market/[id] (id = slug; trading), /portfolio (all markets:
-      balances + display layer + redeem), /admin (market picker; credit event, pause —
-      team only), /liquidate (flagged across markets + claim)
-/lib: markets.ts (useMarkets/useMarket — registry via NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS,
-      else legacy one-market fallback), marketRegistry.ts (ABI copy), marketCopy.ts
-      (per-slug long-form copy + corporate/sovereign fallback). Every component takes a
-      `market` object; TradePanel's EIP-712 domain AND token addresses come from that one
-      object (mitigates the CLOB token-validation gap); USDC approvals are per market.
-/components:
-  OrderBook, PriceChart, FundingTicker — standard market UI (poll /orderbook; TradingView
-    Lightweight Charts; live annual-carry display)
-  TradePanel  — signs EIP-712 orders; disables trading with an explanatory banner when
-    the wallet is claimable/frozen; on YES sells shows "minimum sell price to cover
-    carry + fee" and surfaces the server's FundingShortfall response inline; on NO buys
-    signs a gross fee-inclusive amountIn and shows "Total … includes … trade fee";
-    fee-free combos say "No trade fee on this order"; 6-decimal math (lib/feeMath.ts).
-    Fee rate is read live from CLOBSettlement.feeBps() (lib/useFeeBps.ts, 60s refetch;
-    NEXT_PUBLIC_FEE_BPS is only a preview fallback) — NO-buy signing is blocked until
-    the live rate has loaded.
-  PositionCard — Cost Basis, Equity, P&L, Breakeven Mark; YES adds Epochs To Expire with
-    a warning as it nears zero. A distinct flagged panel shows a client-side cure-cost
-    estimate (owed(user) minus pending NO credit — it keeps growing until cured or
-    claimed) plus approve→cure(); redeem disabled while flagged, settleYES stays enabled.
-  LiquidationCard — no discount ticker (P = min(owed, m×Q) from live state) — just P + Claim
-  OpenOrders  — the wallet's resting orders in the market (remaining = size − filled) with
-    on-chain Cancel (cancelOrders) and "Cancel all in this market" (setMinNonce(Date.now())),
-    then POST /orders/sync; TradePanel enforces the 1-Upbet minimum and shows the YES
-    sale's pro-rata carry share.
-```
-
-`lib/creditMarketAbi.ts` is the shared CreditMarket/ERC20 ABI plus a `netFundingDebit`
-helper. There is no buffer UI; Epochs To Expire is the only YES-side early-warning signal.
+Routes: `/` market list, `/market/[id]` (id = slug) trading, `/portfolio` (all markets), `/liquidate`,
+`/admin` (team only: credit event, pause), `/docs/*` (user docs). Every component takes a
+`market` object; TradePanel's EIP-712 domain AND token addresses come from that one object.
+Key UX behaviour:
+- **TradePanel** disables trading for a flagged wallet; shows the YES sale's minimum price
+  to cover carry + fee and its pro-rata carry share; signs NO buys gross and says so; enforces
+  the 1-Upbet minimum; order expiry uses chain time.
+- **PositionCard** shows Cost Basis, Equity, P&L, Breakeven Mark and (YES) Epochs To Expire;
+  a flagged position gets a cure-cost estimate + approve → `cure()` (redeem disabled while
+  flagged; `settleYES` stays enabled).
+- **OpenOrders** — the wallet's resting orders with on-chain Cancel / "Cancel all in this
+  market", then `POST /orders/sync`.
+- Carry figures always read `currentCarryRate` on-chain — never derive carry from the mark.
 
 ---
 
-## Funding Model
+## Funding Model (canonical spec)
 
-**This is the canonical funding spec.** One contract carries the liquidation mechanism
-(LiquidationEngine.sol); everything else is lightweight: no buffer, no Dutch auction, no
-non-linear mark.
+One contract carries the liquidation mechanism (LiquidationEngine.sol); no buffer, no Dutch
+auction, no non-linear mark.
 
 **Design guardrail:** `YES.totalSupply() == NO.totalSupply()` ALWAYS. Never burn YES alone
 to enforce a funding cap — it orphans NO tokens whose paired YES no longer exists, still
 credited funding no one pays. Retire a YES position only by transferring it to someone who
 keeps paying (a liquidator), never by burning it unilaterally.
 
-### Carry rate (changed 2026-10-15, batch-2 contracts)
+### Carry rate
 
 ```
 h     = −ln(1 − m)                 // hazard implied by a 12-month probability m
 carry = h × (1 − m)                // = −(1 − m)·ln(1 − m), per year, per YES
-cumFundingPerYES += carry × Δt/365 // every accrual; carry recomputed only on setMark
+cumulativeFundingPerYES += carry × Δt/365   // every accrual; carry recomputed only on setMark
 ```
 
-Why `× (1 − m)`: an Upbet bought at m is m of the holder's own cash plus an unfunded
-CDS on (1 − m) of notional sold by the NO side — on default the token jumps from m to $1,
-so only 1 − m is protected. Carry h × (1 − m) gives a YES held at a steady mark zero
-expected P&L (constant hazard, zero rates), which is what makes "23¢ = 23% chance in the
-next 12 months" exact. Bounds: m(1 − m) ≤ carry ≤ m; carry peaks at 1/e when m = 1 − 1/e
-(≈63%) and falls above it. Carry is NOT the mark: the token's VALUE is still m (equity,
-the trigger's left side, the claim cap m×Q, cost basis); only accrual uses carry. Before
-batch 2, carry == m, which over-charged YES (−2.5¢ expected P&L per $1 at 23%) so the
-price understated the probability. Derivation + rejected alternative:
-`docs/carry-formula.md`.
+Why `× (1 − m)`: an Upbet bought at m is m of the holder's own cash plus an unfunded CDS on
+(1 − m) of notional sold by the NO side — on default the token jumps from m to $1, so only
+1 − m is protected. Carry h × (1 − m) gives a YES held at a steady mark zero expected P&L
+(constant hazard, zero rates), which is what makes "23¢ = 23% chance in the next 12 months"
+exact. Bounds: m(1 − m) ≤ carry ≤ m; carry peaks at 1/e when m = 1 − 1/e (≈63%). **Carry is
+NOT the mark:** the token's VALUE is still m (equity, the trigger's left side, the claim cap
+m×Q, cost basis); only accrual uses carry. Derivation: `docs/carry-formula.md`.
 
-### Display layer (per holder, shown in UI — does not move cash)
+### Display layer (per holder, UI only — does not move cash)
 
 ```
-Cost Basis (c)        = entry mark (the mark at which YES was bought)
-Equity (E)             = m − f_now              // m = current mark, f_now = owed(user)
-                                                  // per unit: fundingDebt ledger + live
-                                                  // accrual since the snapshot
+Cost Basis (c)         = entry mark
+Equity (E)             = m − f_now               // f_now = owed(user)/Q: fundingDebt ledger
+                                                 //   + live accrual since the snapshot
 P&L                    = E − c = (m − c) − f_now
-Breakeven Mark         = c + f_now               // mark needed for P&L = 0
+Breakeven Mark         = c + f_now
 Epochs To Expire (YES) = floor( (m/1.03 − f_now) / Δf ),  Δf = carry(m) × Δt/365
-                          // epochs of runway until seizure trigger, holding m constant
 ```
 
-`Epochs To Expire` is YES-only (NO never gets liquidated). Worked example at entry
-(c = m = 0.05, f_now = 0, daily epoch): carry = 0.04873, Δf = 0.04873/365 ≈ 0.0001335,
-Epochs To Expire = (0.0485/0.0001335) ≈ 363 days. Runway at a steady mark is
-365 × m / (1.03 × carry): ≈358 days at 2%, 363 at 5%, 373 at 10%, 404 at 23%.
-Implemented as `equity`, `pnl`, `breakevenMark`, `epochsToExpire` views on `CreditMarket.sol`.
+YES-only (NO is never liquidated). Example at entry (c = m = 0.05, f_now = 0, daily epoch):
+carry = 0.04873, Δf ≈ 0.0001335, ≈363 days. Runway at a steady mark = 365 × m / (1.03 ×
+carry): ≈358 days at 2%, 363 at 5%, 373 at 10%, 404 at 23%. Views on CreditMarket: `equity`,
+`pnl`, `breakevenMark`, `epochsToExpire`.
 
 ### Seizure trigger (solvency-based, cost-basis-independent)
 
 ```
-f_now  = owed(user) / Q                      // owed = fundingDebt + Q × (cumYES − snapshot)
-f_next = f_now + carry(m) × Δt/365           // funding owed after one more epoch
-Seize when:  m ≤ 1.03 × f_next               // 3% buffer, evaluated one epoch ahead
+f_now  = owed(user) / Q          // owed = fundingDebt + Q × (cumYES − snapshot), YES debit rounded up
+f_next = f_now + carry(m) × Δt/365
+Seize when:  m ≤ 1.03 × f_next   // 3% buffer, evaluated one epoch ahead
 ```
 
-`f_now` MUST include the `fundingDebt` ledger: every CLOB trade (buyer included) moves
-accrued debit into `fundingDebt` and resets the snapshot, so a snapshot-only f_now lets any
-trade reset the liquidation clock (finding F4, fixed 2026-09-26). `owed(user)` is the single
-definition of the YES-side obligation — the trigger, the claim price, cure and the display
-layer all use it.
+`CreditMarket.isSeizable(user)`. **`owed(user)` is the single definition of the YES-side
+obligation** — the trigger, the claim price, cure and the display layer all use it, and it
+MUST include the `fundingDebt` ledger: every CLOB trade (buyer included) moves accrued debit
+into `fundingDebt` and resets the snapshot, so a snapshot-only f_now would let any trade
+reset the liquidation clock (security finding F4).
 
-Implemented as `CreditMarket.isSeizable(user)`. This keys on **equity remaining relative to
-token value**, never on P&L or cost basis. A holder deep underwater on the mark but current
-on funding is left alone (negative MTM is never a liquidation trigger — they may be sitting
-on cheap protection that pays par on a jump-to-default). Cost basis must NOT appear in the
-trigger: two holders with identical funding/mark exposure but different entry prices must be
-equally liquidatable, or one gets a free option at the other's (and NO's) expense. The 3%
-buffer doubles as the liquidator's profit margin — the incentive that makes someone actually
-claim the position.
+The trigger keys on **equity remaining relative to token value**, never on P&L or cost
+basis. A holder deep underwater on the mark but current on funding is left alone (negative
+MTM is never a trigger — they may hold cheap protection that pays par on a jump-to-default).
+Cost basis must NOT appear in the trigger: two holders with identical funding/mark exposure
+but different entry prices must be equally liquidatable, or one gets a free option at the
+other's (and NO's) expense. The 3% buffer doubles as the liquidator's profit margin.
 
-**Flag semantics (a lock, not a freeze):** once flagged (`CreditMarket.flagClaimable`,
-KEEPER_ROLE), the position is fully locked — no `mint()`, no `redeem()`, no CLOB trade on
-either side (all revert `PositionFrozen`), and it can't act as a liquidator. Funding keeps
-accruing: there is NO accounting freeze (a freeze let the paired NO keep earning credit
-nobody paid for — finding F1). The only exits are a liquidation claim
-(`LiquidationEngine.claim`), `cure()` (the holder pays the live `owed()` in cash net of NO
-credit, keeps the YES and the sliver a claimant would otherwise earn), or `settleYES` after
-a credit event (which auto-cures, collecting `owed()` from the payout before clearing the
-flag).
+**Flag semantics (a lock, not a freeze):** once flagged (`flagClaimable`, KEEPER_ROLE) the
+position is fully locked — no `mint()`, `redeem()`, CLOB trade on either side (all revert
+`PositionFrozen`), and it can't act as a liquidator. **Funding keeps accruing** — an
+accounting freeze let the paired NO keep earning credit nobody paid for (finding F1). The
+only exits: a liquidation claim, `cure()` (the holder pays the live `owed()` in cash net of
+NO credit and keeps the YES), or `settleYES` after a credit event (auto-cures from the payout).
 
 ### Liquidation math (formulaic, no Dutch auction)
 
-When the trigger fires, the keeper flags (locks) the position. The claim is priced at
-CLAIM time from live state — deterministic within the claiming block:
+Priced at CLAIM time from live state — deterministic within the claiming block:
 
 ```
-At claim time: owed = owed(user) (ledger + accrual to this block); m = current mark.
+owed = owed(user); m = current mark.   Claim (anyone, first to call): P = min(owed, m × Q)
 
-Claim (anyone, first to call — no auction, no discount ramp): P = min(owed, m × Q)
+NORMAL CASE (owed ≤ m×Q — expected when claimed promptly):
+  Liquidator pays P = owed → into collateral (NO made whole, untouched).
+  YES TRANSFERS to the liquidator (NOT burned); its funding snapshot resets to now.
+  Residual (m − P ≈ 0.03×m) is the liquidator's profit, NOT returned to the holder.
 
-  NORMAL CASE (owed ≤ m×Q — expected when claimed promptly, given the 3% buffer):
-    Liquidator pays P = owed USDC → into collateral (NO made whole, untouched).
-    YES token TRANSFERS to liquidator (NOT burned); liquidator's funding snapshot resets
-      to now — fresh start, inherits full value m, owes no back-funding.
-    Residual (m − P ≈ 0.03×m) is NOT returned to the original holder — it is the
-      liquidator's profit for executing the seizure (they resell the YES for ≈ m).
-
-  TAIL CASE (owed > m×Q — mark gap, keeper downtime, or a claim that waited too long):
-    Liquidator pays P = m×Q (full token value) → into collateral.
-    InsuranceFund tops up the shortfall (owed − m×Q) → into collateral, so NO is ALWAYS
-      made whole. YES still transfers to liquidator at P = m×Q (fair — full value paid).
+TAIL CASE (owed > m×Q — mark gap, keeper downtime, or a stalled claim):
+  Liquidator pays P = m×Q → into collateral.
+  InsuranceFund tops up (owed − m×Q) → into collateral, so NO is ALWAYS made whole.
 ```
 
-**Stall economics:** the claimer's margin (`m×Q − owed`) starts at ≈3.2% of `m×Q` (the 3%
-buffer plus the one-epoch look-ahead, less keeper lag) and shrinks by one day of carry
-(`carry×Q/365` ≈ 0.27% × carry/m of `m×Q` — 0.27% at 2%, 0.24% at 23%) per day unclaimed,
-so at a constant mark a position crosses into the tail case ≈11–13 days after flagging; a
-falling mark gets there sooner. From then
-on every further day of stall costs the InsuranceFund one day of carry — paid only when
-someone finally claims. Stalls are an operational risk: run a claiming liquidator bot.
+**Stall economics:** the claimer's margin (`m×Q − owed`) starts at ≈3.2% of `m×Q` and
+shrinks by one day of carry (≈0.24–0.27% of `m×Q`) per day unclaimed, so at a constant mark a
+position crosses into the tail case ≈11–13 days after flagging (sooner on a falling mark);
+from then on every day of stall costs the InsuranceFund one day of carry. Run a claiming
+liquidator bot.
 
-**Claim touches ONLY the YES side:** the holder's NO-side credit is NOT netted, paid out, or
-forfeited during a claim — `snapNO` is untouched and pays out at their own next settlement
-touchpoint. No USDC is ever pushed to the original holder inside `claim()` (pull-over-push).
+**Claim touches ONLY the YES side:** the holder's NO credit is not netted, paid or forfeited
+— `snapNO` is untouched and pays out at their next settlement touchpoint. No USDC is pushed
+to the original holder inside `claim()`. The liquidator is `settleFunding`'d first (its own
+NO credit paid, YES debit recorded — finding F2).
 
-**Not "sold at zero":** the YES token is *transferred*, not burned — it still carries full
-value `m`. Paying zero would short NO the funding already promised to it; `P = owed` settles
-that promise, and the liquidator's profit is only the buffer sliver (`m×Q − owed`) — the same
-sliver a seller keeps on a normal CLOB sale, just redirected to whoever performs the seizure.
+**Not "sold at zero":** the YES still carries full value m. Paying zero would short NO the
+funding already promised to it; `P = owed` settles that promise, and the liquidator keeps
+only the buffer sliver — the same sliver a seller keeps on a CLOB sale.
 
-### Funding settlement points (unified per-user `settleFunding` + `fundingDebt` ledger)
+### Funding settlement points (`settleFunding` + `fundingDebt` ledger)
 
-Funding accrues as a number via the indices, but **cash moves only at these points**. On
-every CLOB sale, `CreditMarket.settleFunding(seller)` nets accrued funding over the seller's
-FULL YES/NO balances (not just the amount sold) and resets both snapshots to now. A net
-credit pays out immediately from collateral. A net debit is **recorded in the persistent
-`fundingDebt[user]` ledger**, not forgiven — `settleFunding` folds any prior
-`fundingDebt[user]` into the netting (`debit = fundingDebt[user] + yesOwed` vs `noCredit`)
-first. Without this ledger, an uncollected debit would vanish the moment snapshots advance,
-silently depleting collateral. The buyer settles the same way via `settleFunding(buyer)`,
-but a buyer's (or a NO-seller's) net debit is **not** collected at trade time — it persists
-in `fundingDebt` until that holder's own next touchpoint, so one party's debt never blocks a
-third party's fill.
+Funding accrues as a number via the indices; **cash moves only at these points.**
+`settleFunding(user)` nets accrued funding over the user's FULL YES/NO balances, folding in
+any prior `fundingDebt` (`debit = fundingDebt + yesOwed` vs `noCredit`), and resets both
+snapshots. A net credit pays out immediately from collateral; a net debit is **recorded in
+`fundingDebt[user]`, never forgiven** — otherwise an uncollected debit would vanish when
+snapshots advance and silently deplete collateral.
 
 ```
-mint/redeem/settleYES: settleFunding(user) — credit paid out, debit folds into/out of
-                        fundingDebt against the payout (zeroed on redeem/settleYES)
-liquidation:            LiquidationEngine.claim prices P = min(owed(user), m×Q) at
-                        claim time; the liquidator is settleFunding'd first (its own
-                        NO credit paid, YES debit recorded) (see Liquidation math)
+mint / redeem / settleYES: settleFunding(user); a debit folds against the payout
+                           (zeroed on redeem/settleYES)
+liquidation:               P = min(owed(user), m×Q) at claim time (see above)
 
-CLOB sale — NO side (seller selling NO): settleFunding(seller) nets full position —
-  net credit paid in cash immediately (fundingDebt zeroed); net debit recorded in
-  fundingDebt[seller], NOT collected now, does not block the trade. Seller receives
-  tradePrice + any credit. snapNO[seller]=snapNO[buyer]=cumFundingPerNO (buyer starts
-  fresh). settleFunding(buyer) also runs — buyer's own debit (if any) lands in fundingDebt.
+CLOB sale — NO seller: settleFunding(seller) nets the full position; a credit is paid now,
+  a debit is recorded in fundingDebt and NOT collected (doesn't block the trade).
+  settleFunding(buyer) also runs — the buyer's own debit, if any, lands in fundingDebt.
 
-CLOB sale — YES side (seller selling YES): settleFunding(seller) records the net debit
-  D = fundingDebt[seller] (prior ledger + yesOwed − noCredit). PRO-RATA (batch 3): the fill
-  repays debtShare = D × tokens / YES held (rounded down; all of D when selling the whole
-  position). require tradePrice ≥ debtShare + fee — OPTION B SAFEGUARD: otherwise REVERT
-  FundingShortfall; position UNCHANGED, NOT routed to liquidation (still solvent, above
-  trigger). Seller receives tradePrice − debtShare − fee; CLOB_ROLE calls
-  collectDebt(seller, debtShare), and D − debtShare stays on the ledger against the YES
-  still held. snapYES[seller]=snapYES[buyer]=cumFundingPerYES. settleFunding(buyer) also runs.
+CLOB sale — YES seller: settleFunding(seller) records the net debit D. PRO-RATA: the fill
+  repays debtShare = D × tokens / YES held (rounded down; all of D for a whole-position sale).
+  require tradePrice ≥ debtShare + fee — OPTION B SAFEGUARD: else REVERT FundingShortfall,
+  position UNCHANGED, NOT routed to liquidation (still solvent, above the trigger).
+  Seller receives tradePrice − debtShare − fee; CLOB calls collectDebt(seller, debtShare);
+  D − debtShare stays on the ledger against the YES still held. settleFunding(buyer) runs too.
 ```
 
-**Worked examples:** NO sells at $95 w/ $25 credit → seller nets $120. YES sells its whole
-position at $30 w/ $8 debit → seller nets $22, $8 collected via collectDebt. Sells HALF the
-position at $15 w/ the same $8 debit → $4 collected, nets $11, $4 stays on the ledger. YES
-tries to sell everything at $5 w/ $8 debit → REVERT FundingShortfall; position unchanged,
-still owes $8, not liquidated. The
-shortfall case requires BOTH thin equity (near but above the 3% trigger) AND thin bid-side
-liquidity — a healthy position, or a sale into a deep book, never hits it.
+A buyer's (or NO seller's) net debit is never collected at trade time — one party's debt
+never blocks a third party's fill. **Worked examples:** NO sells at $95 with $25 credit →
+nets $120. YES sells its whole position at $30 with $8 debit → nets $22, $8 collected. Sells
+HALF at $15 with the same $8 debit → $4 collected, nets $11, $4 stays on the ledger. YES tries
+to sell everything at $5 with $8 debit → REVERT FundingShortfall, unchanged, not liquidated.
+The shortfall case needs BOTH thin equity AND a thin bid side.
 
-**Off-chain pre-filter (UX):** `POST /order` rejects at submission — a flagged/claimable
-maker's order (either side) → `400 PositionFrozen`; a YES sell whose `minAmountOut` can't
-cover its pro-rata share ceil(D × amountIn / yesBalance) of D = `fundingDebt(maker) −
-previewFunding(maker, fullYesBalance, true)` (clamped at 0; all of D when selling the whole
-balance) plus the fee → `400 FundingShortfall` with `minSellProceeds` for the UI. Chain reads
-(`order-book-server/src/chain.ts`, `IChainReader`, viem) **fail open** on RPC error — the
-on-chain check is the backstop; this filter is pure UX.
+**Off-chain pre-filter (UX only):** `POST /order` rejects a flagged maker → `400
+PositionFrozen`, and a YES sell whose `minAmountOut` can't cover ceil(D × amountIn /
+yesBalance) + fee, with D = `fundingDebt(maker) − previewFunding(maker, fullYesBalance,
+true)` clamped at 0 → `400 FundingShortfall` + `minSellProceeds`. **`previewFunding` does not
+include `fundingDebt` — don't "simplify" this.** Chain reads fail open; the contract is the
+backstop.
 
 ### Critical invariants (enforce in code AND tests)
 
@@ -558,14 +432,14 @@ on-chain check is the backstop; this filter is pure UX.
    until collected at the holder's next redeem/settleYES/YES-sale proceeds/liquidation.
 8. A YES sale (fill) that would clear BELOW its share of the seller's net debit plus the
    fee — debtShare = (fundingDebt + yesOwed − noCredit) × tokens sold / YES held, all of
-   it for a whole-position sale — REVERTS and leaves the position completely unchanged. It is NEVER force-liquidated by a failed
-   sale — the position is still above the seizure trigger and solvent. Liquidation is
-   reached only by the trigger, never by a sale attempt.
+   it for a whole-position sale — REVERTS and leaves the position completely unchanged.
+   It is NEVER force-liquidated by a failed sale — the position is still above the seizure
+   trigger and solvent. Liquidation is reached only by the trigger, never by a sale attempt.
 9. A net funding debit recorded in `fundingDebt` is NEVER erased without the equivalent
    USDC landing in (or staying in) collateral — snapshots may advance, but debt persists
    until collected (a partial YES sale collects its share; the rest stays recorded).
    Rounding always favours collateral: a YES debit rounds UP, a NO credit DOWN
-   (`CreditMarket._yesDebit`, batch 3).
+   (`CreditMarket._yesDebit`).
 10. A flagged (claimable) position is fully locked — no mint, redeem, CLOB trade on
     either side, or acting as a liquidator — while its funding keeps accruing (owed() is
     non-decreasing while flagged). The only exits are claim(), cure(), or
@@ -573,38 +447,29 @@ on-chain check is the backstop; this filter is pure UX.
     holder's NO-side credit survives a claim untouched.
 ```
 
-**Findings fixed and deployed to Base Sepolia 2026-10-01** (batch-1 redeploy): F4 (trigger
-ignored the ledger), F1 (flag froze accounting), F2 (liquidator NO credit forfeited) —
+Tests encode these (incl. the stateful invariant suites in `contracts/test/invariant/`); if a
+change fights the tests, the change is wrong. Past findings F1–F4 and their fixes:
 `docs/security/invariant-findings-2026-09-26.md`.
 
-### What stays true across model iterations
+### Residual modelling assumptions (disclosed, not fixed)
 
-- Complete-set invariant: 1 YES + 1 NO ← $1 collateral, redeemable for $1, resolves $1/$0.
-- Zero recovery. YES settles at full notional on credit event.
-- Off-chain CLOB, on-chain settlement.
-- Price = 12-month default probability, made exact by the carry formula (carry = h(1 − m),
-  h = −ln(1 − m)) — the token itself stays linear ($1/$0 payoff, value m). Residual
-  modelling assumptions, disclosed rather than fixed: a perpetual prices one flat hazard,
-  and idle collateral earns nothing (at ~4% rates prices lean slightly; yield-bearing
-  collateral is a v2 topic). Carry falls above m ≈ 63%; keep listings well below that.
+A perpetual prices one flat hazard; idle collateral earns nothing (at ~4% rates prices lean
+slightly — yield-bearing collateral is a v2 topic); carry falls above m ≈ 63%.
 
 ---
 
-## Funding Model v2 (FUTURE — not building now)
+## Roadmap — Funding Model v2 (NOT building now)
 
-Documented for the roadmap only. v2 would add a per-wallet prepaid USDC buffer (so YES
-holders get runway before liquidation, rather than relying solely on token-value headroom)
-and a Dutch-auction discount ramp (rather than a fixed formulaic price). (The non-linear
-mark V = 1 − e^(−s) once listed here was delivered differently in batch 2: the price is
-already the 12-month probability via the carry formula.) Also a v2 candidate
-(decided 2026-07-11): `prepayFunding()` — voluntary cash settlement of accrued funding for
-UNFLAGGED holders (zeroes fundingDebt, resets snapshots, pushes the seizure trigger away);
-a mild precursor of the buffer. Explicitly NOT building a fee-only top-up for
-FundingShortfall-blocked YES sales — the blocked band is ≤ fee-width (~0.5% of proceeds)
-and the escape is one price tick; cure() remains exclusively the flagged-position exit. The current model
-already has the core liquidator mechanism and the no-free-option guarantee — v2 only adds
-runway and pricing refinements. Build only after the current model validates PMF and the
-no-buffer tradeoff (tighter, more frequent liquidations) proves to be a real UX problem.
+Build only after the current model validates PMF and the no-buffer tradeoff (tighter, more
+frequent liquidations) proves to be a real UX problem:
+- Per-wallet prepaid USDC buffer (runway before liquidation) and a Dutch-auction discount
+  ramp instead of the fixed formulaic price.
+- `prepayFunding()` — voluntary cash settlement of accrued funding for UNFLAGGED holders
+  (zeroes `fundingDebt`, resets snapshots, pushes the trigger away).
+- Shared registry-aware CLOBSettlement; Gnosis CTF tokens.
+- Explicitly NOT building: a fee-only top-up for FundingShortfall-blocked YES sales (the
+  blocked band is ≤ fee-width and the escape is one price tick); `cure()` stays exclusively
+  the flagged-position exit.
 
 ---
 
@@ -612,111 +477,47 @@ no-buffer tradeoff (tighter, more frequent liquidations) proves to be a real UX 
 
 | Layer | Tech |
 |---|---|
-| Smart contracts | Solidity 0.8.x, Foundry, OpenZeppelin v5 |
-| Chain | Base (EVM) |
-| Frontend | Next.js 14 (App Router), TypeScript, wagmi v2, viem, RainbowKit, Tailwind CSS |
-| Charts | TradingView Lightweight Charts |
-| Order book server | Node.js, TypeScript, Fastify, Redis (order state) |
-| Indexing (MVP) | Direct RPC + event polling (no subgraph until V2) |
-| Wallet | RainbowKit + wagmi v2 |
-| Testing | Foundry (contracts), Vitest (frontend/backend) |
-| Deployment | Base Sepolia → Base mainnet |
-
----
-
-## Smart Contract Standards
-
-- All contracts use OpenZeppelin v5 (`AccessControl`, `ReentrancyGuard`, `Pausable`) —
-  plain contracts, not upgradeable/proxy
-- `AccessControl` roles (`CreditMarket.sol`): `DEFAULT_ADMIN_ROLE`, `ORACLE_ROLE`,
-  `KEEPER_ROLE`, `PAUSER_ROLE`, `CLOB_ROLE`, `LIQUIDATOR_ROLE`. Token contracts
-  (`YESToken.sol`/`NOToken.sol`) each additionally define `MINTER_ROLE`, `BURNER_ROLE`,
-  `CLOB_ROLE`. `InsuranceFund.sol` defines its own `LIQUIDATOR_ROLE` for
-  `LiquidationEngine`'s tail-case top-up.
-- `ReentrancyGuard` on every function that transfers USDC or YES/NO tokens
-- Pull-over-push for all USDC payouts — never push to arbitrary addresses
-- YES/NO token transfers restricted to `CLOB_ROLE` and CreditMarket via `_update()` override
-- `Pausable` on CreditMarket — PAUSER_ROLE halts market during determination window
-- Emit events on every state change: TokensMinted, TokensRedeemed, YESSettled,
-  FundingAccrued, CreditEventTriggered, FlaggedClaimable, FundingSettled, PositionCured
-  (pause uses OZ `Pausable`'s standard Paused/Unpaused)
-
----
-
-## Core Math
-
-**Mint (deposit USDC, receive YES + NO tokens 1:1):**
-```
-yesAmount = usdcIn
-noAmount  = usdcIn
-invariant: YES.totalSupply() == NO.totalSupply() always (fully collateralized)
-```
-
-**Redeem (burn 1 YES + 1 NO, receive 1 USDC — pre-settlement only):**
-```
-usdcOut = tokenAmount × 1  (always 1:1, YES+NO pair = 1 USDC)
-```
-
-**Funding accrual, seizure trigger, and liquidation pricing:** see the "Funding Model"
-section above — it is canonical; formulas are not restated here.
-
-**Credit event settlement:**
-```
-YES token → burns at 1 USDC each  (full notional, zero recovery)
-NO token  → worth $0, no redemption
-```
-
-**CLOB trade price:**
-```
-Buying  YES: pay P USDC per YES token  (P = current market ask, 0 < P < 1)
-Selling YES: receive P USDC per YES token
-Price P represents the market-implied probability of a credit event in the next 12 months
-```
+| Contracts | Solidity 0.8.24, Foundry, OpenZeppelin v5, Solady (`lnWad`) |
+| Frontend | Next.js 14 (App Router), TypeScript, wagmi v2, viem, RainbowKit, Tailwind, TradingView Lightweight Charts |
+| Backend | Node.js 20, TypeScript, Fastify, Redis, viem |
+| Indexing | Direct RPC + event polling (no subgraph) |
+| Testing | Foundry (contracts), Vitest (backend) |
+| Hosting | Railway (backend), Vercel (frontend); Base Sepolia → Base mainnet |
 
 ---
 
 ## UX / Naming Conventions
 
-**Product name:** Pari ("Pari — Tradable Credit For All"). Brand assets: `Pari Brand
-Guidelines.html` + design tokens vendored at `frontend/styles/pari/` (Direction A "Analyst"
-for nav/landing/portfolio, Direction B "Trader" for market/orderbook/liquidate).
+**Product name:** Pari ("Pari — Tradable Credit For All"). Brand: `Pari Brand
+Guidelines.html` + tokens in `frontend/styles/pari/` (Direction A "Analyst" for
+nav/landing/portfolio, Direction B "Trader" for market/orderbook/liquidate).
 
 **Never use in UI:** hazard rate, bps, basis points, protection buyer/seller, notional,
-token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
+token, YES/NO (internal names only — code, ABIs and API fields keep yes/no).
 
 **Always use in UI:**
-- "Upbet" / "Downbet" (Upbet = YES internally = long default risk, pays carry;
-  Downbet = NO internally = earns carry). Colors: Upbet = `--color-danger`,
-  Downbet = `--color-teal`; positive P&L stays `--color-success`.
-- "X% chance" (of a credit event in the next 12 months — never "annual probability")
-- "Daily carry" (not funding rate)
-- Market title: "Will [Entity] have a credit event in the next 12 months?" (e.g. "Will
-  MicroStrategy have a credit event in the next 12 months?")
-- Price: "23.4% chance"
-- Upbet costs 23.4¢ per $1 / Downbet costs 76.6¢ per $1
-- "Your position: $500 Upbet @ 23.4% entry"
+- "Upbet" / "Downbet" (Upbet = YES = long default risk, pays carry; Downbet = NO = earns
+  carry). Colors: Upbet `--color-danger`, Downbet `--color-teal`; positive P&L
+  `--color-success`.
+- "X% chance" (of a credit event in the next 12 months — never "annual probability").
+- "Daily carry" (not funding rate).
+- Market title: "Will [Entity] have a credit event in the next 12 months?"
+- Price: "23.4% chance"; "Upbet costs 23.4¢ per $1 / Downbet costs 76.6¢ per $1".
+- "Your position: $500 Upbet @ 23.4% entry".
 
 ---
 
 ## What NOT to Build in MVP
 
 ```
-❌ Gnosis CTF / ERC-1155 (custom ERC-20 YES/NO tokens for MVP)
-❌ LP vault / LPToken (team wallet is liquidity provider)
-❌ MarketFactory / on-chain factory (markets added by AddMarket.s.sol + MarketRegistry)
-❌ Permissionless market listing / cross-market margin or netting
-❌ Shared multi-market CLOBSettlement (per-market CLOBs for MVP; v2 candidate)
-❌ ISDA oracle relayer (multisig only)
-❌ USDC bond module for credit event disputes
-❌ Subgraph / The Graph (direct RPC polling only)
-❌ Fee distributor contract (trading fees route directly 50/50 to team wallet +
-   InsuranceFund at settlement time — no accrual, no claim flow)
-❌ Referral system
-❌ Governance
-❌ Insurance fund withdrawals (fund only receives in MVP)
-❌ Market listing UI
-❌ Mobile optimization (desktop-first)
-❌ Wallet-to-wallet YES/NO transfers (CLOB_ROLE restricted only)
+❌ Gnosis CTF / ERC-1155            ❌ LP vault / LPToken (team wallet is liquidity)
+❌ On-chain MarketFactory           ❌ Permissionless listing / market listing UI
+❌ Cross-market margin or netting   ❌ Shared multi-market CLOBSettlement (v2)
+❌ ISDA oracle relayer (multisig)   ❌ USDC bond module for credit-event disputes
+❌ Subgraph / The Graph             ❌ Fee distributor (fees route directly at settlement)
+❌ Referral system / governance     ❌ InsuranceFund withdrawal flow (fund only receives)
+❌ Mobile optimization              ❌ Wallet-to-wallet YES/NO transfers
+❌ Protocol token, leverage
 ```
 
 ---
@@ -725,9 +526,9 @@ token, YES/NO (internal names only — code, ABIs, and API fields keep yes/no)
 
 - OpenZeppelin v5: https://docs.openzeppelin.com/contracts/5.x/
 - Foundry book: https://book.getfoundry.sh/
+- Solady FixedPointMathLib: https://github.com/Vectorized/solady
 - wagmi v2 signTypedData: https://wagmi.sh/react/api/hooks/useSignTypedData
 - Base docs: https://docs.base.org
-- EIP-712 spec: https://eips.ethereum.org/EIPS/eip-712
+- EIP-712: https://eips.ethereum.org/EIPS/eip-712
 - Polymarket CLOB (reference): https://github.com/Polymarket/clob-client
-- PRBMath (fixed-point exp/ln for markValue): https://github.com/PaulRBerg/prb-math
-- Everlasting options (White & Zhou) — funding model basis: search "everlasting options paper"
+- Everlasting options (White & Zhou) — funding model basis
