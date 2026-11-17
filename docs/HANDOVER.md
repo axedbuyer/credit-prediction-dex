@@ -1,334 +1,231 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Written 2026-07-07, updated 2026-07-19, 2026-09-25, 2026-10-01, 2026-10-13 and 2026-10-15, at the point of handing the
-project to the next engineer. This doc captures state and tribal knowledge that is NOT
-derivable from the code or the other docs. Read it alongside — not instead of — the
-canonical references below.*
+*Last updated 2026-11-17. This doc holds current state, ops knowledge and open work that
+are NOT derivable from the code. The product/economics spec — including the 10 hard
+invariants — is the root `CLAUDE.md`; if code and that spec disagree, treat it as a bug.*
 
-## Read these first, in this order
+## Read these first
 
-1. **Root `CLAUDE.md`** — the canonical product/economics spec: token model, funding
-   model, seizure trigger, liquidation math, the 10 hard invariants, trading fee, UX
-   naming rules (YES/NO are internal names; the UI says Upbet/Downbet — never leak
-   internal terms into UI copy). If code and this spec disagree, treat it as a bug in
-   the code.
+1. **Root `CLAUDE.md`** — product, economics, invariants, architecture, UI naming rules.
 2. **`README.md`** — architecture diagram, repo layout, per-workspace setup/test.
-3. **`docs/deploy-testnet.md`** — the testnet deploy runbook (contracts → Railway →
-   Vercel). Both hosting legs are now live — see "State at handover" below.
-4. **`docs/deploy-followups.md`** — issues hit during the initial Railway deploy + fix
-   plan (all resolved; kept as an incident record).
-5. **`docs/hosted-env-vars.md`** — current source of truth for every Railway/Vercel env
-   var, including the current (batch-1 redeploy, 2026-10-01) contract addresses.
-6. **`docs/production-plan.md`** — the phased path to mainnet (holder discovery, role
-   ceremony, invariant suite/audit, dress rehearsal).
-7. Per-directory `CLAUDE.md` in `contracts/`, `backend/`, `frontend/` — stack notes.
+3. **`docs/hosted-env-vars.md`** — every Railway/Vercel env var and the current addresses.
+4. **`docs/redeploy-guide.md`** + the latest batch runbook (`docs/redeploy-batch3-runbook.md`)
+   — how to redeploy contracts/services, with the gotchas below in runbook form.
+5. **`docs/production-plan.md`** — the phased path to mainnet.
+6. Per-directory `CLAUDE.md` in `contracts/`, `backend/`, `frontend/` — stack notes.
 
-## State at handover
+Historical records (read only when you need the background): `deploy-testnet.md`,
+`deploy-followups.md`, `redeploy-batch{1,2}-runbook.md`, `multi-market-{design,cutover,local-rehearsal}.md`,
+`partial-fills-plan.md`, `carry-formula.md`, `security/` (Slither triage, invariant findings
+F1–F4 — all fixed).
 
-- **Contracts: live on Base Sepolia** (chainId 84532). **Batch-1 full redeploy on
-  2026-10-01** (`docs/redeploy-batch1-runbook.md`, start block 47528136): unified `owed()`
-  fix for F1/F2/F4, `depositCap` (50,000 USDC), bounded keeper `setMark` (≤ 5 points per
-  update, ≥ 1h apart; admin `adminSetMark` bypasses), Slither follow-ups. One
-  `Deploy.s.sol` broadcast granted every role and asserted the config on-chain. All 7
-  source-verified on Blockscout (2026-10-01, after riding out its "Too many requests"
-  rate limiting — check status via `/api/v2/smart-contracts/<addr>`, not forge's own
-  status poll, which is rate-limited too). The
-  `ETHERSCAN_API_KEY` in `contracts/.env` is rejected by Etherscan v2; use the
-  `forge verify-contract … --verifier blockscout` form in the runbook's Outcome section.
-  Addresses: `contracts/deployments/base-sepolia.json` (tracked; do not hand-edit).
-  Initial mark 23%. The 2026-07 contracts (CreditMarket `0x26C3…F51b`) were redeemed
-  empty and paused. History below about the 2026-07 deploy is kept for context.
-- **Trading fee shipped 2026-07-11** (commit `9f5223e`): 50 bps × min(p, 1−p) × Q,
-  charged only on the carry-earning side (YES sells + NO buys), split 50/50 team
-  wallet/InsuranceFund, admin-editable via `CLOBSettlement.setFeeConfig`
-  (`MAX_FEE_BPS = 500`). This required a **new CLOBSettlement deployment** — see
-  "Non-obvious semantics" below for the redeploy gotchas. Fee-aware CLOBSettlement went
-  live on Base Sepolia 2026-07-12 (commit `141c4d3`,
-  `script/RedeployCLOBSettlement.s.sol`) at `0xC31702C1C2c41FcCb57446E0fda5091412bccB8e`;
-  the pre-fee address `0x94f0D62B1749C627f1669Ef2d757b096825A84c2` is now role-less and
-  dead. Fee config live on-chain: 50 bps, `insuranceShareBps` 5000 (50/50), team wallet =
-  deployer. Current addresses for every contract: `docs/hosted-env-vars.md`.
-- **Tests: green.** 151 Foundry tests (`cd contracts && forge test`, incl. a 21-selector
-  invariant suite that catches 9/9 planted bugs), 319 Vitest tests across the backend
-  (keepers 184, order-book-server 91, matching-engine 44), plus a 20/20 anvil fee smoke test. Frontend has no
-  test suite — CI type-checks only.
-- **Backend hosting: GREEN since ~2026-07-16.** Railway project "exciting-embrace"
-  (ID `01235b60-cb1d-491c-8e60-4ab307ed5a33`, environment "production"), GitHub-connected
-  to `axedbuyer/credit-prediction-dex` — all five services rebuild automatically on push
-  to `main`. All services Online: `order-book-server` (public,
-  https://order-book-server-production-9bb6.up.railway.app, health = `GET /health`),
-  `matching-engine` (internal, settler wired), `funding-keeper` (internal,
-  `RAILWAY_DOCKERFILE_PATH=Dockerfile.funding-keeper`), `liquidation-keeper` (public,
-  https://liquidation-keeper-production.up.railway.app,
-  `RAILWAY_DOCKERFILE_PATH=Dockerfile.liquidation-keeper`), plus managed Redis. CORS is
-  `*` on both public services. A dead scaffold service named "credit-prediction-dex"
-  inside the project, and a separate stray scaffold project "fortunate-warmth", were both
-  deleted 2026-07-19 — if either name resurfaces in a screenshot or old note, it's gone.
-  Railway CLI on this machine is authenticated via `railway login` (session auth — an API
-  token approach failed) and the repo dir is railway-linked to
-  `exciting-embrace/production`. Env-var source of truth: `docs/hosted-env-vars.md`.
-- **Frontend hosting: LIVE on Vercel since 2026-07-19.**
-  https://credit-prediction-dex.vercel.app — project "credit-prediction-dex"
-  (`prj_36XAv69jCZ9ggcn7TmKBfEe4PJgW`, team `team_XxmRZcymUCsKZVReO7HQkYAj`), git-linked
-  to the repo with `rootDirectory=frontend`, framework `nextjs`; pushes to `main`
-  auto-deploy production, no token needed for ordinary code deploys. All 12 env vars from
-  `docs/hosted-env-vars.md` are set, including a real
-  `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` (the old "get a WalletConnect ID first" blocker
-  is resolved) and the two Railway public URLs. Project setup itself was done via the
-  Vercel REST API with a user-supplied token used inline only (not stored; may since be
-  revoked) — any future env-var changes go through the Vercel dashboard or a fresh token.
-  The Vercel CLI was never installed on this machine — WSL2 DNS flakiness broke
-  `npm install -g`.
-- **Liquidity seeded 2026-07-19** on the hosted book via
-  `scripts/demo/mm-sepolia-seed.ts` run against the Railway order-book URL: deployer as
-  maker, 7 resting quotes around the 23% mark (YES bids 20¢/22¢, asks 24¢/26¢; NO bid
-  75¢, asks 77¢/79¢; 4 tokens per level). The script's NO-bid fee bug (it was signing a
-  net rather than gross `amountIn`) was fixed in commit `b1a2e08`; the one live
-  mis-priced bid from before the fix was cancelled and re-rested correctly.
-- **Uptime monitoring since 2026-09-25:** `.github/workflows/uptime.yml` runs hourly
-  (and on manual dispatch) — order-book-server `/health`, liquidation-keeper `/health`
-  (including `holderIndex.lastError` == null, re-checked once after 45s), the Vercel
-  frontend, and funding-keeper liveness via on-chain `lastFundingTime`
-  staleness (> 1.5 epochs fails). A failed run's GitHub email is the alert. Update the
-  URLs/address constants at the top of the workflow after any redeploy.
-- **Security gate progress (2026-09-26):** Slither triaged (no real High/Medium —
-  `docs/security/slither-2026-09-26.md`); stateful invariant suite built and
-  mutation-tested (`contracts/test/invariant/`, runs inside plain `forge test`). The suite
-  found **F4 (HIGH): any CLOB buy resets the seizure clock** because the trigger ignores
-  the `fundingDebt` ledger, **F1: a collateral leak** (frozen YES funding vs live NO
-  credit while flagged), and a minor liquidator NO-credit forfeiture (F2) — all need a
-  contract fix + redeploy, and a spec decision first:
-  `docs/security/invariant-findings-2026-09-26.md`. **All three fixed (unified `owed()`)
-  and deployed in the 2026-10-01 batch-1 redeploy.**
-- **Audit: deliberately deferred** by the project owner. Not forgotten.
-- **Batch 3 LIVE (2026-10-17):** partial fills (operator-only `fillOrders`), on-chain cancel
-  (`cancelOrders` / `setMinNonce`, the market page's "Your Open Orders"), pro-rata carry-debt
-  collection, 1-Upbet minimum. Every market got a new contract set under a NEW MarketRegistry
-  `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`; the batch-2 sets are paused + inactive.
-  Record: `docs/redeploy-batch3-runbook.md`. Blockscout verification of the 19 batch-3
-  contracts is still to do (rate-limited on 2026-10-17).
-- **Batch 2 (2026-10-15, superseded by batch 3):** carry = −(1 − m)·ln(1 − m) instead of m, so the price is
-  exactly the 12-month default probability (`docs/carry-formula.md`). Every market got a new
-  contract set under a NEW MarketRegistry `0xF650221216c76Bb775cd42211aFcb7a3c99f99A0`; the
-  batch-1 sets are paused + inactive. Seeds unchanged (23/10/2%) — placeholders until the
-  owner supplies ISDA CDS marks (seed with `m = 1 − exp(−s/(1−R))`). Record:
-  `docs/redeploy-batch2-runbook.md`.
-- **Multi-market LIVE (cutover complete 2026-10-03):** MarketRegistry
-  `0xdF1A5141310140edF6fDaE3cd339FD042dF15720` (superseded by batch 2) + `AddMarket.s.sol` (per-market contract sets,
-  shared InsuranceFund, per-market CLOB); markets MSTR (batch-1 set = market #1, no
-  redeploy), CoreWeave 10%, Turkey 2% — addresses in `contracts/deployments/base-sepolia/`.
-  All five Railway services and the Vercel frontend run in registry mode. Design +
-  decisions: `docs/multi-market-design.md`; rollout record: `docs/multi-market-cutover.md`.
-- **Liquidator bot live** on Railway since 2026-09-29 (multi-market since 2026-10-03). It
-  logs only when it claims — use its public read-only
-  `https://liquidator-bot-production-1939.up.railway.app/health`, not the logs, for
-  liveness. The hourly uptime workflow checks it plus hot-wallet gas (2026-10-13).
-- **Matching engine** has a public read-only `https://matching-engine-production-f04c.up.railway.app/health`
-  (2026-10-14), also checked hourly by the uptime workflow.
+## Current state
 
-## Ops wallets and secrets
+### Contracts — Base Sepolia (chainId 84532), batch 3, live since 2026-10-17
 
-Keys live only in gitignored `.env` files (`.gitignore` now ignores all `.env*` except
-`*.example` — this was tightened 2026-07-07 after backup copies nearly got committed).
+MarketRegistry **`0xA7bcc124aF821388886012B905Ba8cF4B79469b1`** (start block 48217498).
+One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is shared.
 
-| Wallet | Address | Key location | Roles |
-|---|---|---|---|
-| Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN, PAUSER, OracleRouter ORACLE_ROLE (attester), team wallet |
-| Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE |
-| Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | (none needed) |
-| Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only (owner holds it) | (none needed — claim() is permissionless); funded 0.0005 ETH + 10 USDC float 2026-09-29, topped up to 0.0015 ETH 2026-10-13 |
+| Slug | CreditMarket | Seed mark |
+|---|---|---|
+| `mstr` | `0x89e54F5e5C996174D9d2e52dbf90589b2f355d3A` | 23% |
+| `crwv` | `0xB6bc5e9FA166520536453FD667B79Fb705ca09b5` | 10% |
+| `try` | `0xdD1202B077b9B89253006610F80DAD23B9fDf76e` | 2% |
 
-RPC is public `https://sepolia.base.org`. Wallets hold only small amounts of ETH; the
-hourly uptime workflow fails (email) when keeper < 0.0005, settler < 0.0001 or
-liquidator < 0.0002 ETH — top up then. A settlement costs ≈2e-6 ETH, an accrual less. Everything runs off raw EOAs — moving admin to a Safe
-is a production-plan phase, not done.
+- Full address sets: `contracts/deployments/base-sepolia/{core.json,markets/*.json}`
+  (written by the deploy scripts — do not hand-edit). Every older contract set is paused and
+  inactive, archived under `deployments/base-sepolia/archive/`.
+- Per market: `depositCap` 50,000 USDC, keeper `setMark` ≤ 5 points per update and ≥ 1h
+  apart (admin `adminSetMark` bypasses), fee 50 bps split 50/50 team wallet / InsuranceFund.
+- Seed marks are placeholders until the owner supplies CDS-implied marks
+  (`m = 1 − exp(−s/(1−R))`).
+- All 19 batch-3 contracts (+ the shared InsuranceFund) are source-verified on Blockscout
+  (2026-11-17). Recipe for the next batch: `forge verify-contract <addr> src/<F>.sol:<C>
+  --chain-id 84532 --verifier blockscout --verifier-url https://base-sepolia.blockscout.com/api
+  --constructor-args $(cast abi-encode …)`, args from the CREATE tx `arguments` in
+  `contracts/broadcast/<script>/84532/run-*.json`; one contract at a time, 20–45s apart.
+  The Etherscan key in `contracts/.env` is rejected. Check status via
+  `/api/v2/smart-contracts/<addr>` `is_verified` with curl (forge's poll is rate-limited;
+  Python's default user agent gets 403).
 
-**Roles:** since batch 1, `Deploy.s.sol` grants `KEEPER_ROLE` (`KEEPER_ADDRESS`),
-`PAUSER_ROLE` (`PAUSER_ADDRESS`) and the OracleRouter attester role
-(`ORACLE_ATTESTER_ADDRESS`) itself, and asserts every grant after broadcast — no manual
-post-deploy grants. (The 2026-07 deploy needed them by hand, and never granted the
-attester role at all.)
+Deploy history, for orientation: 2026-07-06 first deploy → 07-12 fee-aware CLOB → 10-01
+batch 1 (unified `owed()` fix for F1/F2/F4, deposit cap, bounded `setMark`) → 10-03 multi-market
+(registry, CoreWeave + Turkey) → 10-15 batch 2 (carry = −(1−m)·ln(1−m)) → 10-17 batch 3
+(partial fills, on-chain cancel, pro-rata carry debt, 1-Upbet minimum). Each batch was a
+full redeploy under a new registry, because CreditMarket changed.
 
-**GitHub pushes from this machine:** no stored credentials, and GitHub is intermittently
-unreachable from WSL — the owner pushes from outside WSL.
+### Hosting — all green
 
-## Non-obvious semantics (each of these cost real debugging time)
+- **Railway** project "exciting-embrace" (`01235b60-cb1d-491c-8e60-4ab307ed5a33`,
+  environment "production"), GitHub-connected: **every push to `main` redeploys all
+  services** — merging a PR is a testnet deploy. Services (all in registry mode) + managed Redis:
 
-- **YES/NO tokens report `decimals() == 18` but every amount in the system is raw
-  6-decimal USDC scale.** Never add them as MetaMask custom tokens (display is off by
-  1e12); never normalize by 1e18 in new code. All order/balance math is 6-dec.
-- **`previewFunding` does NOT fold in `fundingDebt`.** The order-book-server's min-sell
-  check computes `fundingDebt(maker) − previewFunding(maker, fullYesBalance, true)`
-  clamped at 0. Do not "simplify" it back to a bare `previewFunding` call. The YES-side
-  obligation everywhere else (trigger, claim price, cure, display) is `owed(user)`;
-  `frozenFunding` no longer exists (removed with the F1 fix).
-- **`CLOBSettlement.verifyAndSettle` takes `(Order, bytes, Order, bytes)` with a
-  7-field Order and detached signatures — selector `0x538df8d8`.** The original backend
-  encoded 8-field tuples with embedded sigs and every real settlement reverted; this
-  was fixed in the v1b1 catch-up. Any new off-chain caller must match the 7-field shape.
-- **A `forge script` DRY RUN of a redeploy script still writes
-  `contracts/deployments/base-sepolia.json`.** `RedeployCLOBSettlement.s.sol`'s dry run
-  rewrote the deployments file with the new CLOBSettlement address *before* the real
-  broadcast ran; because both runs used the same nonce, the subsequent broadcast then
-  read "old address" back as its own about-to-be-deployed address and self-revoked the
-  roles it had just granted itself — recovered with six manual `cast send` role txs. The
-  script now guards `oldClob != newClob` before revoking.
-  Treat any redeploy script the same way: don't trust the deployments JSON as "old" state
-  until you've confirmed no dry run touched it first.
-- **The CLOBSettlement EIP-712 domain is per-contract-address**, so redeploying
-  CLOBSettlement (as the 2026-07-12 fee redeploy did) invalidates every resting
-  order/nonce signed against the old address. Any Redis-held orders from before a
-  CLOBSettlement redeploy must be flushed — they'll fail signature verification
-  silently-looking (the server won't know why fills stop matching) rather than loudly.
-- **Three fee-math implementations must stay in lockstep, plus two env vars:**
-  `CLOBSettlement.tradeFee` (Solidity, source of truth), `backend/order-book-server/src/fee.ts`,
-  and `frontend/lib/feeMath.ts` all implement the same fee formula (the two TS mirrors
-  additionally carry the `minGrossForNet` inversion, which has no on-chain counterpart).
-  The RATE is no longer hand-mirrored (2026-09-26): order-book-server
-  (`src/feeSource.ts`) and the frontend (`lib/useFeeBps.ts`) both read
-  `CLOBSettlement.feeBps()` live and refresh every 60s, so an admin `setFeeConfig` is
-  picked up without redeploys. `FEE_BPS` / `NEXT_PUBLIC_FEE_BPS` are now only fallbacks
-  (RPC outage / still loading): the server logs loudly and `/health` shows
-  `fee.source: "env-fallback"`, and the frontend refuses to sign Downbet (NO) buys until
-  the live rate has loaded. The FORMULA still has three copies — change all of them
-  together.
-- **NO buys sign a GROSS fee-inclusive `amountIn`, not net.** The contract can only pull
-  exactly the signed `amountIn`, so the buyer's order must already include the fee
-  (computed via the `minGrossForNet` piecewise inversion); a NO bid signed at its net
-  intended price rests below where the trader actually meant it to rest. This bit the
-  original `scripts/demo/mm-sepolia-seed.ts` (fixed in commit `b1a2e08`) — check any new
-  order-signing code for the same mistake.
-- **The keepers run their `.ts` directly via `node -r ts-node/register`**, not a `dist/`
-  build. `backend/keepers/tsconfig.json` compiles both entrypoints (CI runs
-  `npm run build` as a type-check), but neither Dockerfile copies or runs `dist/` — so
-  **ts-node is a runtime dependency despite being a devDependency** (this is what
-  crash-looped Railway; Dockerfiles now `npm ci --include=dev`).
-- **order-book-server and matching-engine do NOT load dotenv.** Locally you must
-  export env vars before launch (or use a wrapper); in Railway they come from service
-  variables. The keepers historically ran locally with `node --env-file`.
-- **`contracts/deployments/base-sepolia.json` is also an env-var fallback** read at
-  startup by keepers and settler — but the file is not copied into the Docker images,
-  so hosted services MUST set address env vars explicitly or they crash on boot (with an
-  error naming the missing env var — since 2026-09-25 the keepers no longer die on a raw
-  `ENOENT`; the settler already reported it clearly).
-- **Holder discovery (`backend/keepers/holder-index.ts`) indexes YES `Transfer`
-  recipients — the set only grows.** Every YES balance change emits `Transfer` (OZ
-  `_update`), so ever-recipients ⊇ current holders; ex-holders stay in the set and cost
-  one read each (keepers read `claimable`/`isSeizable` per holder anyway). A missing
-  holder is the dangerous failure, so there is deliberately no pruning. Scan state
-  (cursor + set) lives in Redis under `holder-index:<chainId>:<yes token>:*`, shared by
-  both keepers; the cursor only moves forward and is written after the holders. Every
-  sync re-scans 64 blocks below the cursor for reorg safety. `HOLDER_INDEX_FROM_BLOCK`
-  is required (Sepolia YES deploy block 43766743) — scanning from genesis on the public
-  RPC (then a 1,000-block `eth_getLogs` cap; 200 since ~2026-10-14) would be ~47k calls. Keepers call `refresh()`,
-  which never blocks a cycle on the initial backfill: until it completes they check the
-  holders found so far (plus any `TRACKED_HOLDERS` seeds), and a failed backfill retries
-  itself every 30s. Both `/health` endpoints report `holderIndex` status
-  (`backfillComplete`, `syncedToBlock`, `lastError`).
-- **funding-keeper's 8-hourly cycle has two independent phases:** accrue, then
-  seizure-check every holder. The check runs even if the accrual failed (it used to be
-  skipped too, leaving an 8h liquidation gap) — against the stored index, since
-  `isSeizable` doesn't include funding pending since `lastFundingTime`. `/health`'s
-  `lastRunAt` still means "last SUCCESSFUL accrual".
-- **order-book-server rate-limits `POST /order` + `DELETE /order/:id` per client IP**
-  (60/min default) and needs `TRUST_PROXY=2` on Railway (two proxy hops — measured, not
-  assumed) to see real client IPs — see
-  `docs/hosted-env-vars.md` for why the hop count matters and how to verify it.
-  `buildApp()` is async (the plugin must be registered before routes are declared).
-- **All four services drain on SIGTERM** (every push redeploys them): order-book-server
-  closes Fastify (in-flight requests finish), keepers stop scheduling and wait for an
-  in-flight accrue/flag tx or poll, matching-engine stops matching and waits for the
-  in-flight settlement's receipt AND its Redis cleanup. Bounded by `SHUTDOWN_TIMEOUT_MS`
-  (25s) inside Railway's `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` — keep that ordering.
-  Railway also briefly OVERLAPS old and new deployments, so a pair can be re-matched by
-  the new matching-engine while the old one is still settling it; the chain rejects the
-  replay with `NonceUsed` and the settler reads `usedNonces` to prune only the spent
-  order(s). (Before 2026-09-26 `NonceUsed` wasn't handled, so a kill between a landed
-  settlement and its Redis cleanup left a phantom order re-matched and reverting forever.)
-- **PriceChart derives mark history from consecutive `FundingAccrued` events**
-  (mark = ΔcumYES × 365d/Δt) plus a live `currentMark` tail — `setMark` emits no event,
-  and `TokensMinted` is 2-arg (an older 4-arg chart ABI silently matched nothing).
-- **TradePanel order expiry uses CHAIN time (`getBlock`), not wall clock** — required
-  because demo chains are time-warped. Keep it that way.
-- **Multi-market plumbing (2026-10-02):** (1) `backend/shared/registry.ts` is the ONE
-  registry reader; each service holds an identical copy (Docker build contexts are
-  per-service) — edit the canonical file, run `backend/shared/sync-registry.sh`; CI fails
-  on drift. (2) No `MARKET_REGISTRY_ADDRESS` = legacy mode (one `mstr` market from the old
-  vars) — that's how the hosted stack keeps working until cutover. (3) Keepers' holder
-  index starts at the registry's `startBlock`, NOT `registeredAt` (MSTR was registered long
-  after launch). (4) The order-book legacy-key migration is a recurring SWEEP, not
-  one-shot, because Railway overlaps old/new deployments. (5) **CLOBSettlement never
-  checks that order tokens belong to its market** (any non-YES token is treated as the NO
-  leg) — the order-book server, the settler and the frontend each enforce
-  {USDC, that market's YES/NO}; never add an order path that skips this. On-chain fix
-  rides the next CLOB redeploy. (6) **Any forge script broadcast on chain 84532 — incl.
-  local anvil/fork rehearsals — overwrites `contracts/broadcast/<script>/84532/run-latest.json`.**
-  The real batch-1 record is `run-1790824920355.json`; back up `contracts/broadcast` before
-  rehearsing. (7) The new deploy scripts write `deployments/<net>/…` ONLY under
-  `--broadcast` (the old dry-run-writes-JSON incident can't recur there).
-- **The economics invariants in root `CLAUDE.md` are load-bearing.** In particular:
-  never burn YES outside `redeem`/`settleYES` (complete-set invariant), never let cost
-  basis into the seizure trigger, never erase `fundingDebt` without USDC moving. Tests
-  encode these; if a change fights the tests, the change is wrong.
+  | Service | Public read-only URL |
+  |---|---|
+  | order-book-server | https://order-book-server-production-9bb6.up.railway.app (`/health`, `/orderbook`, …) |
+  | matching-engine | https://matching-engine-production-f04c.up.railway.app/health |
+  | liquidation-keeper | https://liquidation-keeper-production.up.railway.app (`/health`, `/claimable`) |
+  | liquidator-bot | https://liquidator-bot-production-1939.up.railway.app/health |
+  | funding-keeper | internal only — liveness = on-chain `lastFundingTime` |
 
-## Local dev environment quirks (this machine, WSL2)
+  Keepers use `RAILWAY_DOCKERFILE_PATH=Dockerfile.<service>`. The liquidator bot logs only
+  when it claims — use `/health`, not its logs, for liveness.
+- **Vercel**: https://credit-prediction-dex.vercel.app — project `prj_36XAv69jCZ9ggcn7TmKBfEe4PJgW`
+  (team `team_XxmRZcymUCsKZVReO7HQkYAj`), `rootDirectory=frontend`, pushes to `main`
+  auto-deploy. Env vars per `docs/hosted-env-vars.md` (incl. `NEXT_PUBLIC_LOGS_RPC_URL`
+  = publicnode, because `sepolia.base.org` caps `eth_getLogs` at 200 blocks).
+- **Uptime**: `.github/workflows/uptime.yml` — scheduled hourly (GitHub actually fires it
+  ~4–5×/day) plus manual dispatch. It checks every `/health` above (incl. the matching-engine
+  loop and `settlerWired`, and the holder-index error), the frontend, funding-keeper
+  staleness via `lastFundingTime`, the liquidator float vs the InsuranceFund, and hot-wallet
+  gas. A failed run's GitHub email is the alert. 232 runs, 0 failures as of 2026-11-17.
+  Update the address/URL constants at the top of the workflow after any redeploy.
+- **Liquidity**: the deployer quotes resting ladders on each book via
+  `scripts/demo/mm-sepolia-seed.ts --market <slug>` (re-seeded after every batch).
 
-- Foundry binaries are not on PATH: `~/.foundry/bin/forge|anvil|cast`.
-- The local stack now runs against **Base Sepolia** on standard ports (frontend 3000,
-  order-book 3001, keeper health 3002, liquidation-keeper 3003, system redis 6379).
-  For throwaway stacks use fresh ports (anvil 8547, scratch redis 6380, etc.).
-- `npm run build` in `frontend/` takes >5 min under WSL2; run long timeouts. Two
-  `next dev` processes sharing one `.next` corrupt each other — the demo stack isolates
-  via `NEXT_DIST_DIR=.next-demo`.
-- Stale background processes from old sessions can linger (`ps aux | grep tsx` before
-  trusting demo ports); beware `pkill -f` patterns matching your own process.
-- The BD demo stack (`scripts/demo/demo-up.sh`, runbook `docs/demo-runbook.md`) is
-  self-contained on ports 8547/3010–3013/6380 and safe to run alongside everything.
+### Tests and CI
 
-## Immediate next steps (in rough priority order)
+`.github/workflows/ci.yml` runs on every PR and push to `main`: `forge test` (225 tests,
+incl. single- and 2-market stateful invariant suites), vitest for order-book-server (131),
+matching-engine (94) and keepers (237), and a frontend type-check (the frontend has no test
+suite). Local end-to-end: `scripts/smoke/run-smoke.sh` (multi-market anvil smoke, 12/12,
+≈1 min). Counts as of PR #17 (2026-10-16).
 
-Railway green-up, the Vercel deploy, liquidity seeding, and holder discovery from chain
-events (2026-09-26) are all done (see "State at handover" above) — removed from this
-list.
+## Ops wallets and access
 
-1. The production plan proper: Safe role ceremony (admin/keeper roles currently sit on
-   raw EOAs — see "Ops wallets and secrets" above), invariant/fuzz suite + audit (audit
-   still deliberately deferred by the owner, not forgotten), credit-event dress
-   rehearsal on Sepolia.
-2. ~~Liquidator bot~~ — live on Railway since 2026-09-29 (`liquidator-bot`). Keep its USDC
-   float ≥ the largest position it may claim (a claim costs ≤ m×Q). Since 2026-10-13 the
-   hourly uptime workflow fails (email) on a stale claim loop, a float/InsuranceFund
-   shortfall, or low hot-wallet gas — no need to watch logs.
-3. ~~Ops polish~~ — done 2026-10-13 (matching-engine /health, funding-keeper retry +
-   `[ALERT]`, uptime coverage). Remaining: a public domain for matching-engine port 3005 +
-   its uptime step.
-4. ~~Partial fills + on-chain cancel (batch 3)~~ — LIVE 2026-10-17. `docs/partial-fills-plan.md`. All
-   decisions made 2026-10-16 (A pro-rata carry debt, B 1-Upbet minimum off-chain, C
-   `cancelOrders` + `setMinNonce`, D pair-only fills, E operator-only fills). BUILT on
-   `feat/partial-fills` (contracts, matching-engine, order-book-server, liquidator seller,
-   frontend, smoke 12/12), merged as PR #17 and deployed (full redeploy, record in
-   `docs/redeploy-batch3-runbook.md`). Open: Blockscout verification of the 19 contracts;
-   top up the deployer's USDC (≈1.5 USDC left after seeding, below Turkey's 97¢ Downbet bid).
+Keys live only in gitignored `.env` files (`.gitignore` ignores every `.env*` except
+`*.example`). Everything runs off raw EOAs — moving admin to a Safe is open work (below).
 
-### Before any Base MAINNET deploy (owner: "not in a rush" as of 2026-10-13)
+| Wallet | Address | Key location | Roles | Balance 2026-11-17 |
+|---|---|---|---|---|
+| Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN everywhere, PAUSER, OracleRouter attester, team wallet | 0.00116 ETH, 17.9 USDC |
+| Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE | 0.00249 ETH |
+| Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | CLOBSettlement OPERATOR_ROLE (only it can fill) | **0.000136 ETH — top up** |
+| Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only | none (`claim()` is permissionless) | 0.0015 ETH, 30 USDC float |
+| Test taker | `0x3fB5c914c574eefbe32b3a8AA882cdc13Dfe2c0C` | `contracts/.env` `TEST_TAKER_PRIVATE_KEY` | none — used by `sepolia-test-trade.ts` / `sepolia-cancel-check.ts`; ignore it as a holder | — |
 
-Mainnet *plumbing* exists (`CHAIN_ID=8453`, `RPC_URL`, `NEXT_PUBLIC_CHAIN_ID`,
-`make deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, USDC pinned per chain in
-`Deploy.s.sol`) but has **never been run against 8453**. Open items, in order:
+InsuranceFund holds 2.0 USDC. The uptime workflow fails when keeper < 0.0005, settler <
+0.0001 or liquidator < 0.0002 ETH. A fill costs ≈2e-6 ETH; an accrual less. RPC is public
+`https://sepolia.base.org` (it can lag a block behind a receipt — re-read before trusting
+`remaining()` right after a tx).
 
-- **`Deploy.s.sol` ops-address defaults are unsafe for mainnet.** `KEEPER_ADDRESS` falls
-  back to `DEFAULT_KEEPER` = the **Sepolia keeper EOA** (its key sits in local `.env` files),
-  and `PAUSER_ADDRESS`, `ORACLE_ATTESTER_ADDRESS` and `TEAM_WALLET` fall back to whichever raw
-  deployer EOA runs the script (not a Safe). A mainnet run that forgets the env vars would
-  grant KEEPER_ROLE to a testnet key and leave pause/attest power on a hot EOA. Fix before
-  mainnet: make all four REQUIRED (no default) when `block.chainid == 8453`, the same way
-  USDC is pinned — as part of the Safe role ceremony, since pauser/attester/admin should
-  land on the Safe anyway. Give `AddMarket.s.sol` the same review.
+`Deploy.s.sol` / `AddMarket.s.sol` grant KEEPER, PAUSER, attester and OPERATOR roles
+themselves and assert every grant after broadcast — no manual post-deploy grants.
+
+**Access from this machine (WSL2):**
+- **GitHub**: fetch and push work (re-verified 2026-11-17: `git ls-remote` + an
+  authenticated `git push --dry-run`), via a fine-grained repo-scoped PAT in
+  `credential.helper store`. The GitHub MCP server has its own PAT (PR create/read works).
+  `gh` is not installed. Never force-push `main`; merging stays the owner's call.
+- **Railway CLI**: session auth (`railway login`), repo dir linked to
+  `exciting-embrace/production`. `railway variable delete` does not redeploy (`--set` does).
+  `railway ssh` is unavailable (no SSH key registered).
+- **Vercel**: no CLI (WSL DNS broke `npm install -g`); env changes go through the dashboard.
+- **Claude Code's auto-mode classifier blocks** `forge script --broadcast`, `railway variable
+  set`, hosted-Redis flushes and Railway domain changes — the owner runs those as `!`
+  commands. Seed scripts, test trades and read-only `cast` calls are allowed. Network
+  commands need the sandbox disabled.
+
+## Non-obvious semantics (each cost real debugging time)
+
+- **Spec-level gotchas live in root `CLAUDE.md`** — re-read them before touching signing or
+  settlement code: the 18-vs-6 decimals quirk, the exact `fillOrders` ABI shape (an 8-field
+  tuple once made every settlement revert), `previewFunding` excluding `fundingDebt`, the
+  three fee-math copies that must change together, and NO buys signing a GROSS `amountIn`
+  (the original seed script got this wrong).
+- **The EIP-712 domain is per CLOBSettlement address.** Any CLOB redeploy invalidates every
+  resting order: flush the hosted Redis order keys, or orders fail signature checks with no
+  obvious error.
+- **Nonces are millisecond timestamps** so `setMinNonce(Date.now())` cancels everything
+  signed so far; TradePanel order *expiry* uses chain time (`getBlock`), because demo chains
+  are time-warped.
+- **forge-script gotchas:** a DRY RUN of the old redeploy scripts rewrote the deployments
+  JSON (the new scripts write `deployments/<net>/…` only under `--broadcast`); and ANY
+  broadcast on chain 84532 — including local anvil/fork rehearsals — overwrites
+  `contracts/broadcast/<script>/84532/run-latest.json`. Back up `contracts/broadcast` before
+  rehearsing.
+- **Keepers run `.ts` directly via `node -r ts-node/register`**, so ts-node is a runtime
+  dependency despite being a devDependency (Dockerfiles `npm ci --include=dev`).
+- **order-book-server and matching-engine do NOT load dotenv** — export env vars locally;
+  Railway injects them. Hosted services must set every address/registry var explicitly
+  (the deployments JSON is not in the Docker images).
+- **Holder discovery** (`backend/keepers/holder-index.ts`) indexes YES `Transfer` recipients
+  from each market's registry `startBlock` (NOT `registeredAt`; legacy mode needs
+  `HOLDER_INDEX_FROM_BLOCK` — never scan from genesis). The set only grows (a missing holder
+  is the dangerous failure, so there is deliberately no pruning). State lives in Redis
+  (`holder-index:<chainId>:<yes token>:*`); the cursor only moves forward, each sync re-scans
+  64 blocks for reorg safety, and `HOLDER_INDEX_CHUNK_SIZE=200` matches the public RPC's
+  `eth_getLogs` cap. `refresh()` never blocks a keeper cycle on the initial backfill (a failed
+  backfill retries every 30s); both keepers' `/health` report `holderIndex`.
+- **funding-keeper's cycle has two independent phases** — accrue, then seizure-check every
+  holder; the check runs even if the accrual failed (against the stored index, since
+  `isSeizable` excludes funding pending since `lastFundingTime`). `/health` `lastRunAt` means
+  last SUCCESSFUL accrual. order-book-server `/health` shows `fee.source: env-fallback` when
+  the live fee read fails.
+- **order-book-server rate-limits mutations per client IP** and needs `TRUST_PROXY=2` on
+  Railway (two proxy hops — measured; see `docs/hosted-env-vars.md`).
+- **All services drain on SIGTERM** within `SHUTDOWN_TIMEOUT_MS` (25s) inside Railway's
+  `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` — keep that ordering. Railway briefly OVERLAPS old
+  and new deployments, so a pair can be re-submitted while the old process is still
+  settling it; the chain rejects the replay (`FillExceedsRemaining` / `OrderInvalidated`) and the
+  settler re-reads `remaining()` to prune at 0 or resync `filled` — never a blind delete.
+- **Multi-market plumbing:** `backend/shared/registry.ts` is the ONE registry reader; each
+  service holds an identical copy (per-service Docker contexts) — edit the canonical file and
+  run `backend/shared/sync-registry.sh`; CI fails on drift. No `MARKET_REGISTRY_ADDRESS` =
+  legacy one-market `mstr` mode. The order-book legacy-key migration is a recurring sweep
+  because of the Railway overlap. Since batch 3 `fillOrders` itself rejects any pair that isn't
+  {USDC, this market's YES/NO} (`MismatchedPair` / `InvalidTokenPair`); the order-book server,
+  settler and frontend keep their own checks as defence in depth.
+- **PriceChart draws the mark from `MarkUpdated` events** (a stepped line; timestamps from the
+  same-block `FundingAccrued`) plus a live `currentMark` tail. Its log queries go to
+  `NEXT_PUBLIC_LOGS_RPC_URL` because of the 200-block `eth_getLogs` cap.
+
+## Local dev environment (this machine, WSL2)
+
+- Foundry is not on PATH: `~/.foundry/bin/forge|anvil|cast`. `jq` and `gh` are not installed.
+- Standard ports run against Base Sepolia (frontend 3000, order-book 3001, keeper health
+  3002/3003, redis 6379). Throwaway stacks use fresh ports (anvil 8547, redis 6380…); the
+  BD demo stack (`scripts/demo/demo-up.sh`, `docs/demo-runbook.md`) is self-contained on
+  8547/3010–3013/6380.
+- `npm run build` in `frontend/` takes >5 min; two `next dev` processes sharing one `.next`
+  corrupt each other (isolate with `NEXT_DIST_DIR`).
+- Stale background processes can linger across sessions (`ps aux | grep tsx`); a `pkill -f`
+  pattern can match your own shell.
+
+## Open work, in priority order
+
+1. **Top up the settler** (0.000136 ETH, alert at 0.0001) — trivial, but the matching engine
+   stops settling when it runs dry.
+2. **Safe role ceremony** (production-plan requirement 2 — the largest launch blocker we can
+   build ourselves). Nothing written yet: deploy a 2-of-3 Safe; write `TransferRoles.s.sol`
+   to move `DEFAULT_ADMIN_ROLE` on every per-market contract + MarketRegistry +
+   InsuranceFund, the OracleRouter attester role and `PAUSER_ROLE` to the Safe; keeper and
+   settler keep only their operational role on dedicated hot EOAs; the deployer renounces
+   everything. Fold in the deploy-script fix below.
+3. **Credit-event dress rehearsal on Sepolia** (requirement 4) — motion → pause → attest →
+   settle, plus a live flag → cure and flag → claim, run through the Safe. Gate for mainnet.
+4. **Audit** (deliberately deferred by the owner — not forgotten) and an external
+   **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
+5. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
+6. **Runbooks** for mainnet: deploy/rollback and incident response (keeper down, Redis
+   loss, pause, credit event, key rotation).
+
+### Before any Base MAINNET deploy (owner: "not in a rush")
+
+Mainnet *plumbing* exists (`CHAIN_ID=8453`, `RPC_URL`, `NEXT_PUBLIC_CHAIN_ID`, `make
+deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, mainnet USDC pinned in
+`Deploy.s.sol`) but has never run against 8453.
+
+- **Unsafe ops-address defaults** — `Deploy.s.sol:104-108` and `MarketScriptBase.sol:83-87`
+  (used by `AddMarket.s.sol`): `KEEPER_ADDRESS` falls back to the **Sepolia keeper EOA**
+  (key in local `.env` files), `OPERATOR_ADDRESS` to the Sepolia settler, and
+  `PAUSER_ADDRESS` / `ORACLE_ATTESTER_ADDRESS` / `TEAM_WALLET` to the deployer EOA. Make all
+  five REQUIRED on chain 8453, the way USDC is pinned.
+- **`make deploy-mainnet` runs `Deploy.s.sol`** (one market + InsuranceFund, the batch-1
+  shape). The multi-market path is `Deploy.s.sol` → `DeployMarketRegistry.s.sol` →
+  `AddMarket.s.sol` per extra market; decide the mainnet sequence and script it.
 - Fresh mainnet hot wallets (keeper, settler, liquidator) — never reuse testnet keys.
-- Safe role ceremony + credit-event dress rehearsal on Sepolia (production-plan
-  requirements 2 and 4); audit + legal read (requirement 3 / Phase 3).
-- Pick a mainnet RPC provider; fork-rehearse `Deploy.s.sol` + `AddMarket.s.sol` on a Base
-  mainnet fork (`anvil --fork-url $BASE_RPC_URL`) before broadcasting.
-
-For redeploying contracts or services after a code change, use `docs/redeploy-guide.md`
-— it captures the dry-run and EIP-712 domain-invalidation gotchas above in runbook form.
+- Pick a mainnet RPC provider; fork-rehearse the full deploy sequence on a Base mainnet
+  fork (`anvil --fork-url $BASE_RPC_URL`) before broadcasting.
+- Gates: Safe ceremony, dress rehearsal, audit + legal read (items 2–4 above); a
+  two-sided quoting bot for the team wallet (adapt `mm-sepolia-seed.ts`).

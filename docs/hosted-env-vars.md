@@ -1,7 +1,7 @@
-# Hosted env vars — Railway + Vercel (Base Sepolia, post batch-2 redeploy 2026-10-15)
+# Hosted env vars — Railway + Vercel (Base Sepolia, batch 3 since 2026-10-17)
 
 Single source of truth for what each hosted service needs. Services run in registry mode:
-the CURRENT addresses are the batch-2 registry below (2026-10-15). The single-set
+the CURRENT addresses are the batch-3 registry below (2026-10-17). The single-set
 address sections further down are the batch-1 redeploy of 2026-10-01 (`docs/redeploy-batch1-runbook.md`; deploy start
 block 47528136). The 2026-07 contracts (CreditMarket `0x26C3…F51b`, CLOB `0xC317…cB8e`)
 are paused and empty.
