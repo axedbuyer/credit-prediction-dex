@@ -1,4 +1,4 @@
-# funding-keeper — accrueFunding() every epoch; flags + freezes f_now for positions
+# funding-keeper — accrueFunding() every epoch; flags (locks) positions
 # breaching the seizure trigger. Entry point: funding-keeper.ts, run DIRECTLY via
 # `node -r ts-node/register funding-keeper.ts` — the same pattern as the package.json
 # "start" script and scripts/demo/demo-up.sh, so the image runs exactly what every
@@ -28,7 +28,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --include=dev
 
 COPY tsconfig.json ./
-COPY funding-keeper.ts chains.ts holder-index.ts shutdown.ts registry.ts markets.ts ./
+COPY funding-keeper.ts chains.ts holder-index.ts shutdown.ts registry.ts markets.ts credit-event-hold.ts ./
 
 RUN groupadd --system --gid 1001 nodejs \
  && useradd --system --uid 1001 --gid nodejs appuser \

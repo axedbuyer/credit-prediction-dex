@@ -17,6 +17,7 @@ import {
   type CronScheduler,
 } from '../funding-keeper'
 import type { HolderIndexStatus } from '../holder-index'
+import { parseHold } from '../credit-event-hold'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -450,7 +451,7 @@ describe('FundingKeeper — seizure checks', () => {
 // at accrual time must not also cost up to 8h of missed liquidation coverage.
 
 describe('FundingKeeper — flagging guard (credit event / motion)', () => {
-  const run = async (gate: (fn: string) => Promise<unknown> | undefined) => {
+  const run = async (gate: (fn: string) => Promise<unknown> | undefined, config: KeeperConfig = CONFIG) => {
     const { publicClient, walletClient } = makeMocks({
       readContract: ({ functionName }) => {
         const g = gate(functionName)
@@ -460,7 +461,7 @@ describe('FundingKeeper — flagging guard (credit event / motion)', () => {
       },
     })
     const { scheduler, fire } = makeMockScheduler()
-    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), config)
     keeper.start(scheduler)
     await fire()
     const calls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls.map(
@@ -477,9 +478,27 @@ describe('FundingKeeper — flagging guard (credit event / motion)', () => {
     expect(reads).not.toContain('isSeizable')
   })
 
-  it('skips flagging when motionPending', async () => {
+  it('batch 4: still flags while a motion is open (a motion blocks nothing)', async () => {
     const { calls } = await run(fn => fn === 'motionPending' ? Promise.resolve(true) : undefined)
     expect(calls).toContain('accrueFunding')
+    expect(calls).toContain('flagClaimable')
+  })
+
+  it('DC_YES_HOLD for this market: accrues, never flags, never even checks', async () => {
+    const { calls, publicClient } = await run(() => undefined, { ...CONFIG, label: 'crwv', hold: parseHold('crwv') })
+    expect(calls).toContain('accrueFunding')
+    expect(calls).not.toContain('flagClaimable')
+    const reads = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => (c[0] as { functionName: string }).functionName)
+    expect(reads).not.toContain('isSeizable')
+  })
+
+  it('DC_YES_HOLD for another market (or none) does not stop this one', async () => {
+    const { calls } = await run(() => undefined, { ...CONFIG, label: 'mstr', hold: parseHold('crwv, try') })
+    expect(calls).toContain('flagClaimable')
+  })
+
+  it('DC_YES_HOLD=* holds every market', async () => {
+    const { calls } = await run(() => undefined, { ...CONFIG, label: 'mstr', hold: parseHold('*') })
     expect(calls).not.toContain('flagClaimable')
   })
 

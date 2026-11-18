@@ -15,8 +15,8 @@
 //   day 91   check 6 (crwv seizure + claim by the bot), 7 (mstr tail case, bot paused = downtime),
 //            8 (try cure), 9 (try credit event; mstr/crwv keep going), 10 (legacy sweep), 11 (invariants)
 // Services run in REGISTRY mode; the funding-keeper's REAL main() ticks every 4s (fast-cron.js).
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { readFileSync, writeFileSync, openSync } from 'node:fs'
 import path from 'node:path'
 import Redis from 'ioredis'
 import {
@@ -33,6 +33,7 @@ const ENV_PATH = process.env.SMOKE_ENV ?? path.join(SMOKE_DIR, '.run', 'env.json
 const env = JSON.parse(readFileSync(ENV_PATH, 'utf8')) as {
   rpcUrl: string; chainId: number; usdc: Address; registry: Address; insuranceFund: Address
   orderBookUrl: string; fundingHealthUrl: string; liqKeeperUrl: string; botHealthUrl: string; redisPort: number
+  markHealthPort: number; markUpdaterKey: Hex; runDir: string; smokeDir: string
 }
 const WAD = 10n ** 18n
 const DAY = 86_400
@@ -69,6 +70,7 @@ const ERC20 = parseAbi([
 ])
 const CM = parseAbi([
   'function mint(uint256)', 'function accrueFunding()', 'function currentMark() view returns (uint256)',
+  'function lastMarkUpdate() view returns (uint256)',
   'function owed(address) view returns (uint256)', 'function fundingDebt(address) view returns (uint256)',
   'function fundingSnapshot(address) view returns (uint256)', 'function snapNO(address) view returns (uint256)',
   'function claimable(address) view returns (bool)', 'function adminSetMark(uint256)', 'function cure()',
@@ -629,6 +631,40 @@ async function main() {
     const rt = await post(tiny.w)
     assertEq(rt.status, 400, 'sub-minimum order status'); assertEq(rt.json.error, 'BelowMinOrderSize', 'sub-minimum order error')
     return `${fmt(Q)} ask filled ${fmt(q1)} + ${fmt(q2)}; 0.5 Upbet order -> 400 BelowMinOrderSize`
+  })
+
+  // ── 13. mark updater (batch 4) ───────────────────────────────────────────────
+  await check(13, 'mark updater: a crwv fill at 30% moves the on-chain mark from 10% via setMark (MARK_ROLE); mstr (no role) stays dry', async () => {
+    const m = crwv
+    const markBefore = await read<bigint>(m.cm, CM, 'currentMark')
+    await warp(0.1)                                    // older fills fall out of the 1h TWAP window
+    const Q = usd(100), P = usd(30)                    // 100 Upbet at 30¢
+    await send(A, m.cm, CM, 'mint', [Q])
+    await trade(m, 'yes', A, B, Q, P)
+    const keepers = path.join(env.smokeDir, '..', '..', 'backend', 'keepers')
+    const log = openSync(path.join(env.runDir, 'mark-updater.log'), 'a')
+    const child = spawn('node', ['-r', 'ts-node/register', 'mark-updater.ts'], {
+      cwd: keepers, detached: true, stdio: ['ignore', log, log],
+      env: {
+        ...process.env, TS_NODE_TRANSPILE_ONLY: '1', BASE_SEPOLIA_RPC_URL: env.rpcUrl, CHAIN_ID: String(env.chainId),
+        MARKET_REGISTRY_ADDRESS: env.registry, REGISTRY_REFRESH_MS: '3000', ORDER_BOOK_URL: env.orderBookUrl,
+        MARK_UPDATER_PRIVATE_KEY: env.markUpdaterKey, HEALTH_PORT: String(env.markHealthPort), MARK_POLL_MS: '1000',
+        MARK_MIN_FILLS: '1', MARK_MIN_FILL_VOLUME: '1', MARK_BOOK_MIN_DEPTH: '1000000000',  // book off: fills only
+      },
+    })
+    writeFileSync(path.join(env.runDir, 'mark-updater.pid'), String(child.pid))
+    try {
+      const target = 30n * WAD / 100n
+      await until(async () => (await read<bigint>(m.cm, CM, 'currentMark')) === target, 'crwv mark -> 30%', 90_000, 500)
+      const h = await until(async () => {
+        const r = await getJson(`http://127.0.0.1:${env.markHealthPort}/health`).catch(() => null)
+        return r && r.json?.markets?.mstr?.writable === false && r.json?.markets?.crwv?.lastSetTx ? r.json : null
+      }, 'mark-updater /health', 30_000, 500)
+      assertEq(h.markets.crwv.source, 'fills', 'crwv source')
+      return `crwv mark ${Number(markBefore) / 1e16}% -> 30% (tx ${String(h.markets.crwv.lastSetTx).slice(0, 10)}…); mstr writable=false (${h.markets.mstr.writableReason})`
+    } finally {
+      try { process.kill(-child.pid!, 'SIGTERM') } catch { /* already gone */ }
+    }
   })
 
   // ── 11. invariants ────────────────────────────────────────────────────────────

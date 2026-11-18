@@ -12,6 +12,8 @@ import type { ILogClient, HolderIndexStatus } from './holder-index'
 import { installShutdownHandlers, closeHttpServer } from './shutdown'
 import { buildDirectory } from './markets'
 import type { IRegistryClient, MarketInfo, MarketDirectoryStatus } from './registry'
+import { holdFromEnv } from './credit-event-hold'
+import type { CreditEventHold } from './credit-event-hold'
 
 // ─── CreditMarket ABI (minimal) ───────────────────────────────────────────────
 
@@ -138,6 +140,11 @@ export interface KeeperConfig {
   label?: string
   /** Retry tuning; defaults to retryConfigFromEnv(). Tests inject a no-op sleep / tiny base. */
   retry?: Partial<RetryConfig>
+  /**
+   * "DC Yes announced" switch (credit-event-hold.ts). When it holds this market the
+   * keeper still accrues but never flags. Default: nothing held.
+   */
+  hold?: CreditEventHold
 }
 
 // ─── Retry + alert helpers ────────────────────────────────────────────────────
@@ -229,6 +236,7 @@ export class LowBalanceMonitor {
     private readonly minWei: bigint,
     private readonly intervalMs: number = 3_600_000,
     private readonly now: () => number = Date.now,
+    private readonly label: string = 'funding-keeper',
   ) {}
 
   async check(): Promise<void> {
@@ -246,8 +254,8 @@ export class LowBalanceMonitor {
     if (this.lastAlertAt !== null && t - this.lastAlertAt < this.intervalMs) return
     this.lastAlertAt = t
     console.error(
-      `[ALERT] funding-keeper wallet low on ETH address=${this.address} ` +
-      `balanceWei=${bal} minWei=${this.minWei} — accrueFunding/flagClaimable txs will fail; top up gas`,
+      `[ALERT] ${this.label} wallet low on ETH address=${this.address} ` +
+      `balanceWei=${bal} minWei=${this.minWei} — its txs will fail; top up gas`,
     )
   }
 
@@ -550,10 +558,17 @@ export class FundingKeeper {
    * awaits only a cheap incremental sync once caught up.
    */
   private async checkHolders(ts: string): Promise<void> {
-    // Never flag once a credit event is confirmed or a motion is pending: the
-    // Upbet is about to pay $1 (or already does). Fail safe: unreadable = skip.
+    // Batch 4: a motion blocks nothing — flagging continues during it (the motion
+    // only marks the EDD and escrows post-EDD carry). Flagging stops for good once a
+    // credit event is confirmed (the contract also reverts then) and, before that,
+    // the moment the team sets the "DC Yes announced" switch for this market.
+    if (this.isHeld()) {
+      console.log(`${this.tag} ${ts} — flagging skipped: DC_YES_HOLD is set for this market`)
+      return
+    }
+    let motion = false
     try {
-      const [motion, confirmed] = await Promise.all([
+      const [m, confirmed] = await Promise.all([
         this.publicClient.readContract({
           address: this.config.creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'motionPending',
         }) as Promise<boolean>,
@@ -561,17 +576,18 @@ export class FundingKeeper {
           address: this.config.creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'creditEventConfirmed',
         }) as Promise<boolean>,
       ])
+      motion = m
       if (confirmed) {
         console.log(`${this.tag} ${ts} — flagging skipped: credit event confirmed`)
         return
       }
-      if (motion) {
-        console.log(`${this.tag} ${ts} — flagging skipped: motion pending`)
-        return
-      }
     } catch (err) {
+      // Fail safe: if we can't tell whether the event is confirmed, don't flag.
       console.error(`${this.tag} ${ts} — flagging skipped: could not read motionPending/creditEventConfirmed:`, briefError(err))
       return
+    }
+    if (motion) {
+      console.log(`${this.tag} ${ts} — motion open: flagging continues (post-EDD carry is escrowed)`)
     }
     await this.holderSource.refresh()
     const holders = this.holderSource.holders()
@@ -616,6 +632,7 @@ export class FundingKeeper {
       }) as boolean
 
       if (!seizable) return
+      if (this.isHeld()) return
 
       // Flag claimable (locks this holder). Transient RPC/nonce errors are retried;
       // before each retry claimable() is re-read so a flag that already landed is never re-sent.
@@ -692,6 +709,10 @@ export class FundingKeeper {
     }
   }
 
+  private isHeld(): boolean {
+    return !!this.config.label && !!this.config.hold?.held(this.config.label)
+  }
+
   getLastRunAt(): Date | null {
     return this.lastRunAt
   }
@@ -740,6 +761,8 @@ export interface MarketHealth {
 export interface FundingHealthExtras {
   registry: MarketDirectoryStatus
   markets: Record<string, MarketHealth>
+  /** Markets under the "DC Yes announced" switch (no flagging). */
+  dcYesHold: string[]
   alerts: {
     /** Markets whose last accrual cycle failed (consecutiveFailures > 0). */
     accrualFailing: Record<string, AccrualState>
@@ -757,6 +780,7 @@ export class FundingKeeperService {
     private readonly directory: IMarketDirectory,
     private readonly makeWorker: (market: MarketInfo) => IMarketWorker,
     private readonly balanceMonitor?: Pick<LowBalanceMonitor, 'check' | 'state'>,
+    private readonly hold?: CreditEventHold,
   ) {}
 
   /** Create workers for any active market that doesn't have one yet (new registry entries). */
@@ -855,6 +879,7 @@ export class FundingKeeperService {
     return {
       registry: this.directory.status(),
       markets,
+      dcYesHold: this.hold?.describe() ?? [],
       alerts: { accrualFailing, keeperBalance: this.balanceMonitor?.state() ?? null },
     }
   }
@@ -980,12 +1005,13 @@ async function main(): Promise<void> {
     createMarketHolderIndex(publicClient as unknown as ILogClient, market, chainId, directory.mode),
   )
 
+  const hold = holdFromEnv()
   const keeper = new FundingKeeperService(directory, market => new FundingKeeper(
     publicClient  as unknown as IPublicClient,
     walletClient  as unknown as IWalletClient,
     indexes.get(market),
-    { creditMarketAddress: market.creditMarket, label: market.slug },
-  ), new LowBalanceMonitor(publicClient as unknown as IPublicClient, account.address, minEthWeiFromEnv()))
+    { creditMarketAddress: market.creditMarket, label: market.slug, hold },
+  ), new LowBalanceMonitor(publicClient as unknown as IPublicClient, account.address, minEthWeiFromEnv()), hold)
 
   keeper.start()
   const healthServer = startHealthServer(keeper, parseInt(process.env.HEALTH_PORT ?? '3002'))

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Brings up the multi-market smoke stack on THROWAWAY infra (anvil :8549 chain-id 84532,
 # redis :6392, order-book :3021, funding-keeper health :3022, liquidation-keeper :3023,
-# liquidator-bot health :3024). 3 markets (mstr legacy-registered, crwv, try) + all 5
+# liquidator-bot health :3024; mark-updater health :3025 is started by the smoke itself). 3 markets (mstr legacy-registered, crwv, try) + all 5
 # services in REGISTRY mode. Writes $RUN_DIR/env.json for multi-market-smoke.ts.
 # Tear down with multi-market-down.sh (kills by recorded PGID, restores broadcast/cache).
 set -euo pipefail
@@ -13,7 +13,7 @@ port_busy() { ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"; }
 wait_port() { for ((i=0;i<${3:-120};i++)); do (exec 3<>/dev/tcp/127.0.0.1/$1) 2>/dev/null && { exec 3>&- 3<&-; return 0; }; sleep 0.5; done; fail "$2 did not open :$1"; }
 wait_http() { for ((i=0;i<${3:-240};i++)); do curl -sf -o /dev/null "$1" && return 0; sleep 0.5; done; fail "$2 not responding at $1 (see $RUN_DIR/*.log)"; }
 
-for p in $ANVIL_PORT $REDIS_PORT $ORDER_BOOK_PORT $FUNDING_HEALTH_PORT $LIQ_KEEPER_PORT $BOT_HEALTH_PORT; do
+for p in $ANVIL_PORT $REDIS_PORT $ORDER_BOOK_PORT $FUNDING_HEALTH_PORT $LIQ_KEEPER_PORT $BOT_HEALTH_PORT $MARK_HEALTH_PORT; do
   port_busy "$p" && fail "port $p busy — run multi-market-down.sh or free it (never reuse the user's 8545-8547/6379/6380/30xx ports)"
 done
 [[ -x "$FORGE" && -x "$ANVIL" && -x "$CAST" ]] || fail "foundry binaries missing in $FOUNDRY_BIN"
@@ -70,6 +70,7 @@ for M in "crwv|CoreWeave|corporate|CRWV|100000000000000000" "try|Turkey|sovereig
   IFS='|' read SLUG NAME TYPE TICKER MARK <<< "$M"
   log "AddMarket $SLUG"
   MARKET_SLUG=$SLUG ENTITY_NAME="$NAME" ENTITY_TYPE=$TYPE TOKEN_TICKER=$TICKER INITIAL_MARK=$MARK DEPLOYMENTS_DIR=$OUT/net \
+    MARK_UPDATER_ADDRESS=$MARK_UPDATER_ADDR \
     "$FORGE" script script/AddMarket.s.sol --rpc-url "$RPC_URL" --broadcast >"$RUN_DIR/deploy-$SLUG.log" 2>&1 || { tail -30 "$RUN_DIR/deploy-$SLUG.log"; fail "AddMarket $SLUG failed"; }
 done
 REG=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$OUT/net/core.json','utf8')).marketRegistry)")
@@ -79,7 +80,7 @@ log "registry=$REG insuranceFund=$IF"
 cat > "$RUN_DIR/env.json" <<JSON
 {"rpcUrl":"$RPC_URL","chainId":$CHAIN_ID,"usdc":"$USDC","registry":"$REG","insuranceFund":"$IF",
  "orderBookUrl":"$ORDER_BOOK_URL","fundingHealthUrl":"http://127.0.0.1:$FUNDING_HEALTH_PORT","liqKeeperUrl":"http://127.0.0.1:$LIQ_KEEPER_PORT",
- "botHealthUrl":"http://127.0.0.1:$BOT_HEALTH_PORT","redisPort":$REDIS_PORT,"runDir":"$RUN_DIR","smokeDir":"$SMOKE_DIR"}
+ "botHealthUrl":"http://127.0.0.1:$BOT_HEALTH_PORT","markHealthPort":$MARK_HEALTH_PORT,"markUpdaterKey":"$K9","redisPort":$REDIS_PORT,"runDir":"$RUN_DIR","smokeDir":"$SMOKE_DIR"}
 JSON
 
 # ── 3. redis + services (registry mode) ──────────────────────────────────────

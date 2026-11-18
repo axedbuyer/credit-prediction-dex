@@ -73,9 +73,10 @@ admin-only (forge script + `MarketRegistry`); no permissionless listing.
 ≥ 10 min apart — a wide circuit breaker, not a speed limit (batch 3 live: KEEPER_ROLE, 5
 points, 1h); admin `adminSetMark` bypasses; fee 50 bps, 50/50 team wallet / shared
 InsuranceFund. **The mark must follow trades** (fills TWAP, depth-filtered mid fallback;
-jumps allowed both ways) — **no service calls `setMark` yet**: marks move only by admin
-`adminSetMark`, and carry, the seizure trigger and the claim cap all read that mark (mark
-updater = HANDOVER open work, required for batch 4). Seed marks are set manually per market from the entity's CDS spread
+jumps allowed both ways) — the `keepers/mark-updater` service does this on batch 4 (it
+dry-runs on batch 3, which has no `MARK_ROLE`); on the live batch-3 markets marks still move
+only by admin `adminSetMark`, and carry, the seizure trigger and the claim cap all read that
+mark. Seed marks are set manually per market from the entity's CDS spread
 (`m = 1 − exp(−s/(1−R))`); current ones are placeholders. Credit-event types are display
 copy + attestation runbook only — nothing on-chain encodes them (OracleRouter has a single
 `confirmCreditEvent()`). **Credit-event policy:** the team multisig follows the ISDA DC — a
@@ -260,8 +261,9 @@ drift).
 |---|---|
 | `order-book-server` | REST: `GET /markets`, `GET /orderbook?market=`, `POST /order`, `DELETE /order/:id`, `POST /orders/sync`, `GET /health`. Derives the market from the order's token; rejects bad pairs, orders under the minimum, flagged makers (`PositionFrozen`) and un-fundable YES sells (`FundingShortfall` + `minSellProceeds`). Chain pre-filters fail open — the on-chain check is the backstop. Redis books `orderbook:<slug>:*`. Rate-limited per client IP. |
 | `matching-engine` | Price-time priority per market; the earlier order is the maker; fill size = min of both remaining sizes. Settles via `fillOrders`, records `filled`. Revert handling follows the Order removal policy. `GET /health` (503 when the loop is stale). |
-| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger — during a motion too (batch 4), but never after a confirmed credit event, nor once the runbook's "DC Yes announced" switch is set; the liquidator-bot likewise never claims after confirmation. Retries transient errors without double-sending; `[ALERT]` log on failure. |
-| `keepers/liquidation-keeper` | `GET /claimable[?market=]` — flagged positions + formulaic price P. Does not claim (claiming is permissionless). |
+| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger — during a motion too (batch 4), but never after a confirmed credit event, nor in a market named by the "DC Yes announced" switch `DC_YES_HOLD` (`keepers/credit-event-hold.ts`; also honoured by the liquidator-bot). Retries transient errors without double-sending; `[ALERT]` log on failure. |
+| `keepers/liquidation-keeper` | `GET /claimable[?market=]` — flagged positions + formulaic price P, `motionPending`, and `frozen` only when `claim()` would revert (confirmed event; or an open motion on batch-3 contracts, detected by probing `motionId()`). Does not claim (claiming is permissionless). |
+| `keepers/mark-updater` | Batch 4, `MARK_ROLE` key (`MARK_UPDATER_PRIVATE_KEY`): per market, TWAP of the YES-implied price of `OrderFilled` events (1h window, minimum fill size/volume), else the mid of the depth-filtered YES-implied book (NO orders mirrored at 1 − price), fills clamped into that book band; `setMark` when the move exceeds a 0.25-point deadband, stepping by the on-chain `maxMarkStep` once `minMarkInterval` has passed. Never after confirmation. Dry run without the role or with `MARK_DRY_RUN`. `[ALERT]` when no source for 6h or a repricing exceeds one step. `GET /health` (:3005). |
 | `keepers/liquidator-bot` | Team liquidator of last resort: claims EVERY flagged position promptly, profitable or not (stalls cost the InsuranceFund) — simulates first, uses only `claim()`, alerts on a short float / short InsuranceFund / pending motion — then sells the Upbet on the CLOB (crosses bids down to mark − `SELL_MAX_DISCOUNT_BPS` (3%), else rests at the mark). |
 
 Both keepers discover YES holders from `Transfer` events (`keepers/holder-index.ts`); the

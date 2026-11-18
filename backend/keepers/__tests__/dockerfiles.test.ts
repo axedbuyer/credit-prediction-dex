@@ -7,7 +7,7 @@ import { join } from 'path'
 // MODULE_NOT_FOUND (2026-10-14: chains.ts). Check every entrypoint's transitive
 // local imports are copied into its image.
 const ROOT = join(__dirname, '..')
-const SERVICES = ['funding-keeper', 'liquidation-keeper', 'liquidator-bot']
+const SERVICES = ['funding-keeper', 'liquidation-keeper', 'liquidator-bot', 'mark-updater']
 
 function localImports(file: string): string[] {
   const src = readFileSync(join(ROOT, file), 'utf8')

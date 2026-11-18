@@ -39,7 +39,7 @@ Addresses per market: `contracts/deployments/base-sepolia/markets/<slug>.json`
 | Event | Action | Result |
 |---|---|---|
 | DC question on a listed entity appears | **Open motion** on that market, at once | EDD recorded; post-EDD carry escrowed; trading, flagging, claims, Pay carry all continue |
-| DC rules **Yes** on an event the market covers | Switch keeper flagging **off** (§4), then `confirmCreditEvent()` within minutes | Market pauses; post-EDD carry void and refunded to its payers; Upbets redeem at $1 via `settleYES` |
+| DC rules **Yes** on an event the market covers | Set `DC_YES_HOLD` (§4), then `confirmCreditEvent()` within minutes | Market pauses; post-EDD carry void and refunded to its payers; Upbets redeem at $1 via `settleYES` |
 | DC rules **Yes** on an event the market does NOT cover | **Close motion** (treat as No) | Escrow released |
 | DC rules **No** or declines | **Close motion** | Escrow released; post-EDD Upbet carry becomes ordinary debt |
 
@@ -56,12 +56,15 @@ or **Close motion**. `/admin` refuses to confirm unless a motion is open, and re
 close a motion after a confirmed event. **Pause** is for emergencies only; it is not part of
 the credit-event flow.
 
-### Keeper flagging switch
+### Keeper flagging switch (`DC_YES_HOLD`)
 
-Between a DC "Yes" announcement and the confirm transaction, liquidations still run. Turn
-the funding-keeper's flagging off the moment the DC announces Yes (keeper config; batch-4
-keeper change, see `docs/redeploy-batch4-runbook.md`). Claims on already-flagged positions
-stay permissionless, so confirm fast.
+Between a DC "Yes" announcement and the confirm transaction, liquidations still run. The
+moment the DC announces Yes on a covered event, set `DC_YES_HOLD=<slug>` (comma-separate
+several, or `*`) on the Railway **funding-keeper** and **liquidator-bot** services. Each
+redeploys in about 1–2 minutes and then neither flags nor claims in that market; check
+`dcYesHold` on the liquidator-bot `/health`. Claims by third parties on already-flagged
+positions stay permissionless, so confirm fast. Remove the variable after confirmation (the
+on-chain guard takes over). If the DC rules No, remove it when closing the motion.
 
 ### Fallback with `cast`
 

@@ -31,6 +31,7 @@ import {
   type LogLike,
   LIQUIDATION_ENGINE_ABI,
 } from '../liquidator-bot'
+import { parseHold } from '../credit-event-hold'
 import { ClobYesSeller } from '../clob-seller'
 import type { IYesSeller } from '../seller'
 
@@ -256,11 +257,11 @@ describe('FundingKeeperService', () => {
     expect(ran).toEqual(['mstr', 'try'])
   })
 
-  it('motionPending in one market (flag reverts) leaves the other market flaggable', async () => {
+  it('a flag that reverts in one market (e.g. batch-3 motion freeze) leaves the other market flaggable', async () => {
     const { dir } = await registryDirectory([raw('mstr', MSTR), raw('try', TRY)])
     const chain = fundingClients({
       seizable: { [addr(MSTR + 1).toLowerCase()]: [HOLDER_A], [addr(TRY + 1).toLowerCase()]: [HOLDER_B] },
-      flagReverts: new Set([addr(MSTR + 1).toLowerCase()]), // mstr is frozen by a pending motion
+      flagReverts: new Set([addr(MSTR + 1).toLowerCase()]), // e.g. a batch-3 market frozen by a pending motion
     })
     const svc = fundingService(dir, chain, { mstr: [HOLDER_A], try: [HOLDER_B] })
     await svc.runAll()
@@ -382,7 +383,7 @@ describe('liquidation-keeper GET /claimable (multi-market)', () => {
         user: HOLDER_A, creditMarket: addr(MSTR + 1), liquidationEngine: addr(MSTR + 6),
         notional: '1000000', tailCase: false, frozen: false,
       })
-      expect(Object.keys(m).sort()).toEqual(['claimPrice', 'creditMarket', 'frozen', 'liquidationEngine', 'market', 'notional', 'owed', 'tailCase', 'tokenValue', 'user'])
+      expect(Object.keys(m).sort()).toEqual(['claimPrice', 'creditMarket', 'frozen', 'liquidationEngine', 'market', 'motionPending', 'notional', 'owed', 'tailCase', 'tokenValue', 'user'])
       const t = body.find(p => p.market === 'try')
       expect(t).toMatchObject({ user: HOLDER_B, liquidationEngine: addr(TRY + 6), tailCase: true })
     } finally { server.close() }
@@ -453,7 +454,7 @@ interface BotWorld {
   usdc?: bigint
   insurance?: bigint
   /** per market (creditMarket address): */
-  markets: Record<string, { mark?: bigint; claimable: Address[]; q?: bigint; owed?: bigint; motion?: boolean; confirmed?: boolean; yes?: bigint }>
+  markets: Record<string, { mark?: bigint; claimable: Address[]; q?: bigint; owed?: bigint; motion?: boolean; confirmed?: boolean; yes?: bigint; fail?: boolean }>
 }
 
 function botClients(w: BotWorld) {
@@ -464,6 +465,7 @@ function botClients(w: BotWorld) {
       const a = address.toLowerCase()
       const cm = w.markets[a]
       if (cm) {
+        if (cm.fail && functionName === 'motionPending') throw new Error('rpc down')
         if (functionName === 'motionPending') return cm.motion ?? false
         if (functionName === 'creditEventConfirmed') return cm.confirmed ?? false
         if (functionName === 'currentMark') return cm.mark ?? 50_000_000_000_000_000n
@@ -527,16 +529,40 @@ describe('LiquidatorBot — multi-market', () => {
     expect(h.markets!.try.claims).toBe(1)
   })
 
-  it('motionPending in one market skips only that market; failing market state read skips only that market', async () => {
+  it('batch 4: a motion in one market does not stop its claims; DC_YES_HOLD stops only that market', async () => {
     const clients = botClients({ markets: {
       [addr(MSTR + 1).toLowerCase()]: { claimable: [HOLDER_A], motion: true },
       [addr(TRY + 1).toLowerCase()]:  { claimable: [HOLDER_B] },
     } })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bot = makeBot([botMarket('mstr', MSTR, [HOLDER_A]), botMarket('try', TRY, [HOLDER_B])], clients)
+    await bot.runCycle()
+    expect(clients.claims.map(c => c.holder).sort()).toEqual([HOLDER_A, HOLDER_B].sort())
+    expect(bot.getHealth().markets!.mstr.motionPending).toBe(true)
+
+    const clients2 = botClients({ markets: {
+      [addr(MSTR + 1).toLowerCase()]: { claimable: [HOLDER_A], motion: true },
+      [addr(TRY + 1).toLowerCase()]:  { claimable: [HOLDER_B] },
+    } })
+    const provider = { markets: () => [botMarket('mstr', MSTR, [HOLDER_A]), botMarket('try', TRY, [HOLDER_B])], registryStatus: () => ({ mode: 'registry' as const, registryAddress: REG, marketCount: 2, lastRefreshAt: 1, lastError: null }) }
+    const held = new LiquidatorBot(clients2.publicClient, clients2.walletClient, provider, { usdcAddress: USDC, insuranceFundAddress: INSURANCE, pollIntervalMs: 1e9, autoSell: false, hold: parseHold('mstr') })
+    await held.runCycle()
+    expect(clients2.claims.map(c => c.holder)).toEqual([HOLDER_B])
+    expect(held.getHealth().markets!.mstr.skippedByReason).toEqual({ dcYesHold: 1 })
+    expect(held.getHealth().dcYesHold).toEqual(['mstr'])
+    errSpy.mockRestore()
+  })
+
+  it('a failing market state read skips only that market', async () => {
+    const clients = botClients({ markets: {
+      [addr(MSTR + 1).toLowerCase()]: { claimable: [HOLDER_A], fail: true },
+      [addr(TRY + 1).toLowerCase()]:  { claimable: [HOLDER_B] },
+    } })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const bot = makeBot([botMarket('mstr', MSTR, [HOLDER_A]), botMarket('try', TRY, [HOLDER_B])], clients)
     await bot.runCycle()
     expect(clients.claims.map(c => c.holder)).toEqual([HOLDER_B])
-    expect(bot.getHealth().markets!.mstr.skippedByReason).toEqual({ motionPending: 1 })
-    expect(bot.getHealth().markets!.mstr.motionPending).toBe(true)
+    errSpy.mockRestore()
   })
 
   it('float alert compares against the LARGEST single pending claim, not the sum', () => {

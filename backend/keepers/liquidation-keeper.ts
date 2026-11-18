@@ -53,6 +53,14 @@ export const CREDIT_MARKET_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'bool' }],
   },
+  {
+    // Batch 4 only — used as a feature probe (batch-3 CreditMarkets don't have it).
+    name: 'motionId',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
 ] as const
 
 export const ERC20_ABI = [
@@ -76,8 +84,11 @@ export interface ClaimablePosition {
   tokenValue: string // Q * currentMark / WAD
   claimPrice: string  // min(owed, tokenValue) — priced fresh each poll, not fixed at flag time
   tailCase: boolean
-  frozen: boolean        // true while motionPending / creditEventConfirmed — claim() will revert
+  frozen: boolean        // true when claim() will revert: credit event confirmed (or, on
+                         // batch-3 contracts only, a motion is open). Batch 4: a motion
+                         // does NOT freeze claims.
   frozenReason?: string  // only set when frozen === true
+  motionPending: boolean // a DC question is open on this market (display only)
 }
 
 /** A claimable position tagged with the market it lives in (what GET /claimable serves). */
@@ -122,6 +133,8 @@ export function computePosition(
   owed: bigint,
   motionPending: boolean,
   creditEventConfirmed = false,
+  /** Batch-3 contracts: an open motion makes claim() revert. Batch 4: false. */
+  motionFreezesClaims = false,
 ): ClaimablePosition {
   const tokenValue = (Q * currentMark) / WAD
   const tailCase   = owed > tokenValue
@@ -134,10 +147,11 @@ export function computePosition(
     tokenValue: tokenValue.toString(),
     claimPrice: claimPrice.toString(),
     tailCase,
-    frozen:     motionPending || creditEventConfirmed === true,
+    frozen:     creditEventConfirmed === true || (motionPending && motionFreezesClaims),
+    motionPending,
   }
   if (creditEventConfirmed) position.frozenReason = 'credit event confirmed'
-  else if (motionPending) position.frozenReason = 'credit event under review'
+  else if (position.frozen) position.frozenReason = 'credit event under review'
   return position
 }
 
@@ -149,12 +163,32 @@ export class LiquidationKeeper {
   private intervalHandle: ReturnType<typeof setInterval> | null = null
   private stopped = false
   private inFlightPoll: Promise<void> | null = null
+  /** null = not known yet; true once motionId() has answered (batch-4 contracts). */
+  private batch4: boolean | null = null
 
   constructor(
     private readonly publicClient: IPublicClient,
     private readonly holderSource: IHolderSource,
     private readonly config: KeeperConfig,
   ) {}
+
+  /**
+   * Whether an open motion blocks claim() on this market's contracts. Batch 4
+   * (motionId() exists): no. Batch 3, or a failed probe: yes — the conservative
+   * answer for display, re-probed next poll. Only asked while a motion is open.
+   */
+  private async motionFreezesClaims(): Promise<boolean> {
+    if (this.batch4 === true) return false
+    try {
+      await this.publicClient.readContract({
+        address: this.config.creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'motionId',
+      })
+      this.batch4 = true
+      return false
+    } catch {
+      return true
+    }
+  }
 
   start(): void {
     const interval = this.config.pollIntervalMs ?? 30_000
@@ -229,6 +263,7 @@ export class LiquidationKeeper {
       return
     }
 
+    const motionFreezes = motionPending && !creditEventConfirmed ? await this.motionFreezesClaims() : false
     const positions: ClaimablePosition[] = []
 
     for (const holder of holders) {
@@ -264,6 +299,7 @@ export class LiquidationKeeper {
           owed,
           motionPending,
           creditEventConfirmed,
+          motionFreezes,
         )
 
         positions.push(position)
@@ -271,7 +307,9 @@ export class LiquidationKeeper {
           `[liq-keeper] ${ts} — ${holder}` +
           `  claimPrice=${position.claimPrice}` +
           `  tailCase=${position.tailCase}` +
-          (creditEventConfirmed ? '  [FROZEN: credit event confirmed]' : motionPending ? '  [FROZEN: motion pending]' : ''),
+          (creditEventConfirmed ? '  [FROZEN: credit event confirmed]'
+            : motionFreezes ? '  [FROZEN: motion pending (batch-3 contracts)]'
+            : motionPending ? '  [motion open — claimable as normal]' : ''),
         )
       } catch (err) {
         console.error(`[liq-keeper] ${ts} — error for holder ${holder}:`, err)

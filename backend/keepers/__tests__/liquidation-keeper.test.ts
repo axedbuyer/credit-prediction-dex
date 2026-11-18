@@ -154,13 +154,22 @@ describe('computePosition — tail case (owed > tokenValue)', () => {
   })
 })
 
-describe('computePosition — motionPending freeze', () => {
-  it('sets frozen=true and frozenReason when motionPending', () => {
+describe('computePosition — motion', () => {
+  it('batch 4: an open motion does NOT freeze claims; motionPending is reported', () => {
+    const pos = computePosition(HOLDER_A, DEFAULT_Q, DEFAULT_MARK, 40_000n, true)
+    expect(pos.frozen).toBe(false)
+    expect(pos.frozenReason).toBeUndefined()
+    expect(pos.motionPending).toBe(true)
+  })
+
+  it('batch-3 contracts: sets frozen=true and frozenReason when motionPending', () => {
     const pos = computePosition(
       HOLDER_A,
       DEFAULT_Q,
       DEFAULT_MARK,
       40_000n,
+      true,
+      false,
       true,
     )
     expect(pos.frozen).toBe(true)
@@ -236,13 +245,32 @@ describe('LiquidationKeeper — poll tail case', () => {
 })
 
 describe('LiquidationKeeper — motionPending', () => {
-  it('lists claimable positions with frozen=true when motionPending', async () => {
+  it('batch 4 (motionId() answers): an open motion lists positions as claimable, motionPending=true', async () => {
     const client = makePublicClient(makeReadContract({
       claimable:            true,
       owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
       motionPending:        true,
     }))
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+
+    await keeper.poll()
+
+    const positions = keeper.getPositions()
+    expect(positions).toHaveLength(1)
+    expect(positions[0].frozen).toBe(false)
+    expect(positions[0].motionPending).toBe(true)
+  })
+
+  it('batch-3 contracts (motionId() reverts): lists claimable positions with frozen=true when motionPending', async () => {
+    const readFn = makeReadContract({
+      claimable:            true,
+      owed:                 40_000n,
+      yesBalance:           DEFAULT_Q,
+      motionPending:        true,
+    })
+    const client = makePublicClient((args => args.functionName === 'motionId'
+      ? Promise.reject(new Error('execution reverted')) : readFn(args)) as IPublicClient['readContract'])
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
 
     await keeper.poll()
@@ -687,13 +715,15 @@ describe('GET /claimable', () => {
     }
   })
 
-  it('reflects motionPending freeze state in /claimable response', async () => {
-    const client = makePublicClient(makeReadContract({
+  it('reflects motionPending freeze state in /claimable response (batch-3 contracts)', async () => {
+    const readFn = makeReadContract({
       claimable:            true,
       owed:                 40_000n,
       yesBalance:           DEFAULT_Q,
       motionPending:        true,
-    }))
+    })
+    const client = makePublicClient((args => args.functionName === 'motionId'
+      ? Promise.reject(new Error('execution reverted')) : readFn(args)) as IPublicClient['readContract'])
     const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
     await keeper.poll()
 
@@ -747,7 +777,7 @@ describe('GET /claimable', () => {
       const body = await res.json() as Array<Record<string, unknown>>
       expect(body).toHaveLength(1)
       expect(Object.keys(body[0]).sort()).toEqual(
-        ['claimPrice', 'frozen', 'owed', 'notional', 'tailCase', 'tokenValue', 'user'].sort(),
+        ['claimPrice', 'frozen', 'motionPending', 'owed', 'notional', 'tailCase', 'tokenValue', 'user'].sort(),
       )
     } finally {
       await new Promise<void>(r => server.close(() => r()))

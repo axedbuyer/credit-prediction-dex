@@ -1,0 +1,32 @@
+# mark-updater — moves each market's on-chain mark to follow trading (fills TWAP,
+# depth-filtered book mid fallback) via CreditMarket.setMark (MARK_ROLE, batch 4).
+# Same execution model as Dockerfile.funding-keeper: run directly with ts-node, so
+# the install keeps devDependencies (--include=dev).
+#
+# Build context: backend/keepers/. Railway "Root Directory" = backend/keepers,
+# RAILWAY_DOCKERFILE_PATH = Dockerfile.mark-updater.
+#
+# Env: RPC_URL (or BASE_SEPOLIA_RPC_URL), MARKET_REGISTRY_ADDRESS, ORDER_BOOK_URL,
+# MARK_UPDATER_PRIVATE_KEY (optional: without it, or without MARK_ROLE, it runs dry),
+# optional MARK_* tuning (see mark-updater.ts), HEALTH_PORT (default 3005).
+#
+#   docker build -f Dockerfile.mark-updater -t mark-updater .
+#   docker run --env-file .env -p 3005:3005 mark-updater
+
+FROM node:20-slim
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
+
+COPY tsconfig.json ./
+COPY mark-updater.ts funding-keeper.ts chains.ts holder-index.ts shutdown.ts registry.ts markets.ts credit-event-hold.ts ./
+
+RUN groupadd --system --gid 1001 nodejs \
+ && useradd --system --uid 1001 --gid nodejs appuser \
+ && chown -R appuser:nodejs /app
+USER appuser
+
+EXPOSE 3005
+CMD ["node", "-r", "ts-node/register", "mark-updater.ts"]

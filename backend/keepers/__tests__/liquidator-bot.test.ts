@@ -19,6 +19,7 @@ import {
   type BotConfig,
   type LogLike,
 } from '../liquidator-bot'
+import { parseHold } from '../credit-event-hold'
 import type { HolderIndexStatus } from '../holder-index'
 import type { IYesSeller, SellRequest, SellResult } from '../seller'
 
@@ -318,13 +319,39 @@ describe('LiquidatorBot — creditEventConfirmed', () => {
   })
 })
 
-describe('LiquidatorBot — motionPending', () => {
-  it('skips all claims this cycle and logs, without reading claimable() for any holder', async () => {
-    const readContract = vi.fn().mockImplementation(makeReadContract({ motionPending: true }))
+describe('LiquidatorBot — motion open (batch 4)', () => {
+  it('still discovers and claims flagged positions while a motion is open, and alerts', async () => {
+    const readContract = vi.fn().mockImplementation(makeReadContract({
+      motionPending: true,
+      claimableByHolder: { [HOLDER_A.toLowerCase()]: true },
+      yesBalanceByAddr:  { [HOLDER_A.toLowerCase()]: DEFAULT_Q },
+      usdcBalanceByAddr: { [BOT_ACCOUNT.toLowerCase()]: 1_000_000n },
+    }))
+    const client = makePublicClient({ readContract })
+    const wallet = makeWalletClient()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bot = new LiquidatorBot(
+      client, wallet, makeHolderSource({ initialHolders: [HOLDER_A] }), makeSeller(), CONFIG,
+    )
+
+    await bot.runCycle()
+
+    const writes = (wallet.writeContract as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => (c[0] as { functionName: string }).functionName)
+    expect(writes).toContain('claim')
+    expect(bot.getHealth().skippedByReason.motionPending).toBeUndefined()
+    expect(errSpy.mock.calls.some(c => String(c[0]).includes('ALERT') && String(c[0]).includes('motion open'))).toBe(true)
+    errSpy.mockRestore()
+  })
+
+  it('DC_YES_HOLD for the market: no claimable() reads, no claims', async () => {
+    const readContract = vi.fn().mockImplementation(makeReadContract({
+      claimableByHolder: { [HOLDER_A.toLowerCase()]: true },
+      yesBalanceByAddr:  { [HOLDER_A.toLowerCase()]: DEFAULT_Q },
+    }))
     const client = makePublicClient({ readContract })
     const wallet = makeWalletClient()
     const bot = new LiquidatorBot(
-      client, wallet, makeHolderSource({ initialHolders: [HOLDER_A, HOLDER_B] }), makeSeller(), CONFIG,
+      client, wallet, makeHolderSource({ initialHolders: [HOLDER_A] }), makeSeller(), { ...CONFIG, hold: parseHold('mstr') },
     )
 
     await bot.runCycle()
@@ -332,8 +359,7 @@ describe('LiquidatorBot — motionPending', () => {
     const claimableCalls = readContract.mock.calls.filter(([a]: [{ functionName: string }]) => a.functionName === 'claimable')
     expect(claimableCalls).toHaveLength(0)
     expect(wallet.writeContract).not.toHaveBeenCalled()
-    expect(bot.getHealth().skippedByReason.motionPending).toBe(1)
-    expect(bot.getHealth().claims).toBe(0)
+    expect(bot.getHealth().skippedByReason.dcYesHold).toBe(1)
   })
 })
 
