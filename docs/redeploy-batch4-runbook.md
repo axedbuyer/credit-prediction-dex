@@ -52,8 +52,13 @@ Off-chain (**must ship before the flip in step 4**; tracked in the design note Â
   motions; `/claimable` no longer reports frozen during a motion (adds `motionPending`);
   `keepers/mark-updater` service; the smoke grants `MARK_ROLE` and checks a fill moves the
   mark (13/13).
-- TODO: Frontend: Pay carry for every Upbet, health badge, motion banner, pending carry for
-  Downbets, `/admin` (`openMotion`), docs pages.
+- DONE (branch `feat/batch4-frontend`): Pay carry for every Upbet (exact
+  `previewFunding` quote), health badge + Warning banners + Critical modal (on-site only),
+  motion banners (market page, PositionCard, /liquidate), Downbet pending carry, refund
+  line after a Yes, `/admin` `openMotion()` / close via the router (`MOTION_ROLE` badge),
+  docs pages (credit events, liquidations & paying carry, risks, FAQ, glossary, trading,
+  mark & carry) incl. "close by selling what you hold". Batch-4 UI is gated on a
+  `motionId()` probe, so batch-3 markets keep today's behaviour.
 
 Constructors are unchanged. CreditMarket, LiquidationEngine and OracleRouter changed, so
 **every market gets a new contract set** under a **new MarketRegistry** (slugs `mstr`, `crwv`,

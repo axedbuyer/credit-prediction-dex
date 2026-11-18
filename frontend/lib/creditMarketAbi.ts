@@ -160,9 +160,54 @@ export const CREDIT_MARKET_ABI = [
     inputs: [{ name: '', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  {
+    name: 'epochLength',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'motionPending',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  // ── batch 4 (motion escrow) — absent on batch-3 contracts; `motionId` doubles
+  //    as the feature probe (see lib/positionHealth.ts useIsBatch4) ────────────
+  {
+    name: 'motionId',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'motionIndex',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: '', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  // escrowedCredit (Downbet carry held since the EDD), motionDebt (Upbet carry owed
+  // since the EDD), refundable (post-EDD carry this address paid in cash), motion id.
+  {
+    name: 'escrowOf',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'user', type: 'address' }],
+    outputs: [
+      { name: 'escrowedCredit', type: 'uint256' },
+      { name: 'motionDebt',     type: 'uint256' },
+      { name: 'refundable',     type: 'uint256' },
+      { name: 'motion',         type: 'uint256' },
+    ],
+  },
   // Custom errors, so viem decodes reverts by name (TradePanel maps them to copy).
   { type: 'error', name: 'DepositCapExceeded', inputs: [] },
   { type: 'error', name: 'PositionFrozen',     inputs: [] },
+  { type: 'error', name: 'CreditEventAlreadyConfirmed', inputs: [] },
 ] as const
 
 export const ERC20_ABI = [

@@ -26,8 +26,17 @@ const config: Config = {
           a10: 'var(--color-danger-a10)',
           a28: 'var(--color-danger-a28)',
         },
-        success: 'var(--color-success)',
-        warning: 'var(--color-warning)',
+        // CSS-variable colours ignore Tailwind's /opacity modifier — use the alpha tokens.
+        success: {
+          DEFAULT: 'var(--color-success)',
+          a10: 'var(--color-success-a10)',
+          a30: 'var(--color-success-a30)',
+        },
+        warning: {
+          DEFAULT: 'var(--color-warning)',
+          a10: 'var(--color-warning-a10)',
+          a40: 'var(--color-warning-a40)',
+        },
         'text-1': 'var(--color-text-1)',
         'text-2': 'var(--color-text-2)',
         'text-muted': 'var(--color-text-muted)',

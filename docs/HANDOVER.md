@@ -218,8 +218,9 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
    `feat/batch4-motion-escrow`, supersedes PR #22): informational motions, post-EDD carry
    escrow, Pay carry for all, `MARK_ROLE`, router `MOTION_ROLE`. Off-chain work (keepers,
    liquidator-bot, mark updater, frontend, docs pages) still to do before the batch-4 flip.
-   Keepers + mark updater DONE on `feat/batch4-offchain-keepers` (merge at the flip only);
-   frontend + docs pages still to do.
+   Keepers + mark updater DONE on `feat/batch4-offchain-keepers` (draft PR #25) and the
+   frontend + docs pages on `feat/batch4-frontend` (stacked on it); both merge at the flip
+   only (Railway/Vercel auto-deploy `main`).
    DC site `robots.txt` disallows bots: no automated monitor without operator permission.
    History:
    Found 2026-11-18: on batch 3 nobody can open a motion (only the OracleRouter holds

@@ -495,7 +495,7 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
           throw new Error('This market is closed to new orders.')
         }
         if (body?.error && /position frozen|PositionFrozen/i.test(body.error)) {
-          throw new Error('Your position is frozen pending liquidation. Cure it from your Portfolio or wait for a claim.')
+          throw new Error('Your Upbet is locked for liquidation. Pay carry from your Portfolio to unlock it, or wait for a claim.')
         }
         const err = body?.error ?? (await res.text().catch(() => ''))
         throw new Error(err || `Server ${res.status}`)
@@ -528,7 +528,7 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
   const buttonLabel =
     !isConnected             ? 'Connect wallet to trade'
     : marketClosed           ? 'Market closed'
-    : isFrozen               ? 'Position frozen'
+    : isFrozen               ? 'Position locked'
     : busy                   ? statusLabel(status)
     : feeRateUnknownForNoBuy ? 'Confirming live fee rate for Downbet orders…'
     : carryShortfall         ? 'Increase price or amount to cover carry'
@@ -547,8 +547,8 @@ export function TradePanel({ market, initialSide, initialDirection }: TradePanel
       {/* Frozen banner — flagged positions are fully locked (mint, redeem, any CLOB trade) */}
       {isFrozen && (
         <div className="border border-danger-a28 bg-danger-a10 px-3 py-2.5 text-xs text-danger">
-          Your position is frozen pending liquidation. Cure it from your Portfolio or wait
-          for a claim.
+          Your Upbet is locked for liquidation. Pay carry from your Portfolio to unlock it,
+          or wait for a claim.
         </div>
       )}
 

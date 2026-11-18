@@ -53,6 +53,10 @@
   --color-danger:      #D95B5B;
   --color-danger-a10:  rgba(217, 91, 91, 0.10);
   --color-danger-a28:  rgba(217, 91, 91, 0.28);
+  --color-warning-a10: rgba(212, 168, 76, 0.10);
+  --color-warning-a40: rgba(212, 168, 76, 0.40);
+  --color-success-a10: rgba(34, 197, 94, 0.10);
+  --color-success-a30: rgba(34, 197, 94, 0.30);
 
   /* ── Borders ──────────────────────────────────────────────────────────── */
   --border-subtle:     rgba(255, 255, 255, 0.06);  /* hairline dividers    */

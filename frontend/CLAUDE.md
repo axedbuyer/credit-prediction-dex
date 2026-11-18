@@ -49,4 +49,22 @@ Mobile layout, fee distributor UI, market listing UI, LP vault UI
   `POST /orders/sync`. Nonces are millisecond timestamps. TradePanel blocks orders under
   `MIN_ORDER_TOKENS` (lib/constants.ts, 1 Upbet — keep in step with the order-book-server).
 - Liquidation keeper:
-  `GET /claimable[?market=<slug>]` (entries carry `market`, `creditMarket`, `liquidationEngine`).
+  `GET /claimable[?market=<slug>]` (entries carry `market`, `creditMarket`, `liquidationEngine`,
+  `motionPending`; `frozen` only when `claim()` would revert).
+
+## Batch 4 (motion escrow, Pay carry for all) — `lib/positionHealth.ts`
+- `useIsBatch4(creditMarket)` probes `motionId()` (batch-3 contracts revert). Batch-4-only UI
+  waits for `true`: Pay carry for UNFLAGGED Upbets (`cure()` reverts on batch 3 unless
+  flagged), held carry (`escrowOf`), `/admin` `openMotion()` via the OracleRouter.
+- Health: `health = m×Q / (1.03 × (owed + one epoch of carry))`, runway = `epochsToExpire`;
+  Critical (≤2 days or ≤1.15) → `HealthAlertModal` once per session (layout); Warning (≤7 or
+  ≤1.5) → red banner on PositionCard + `MarketAlerts`; Watch (≤30) → amber badge. On-site only.
+- Pay carry amount = max(0, fundingDebt − previewFunding(user, yesBal, true)) — exactly what
+  `cure()` collects (nets held carry during a motion); the client-side owed − NO-credit
+  estimate is only a fallback.
+- Motion banners: market-level `MarketAlerts`; PositionCard (Upbet: keep carry paid, refund
+  on Yes; Downbet: "Pending carry, paid if the DC rules No" = recorded escrow for the
+  current motion + live NO accrual since max(snapNO, motionIndex)).
+- Every open position shows the "close by selling what you hold" hint.
+- CSS-variable colours ignore Tailwind `/opacity` — use `warning-a10/a40`, `success-a10/a30`,
+  `danger-a10/a28`.

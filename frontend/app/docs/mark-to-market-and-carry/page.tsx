@@ -138,11 +138,22 @@ export default function MarkToMarketAndCarryPage() {
         </p>
       </details>
 
+      <h2>Where the price comes from</h2>
+      <p>
+        The price used for carry, equity and liquidation is the market&rsquo;s{' '}
+        <strong>mark</strong>. It follows trading: a time-weighted average of recent trades
+        over the last hour, or, when there are too few trades, the middle of the order book,
+        counting only quotes with real size behind them. It moves both ways and can jump.
+        An on-chain limit caps each update at 50 points and allows one update every 10
+        minutes; a bigger move arrives in steps. Carry is recalculated from the mark each
+        time it changes.
+      </p>
+
       <h2>Carry accrues as a number, cash moves at touchpoints</h2>
       <p>
         Carry is tracked continuously against your position, but USDC only changes hands
         when your position is touched: when you trade, redeem a set, settle after a credit
-        event, cure, or are liquidated. Earned carry (Downbet side) is paid out in cash at
+        event, pay carry, or are liquidated. Earned carry (Downbet side) is paid out in cash at
         your next touchpoint; owed carry (Upbet side) is deducted from your proceeds at your
         next touchpoint. Owed carry is never forgotten — it&rsquo;s kept on a ledger until
         it&rsquo;s collected.
@@ -169,13 +180,13 @@ export default function MarkToMarketAndCarryPage() {
         hits the liquidation trigger?&rdquo; Worked example: buy at 5% with no carry
         accrued → carry ≈ 4.87¢ a year → Δf ≈ 0.0134¢ per day → about 363 days. A fresh
         Upbet has a little over a year of runway (see the table above). Watch this number;
-        the app warns as it approaches zero.
+        the app&rsquo;s health badge warns at 30, 7 and 2 days. Paying carry resets it.
       </p>
 
       <div className="docs-callout docs-callout--warning">
         <p>
           Negative P&amp;L alone NEVER triggers liquidation. Only unpaid carry vs the
-          current price does — see Liquidations &amp; cure.
+          current price does — see Liquidations &amp; paying carry.
         </p>
       </div>
     </div>

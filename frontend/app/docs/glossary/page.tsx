@@ -40,12 +40,37 @@ const TERMS: { term: string; meaning: string; tradfi: string }[] = [
   },
   {
     term: 'Credit event',
-    meaning: 'Bankruptcy or Failure to Pay by the reference company.',
+    meaning: 'An event the market covers (each market lists its own, e.g. Bankruptcy or Failure to Pay), ruled to have happened by the Determinations Committee.',
     tradfi: 'Same term in TradFi',
   },
   {
-    term: 'Cure',
-    meaning: "Paying a locked position's live carry bill to unlock it and keep it — carry keeps accruing until you do.",
+    term: 'Pay carry',
+    meaning: 'Paying the carry your Upbet owes right now, at any time, to reset its liquidation clock — and, if it is locked, to unlock it and keep it.',
+    tradfi: 'Paying accrued premium',
+  },
+  {
+    term: 'Mark',
+    meaning: 'The on-chain price that carry, equity and liquidation use. It follows trading: recent trades, or the order book when trades are thin.',
+    tradfi: 'Mark price',
+  },
+  {
+    term: 'Position health',
+    meaning: 'How far an Upbet is from liquidation: Healthy, Watch, Warning or Critical. Shown on-site only.',
+    tradfi: 'Margin health',
+  },
+  {
+    term: 'Motion / DC question',
+    meaning: 'Opened by the team when the Determinations Committee is asked whether a credit event happened on a listed entity. Nothing is blocked; carry from then on is held until the ruling.',
+    tradfi: 'DC credit event question',
+  },
+  {
+    term: 'Event determination date',
+    meaning: "The moment a motion opens on Pari. Carry after it is held: refunded to Upbet holders who paid it on a Yes ruling, paid to Downbet holders on a No.",
+    tradfi: 'Event determination date',
+  },
+  {
+    term: 'Pending carry',
+    meaning: 'Downbet carry earned while a DC question is open, held until the ruling. It stays with the address that earned it, even if the Downbet is sold.',
     tradfi: '—',
   },
   {

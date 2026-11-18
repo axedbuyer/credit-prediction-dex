@@ -18,6 +18,7 @@ import {
   DEV_YES_SEIZABLE,
   DEV_YES_FROZEN,
   DEV_NO_HEALTHY,
+  DEV_NO_MOTION,
 } from '@/components/PositionCard'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -304,13 +305,13 @@ function MarketPositions({
               </div>
               {isClaimable && (
                 <p className="mb-3 text-xs text-danger">
-                  Redeem is disabled while your position is frozen — cure it above first.
+                  Redeem is disabled while your Upbet is locked — pay carry above first.
                 </p>
               )}
               <button
                 onClick={handleRedeem}
                 disabled={redeemStatus === 'pending' || redeemable === 0n || !!isClaimable}
-                title={isClaimable ? 'Redeem is disabled while frozen — cure first' : undefined}
+                title={isClaimable ? 'Redeem is disabled while locked — pay carry first' : undefined}
                 className="pari-a-btn pari-a-btn--secondary w-full"
               >
                 {redeemStatus === 'pending'
@@ -456,6 +457,7 @@ function DevPreview() {
       <PositionCard side="YES" _dev={DEV_YES_SEIZABLE} {...z} onSell={() => {}} />
       <PositionCard side="YES" _dev={DEV_YES_FROZEN} {...z} usdcAddress={ZERO_ADDR} onSell={() => {}} />
       <PositionCard side="NO" _dev={DEV_NO_HEALTHY} {...z} onSell={() => {}} />
+      <PositionCard side="NO" _dev={DEV_NO_MOTION} {...z} onSell={() => {}} />
     </div>
   )
 }

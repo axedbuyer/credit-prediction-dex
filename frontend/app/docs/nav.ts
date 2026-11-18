@@ -30,7 +30,7 @@ export const DOCS_NAV: DocGroup[] = [
   {
     label: 'Risk engine',
     pages: [
-      { slug: 'liquidations-and-cure', title: 'Liquidations & cure' },
+      { slug: 'liquidations-and-cure', title: 'Liquidations & paying carry' },
       { slug: 'credit-events', title: 'Credit events' },
     ],
   },
