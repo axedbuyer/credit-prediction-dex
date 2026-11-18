@@ -228,6 +228,32 @@ largest position it may claim (a claim costs ≤ m×Q); `/health` → `skippedBy
 shows `insufficientFloat` / `insuranceFundShortfall` when it can't claim. Update the
 contract addresses here after any CreditMarket-family redeploy.
 
+## Railway — mark-updater (root dir `backend/keepers`, internal-only) — batch 4, create before the flip
+
+```
+RAILWAY_DOCKERFILE_PATH=Dockerfile.mark-updater
+BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
+CHAIN_ID=84532
+MARKET_REGISTRY_ADDRESS=<batch-4 registry>
+MARK_UPDATER_PRIVATE_KEY=<SECRET — the wallet passed as MARK_UPDATER_ADDRESS to AddMarket; never the keeper key>
+ORDER_BOOK_URL=http://<order-book-server private domain>:<port>
+HEALTH_PORT=3005
+MARK_DRY_RUN=true          # first hour only: compare targets vs on-chain marks in logs + /health, then delete
+```
+Optional tuning (defaults): `MARK_POLL_MS` (60000), `MARK_TWAP_WINDOW_SEC` (3600),
+`MARK_MIN_FILLS` (2), `MARK_MIN_FILL_TOKENS` (1), `MARK_MIN_FILL_VOLUME` (50),
+`MARK_BOOK_MIN_DEPTH` (100), `MARK_BOOK_MAX_SPREAD` (0.10), `MARK_DEADBAND` (0.0025),
+`MARK_MIN` / `MARK_MAX` (0.001 / 0.95), `MARK_STALE_ALERT_SEC` (21600), `MARK_MIN_ETH`,
+`BLOCK_TIME_SEC` (2), `LOG_CHUNK_BLOCKS` (2000). Fund the wallet with ~0.002 ETH (one `setMark`
+per market at most every 10 minutes). Without the key, or on a market where the wallet lacks
+`MARK_ROLE`, it computes and logs but sends nothing. Grep logs for `[ALERT]` (no price source
+for 6h; a repricing bigger than one 50-point step).
+
+**`DC_YES_HOLD` (funding-keeper + liquidator-bot, batch 4):** unset normally. The moment the DC
+announces "Yes" on a covered event, set it to the market slug(s) (or `*`) on BOTH services; they
+redeploy and stop flagging / claiming in those markets until it is removed after the on-chain
+confirmation (`docs/credit-event-runbook.md` §4). Shown as `dcYesHold` on their `/health`.
+
 ## Vercel — frontend (root dir `frontend`)
 
 ```
