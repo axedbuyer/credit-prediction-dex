@@ -75,7 +75,12 @@ InsuranceFund. **No service calls `setMark` yet** — marks move only by admin
 updater = HANDOVER open work). Seed marks are set manually per market from the entity's CDS spread
 (`m = 1 − exp(−s/(1−R))`); current ones are placeholders. Credit-event types are display
 copy + attestation runbook only — nothing on-chain encodes them (OracleRouter has a single
-`confirmCreditEvent()`). Keep listings well below m ≈ 63% (carry falls above it).
+`confirmCreditEvent()`). **Credit-event policy:** the team multisig follows the ISDA DC — a
+DC question on a listed entity ("Has a Bankruptcy Credit Event occurred with respect to …?",
+from the All DC Requests list on cdsdeterminationscommittees.org) → open a motion
+(`setMotionPending(true)`, freezes flagging/claims; optional pause) → DC "Yes" on a covered
+event → `confirmCreditEvent()`; DC "No"/declined → close the motion. User copy:
+`frontend/app/docs/credit-events/page.tsx`. Keep listings well below m ≈ 63% (carry falls above it).
 
 **Topology (decisions D1–D5, `docs/multi-market-design.md`):**
 - **D1 — one contract set per market + on-chain `MarketRegistry`.** Each market = its own
@@ -490,8 +495,8 @@ frequent liquidations) proves to be a real UX problem:
 
 ## UX / Naming Conventions
 
-**Product name:** Pari ("Pari — Tradable Credit For All"). Brand: `Pari Brand
-Guidelines.html` + tokens in `frontend/styles/pari/` (Direction A "Analyst" for
+**Product name:** Pari ("Pari — Tradable Credit For All"). Brand: tokens in
+`frontend/styles/pari/` (the brand-guidelines doc is local-only, never in git) (Direction A "Analyst" for
 nav/landing/portfolio, Direction B "Trader" for market/orderbook/liquidate).
 
 **Never use in UI:** hazard rate, bps, basis points, protection buyer/seller, notional,

@@ -61,7 +61,7 @@ const TERMS: { term: string; meaning: string; tradfi: string }[] = [
   },
   {
     term: 'Oracle',
-    meaning: 'The process that confirms or rejects a credit event (team multisig in MVP).',
+    meaning: 'The team multisig that relays ISDA Determinations Committee rulings on-chain to confirm or reject a credit event.',
     tradfi: '—',
   },
 ]

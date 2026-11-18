@@ -210,12 +210,14 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
    pushes a TWAP of the CLOB mid via `setMark`, inside the on-chain ≤ 5-point / ≥ 1h bound —
    the policy production-plan Phase 3 already names) or change the deck copy. Land it before
    the audit so the audit covers it.
-4. **Credit-event source policy** — the BD deck (v4) says launch markets trigger on ISDA
-   Determinations Committee rulings, relayed on-chain by the attester. The user docs
-   (`frontend/app/docs/credit-events/page.tsx`) call DC-following *roadmap* and say the MVP
-   determination is the team's "multisig oracle" (today it is the deployer EOA). Owner decides;
-   then align the docs page, `frontend/lib/marketCopy.ts` and the attestation runbook. Verify
-   each launch name actually has DC coverage before claiming it.
+4. **Nobody can open a credit-event motion yet** — needed before the dress rehearsal. The policy
+   is decided (2026-11-18: follow ISDA DC requests/rulings — root CLAUDE.md "Credit-event
+   policy"; user docs updated). But `setMotionPending` needs `ORACLE_ROLE` on each
+   CreditMarket, which only its OracleRouter holds, and the router forwards only
+   `confirmCreditEvent` (verified on-chain for crwv, 2026-11-18). Fix without a redeploy: the
+   admin grants CreditMarket `ORACLE_ROLE` to the attester (to the Safe in `TransferRoles.s.sol`),
+   and `/admin` gets an open/close-motion control (it only has confirm + pause today). Also
+   confirm each launch name has ISDA DC coverage — the deck claims it.
 5. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
 6. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
@@ -242,11 +244,12 @@ deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, mainnet USDC pinn
 - Gates: Safe ceremony, dress rehearsal, audit + legal read (items 1, 2 and 5 above); a
   two-sided quoting bot for the team wallet (adapt `mm-sepolia-seed.ts`).
 
-## BD deck
+## BD deck and presentation material
 
-The investor deck lives **outside git**: the GitHub repo is public and the deck is marked
-"Strictly Confidential". Current version: `Pari BD Deck v4.html` (November 2026; local copy in
-the repo root, gitignored via `Pari BD Deck*.html`). `Pari BD Deck v2.html` (June 2026) was
-committed before this rule and is still tracked and in public history; untracking or purging
-it is the owner's call. Product claims the deck makes that the code does not back yet: open work
-items 3 and 4.
+The GitHub repo is **public**, so investor decks, brand guidelines and any other
+presentation material stay **outside git** (`.gitignore`: `Pari BD Deck*.html`,
+`Pari Brand Guidelines*.html`, `*.pptx`, `*.key`). Local copies sit in the repo root; the
+current deck is `Pari BD Deck v4.html` (November 2026). `Pari BD Deck v2.html` and
+`Pari Brand Guidelines.html` were untracked on 2026-11-18 but remain in git history until
+the owner purges it (git filter-repo + force-push `main` — owner only). The deck's mark-updater
+claim is still unbacked (open work item 3).
