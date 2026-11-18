@@ -64,10 +64,28 @@ Deploy first while batch-3 markets trade; downtime is steps 3–5.
 
 ## 0. Pre-flight
 
-1. The fix branch (`fix/post-event-liquidation-guard`) merged to `main` by the owner;
-   `cd contracts && forge test` green, `git status` clean (the broadcast compiles the
-   working tree). Optional: deep invariant profile and `scripts/smoke/run-smoke.sh`.
-2. Deployer `0x0D09…80f1` ETH ≥ 0.0005.
+1. Batch-4 contracts are on `main` (PR #24, merged 2026-11-18 as `740d03d`). Broadcast from a
+   clean checkout of `main` **after the `ops/batch4-prep` PR is merged** (it adds
+   `archive/batch3/`, which step 3 reads). `cd contracts && forge test` → 252 pass on
+   `740d03d` (checked 2026-11-18); `git status` clean (the broadcast compiles the working tree).
+   **Done 2026-11-18 — fork dress rehearsal:** `DeployEmptyRegistry` + the three `AddMarket`
+   runs below, broadcast to an anvil fork of Base Sepolia with `DEPLOYMENTS_DIR` pointed at a
+   scratch copy, all printed `Post-broadcast configuration assertions passed`. On the fork:
+   §2 checks all as expected. Lifecycle also checked:
+   - mint; `openMotion()` by the opener (its `setMotionPending` reverts);
+   - one day of accrual;
+   - `setMark` by the mark updater only, with a second update inside 10 min reverting `MarkUpdateTooSoon`;
+   - Pay carry on an unflagged position;
+   - the attester closes the motion; redeem leaves no debt.
+   Recipe, to repeat:
+   `anvil --fork-url https://base-sepolia-rpc.publicnode.com --port 8547`, then the §1
+   commands with `R=http://127.0.0.1:8547` and `DEPLOYMENTS_DIR=deployments/<scratch dir inside contracts/>`
+   (foundry's fs permissions only allow paths under `contracts/`). Afterwards delete the scratch
+   dir and the fork's `broadcast/*/84532/run-*.json` records, since they share the chain id with the
+   real deploy.
+2. Deployer `0x0D09…80f1` ETH ≥ 0.0005 (0.00116 ETH and 17.87 USDC on 2026-11-18; the re-seed in
+   §5 needs USDC too). Other wallets on 2026-11-18: keeper 0.00248 ETH, settler 0.00714 ETH,
+   liquidator 0.0015 ETH + 30 USDC, InsuranceFund 2.007 USDC.
 3. Operator = settler `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` (script default); if
    the settler key changed, `export OPERATOR_ADDRESS=<address>` first.
 3a. New keys (owner generates; never commit them):
@@ -75,9 +93,10 @@ Deploy first while batch-3 markets trade; downtime is steps 3–5.
    - optionally `export MOTION_OPENER_ADDRESS=<on-call wallet>` (router MOTION_ROLE).
    If unset, grant later with `cast send $CREDIT_MARKET "grantRole(bytes32,address)"
    $(cast keccak MARK_ROLE) <addr>` (and `MOTION_ROLE` on the router).
-4. Archive the batch-3 files: copy `contracts/deployments/base-sepolia/core.json` and
-   `markets/*.json` to `contracts/deployments/base-sepolia/archive/batch3/` before the
-   deploy rewrites them.
+4. Archive the batch-3 files: **done** in the `ops/batch4-prep` PR
+   (`contracts/deployments/base-sepolia/archive/batch3/`). The deploy then rewrites
+   `core.json` and `markets/*.json` in place; commit those on a new `ops/batch4-deployment`
+   branch for the deployment-files PR (§4.4).
 
 ## 1. Deploy the new markets (no downtime) — OWNER
 
