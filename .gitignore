@@ -52,5 +52,7 @@ scripts/smoke/.run/
 # BD / investor / presentation material — this repo is PUBLIC. Keep local only.
 Pari BD Deck*.html
 Pari Brand Guidelines*.html
+Pari design2dev*.zip
+*.zip
 *.pptx
 *.key

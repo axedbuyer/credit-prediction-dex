@@ -246,10 +246,14 @@ deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, mainnet USDC pinn
 
 ## BD deck and presentation material
 
-The GitHub repo is **public**, so investor decks, brand guidelines and any other
-presentation material stay **outside git** (`.gitignore`: `Pari BD Deck*.html`,
-`Pari Brand Guidelines*.html`, `*.pptx`, `*.key`). Local copies sit in the repo root; the
-current deck is `Pari BD Deck v4.html` (November 2026). `Pari BD Deck v2.html` and
-`Pari Brand Guidelines.html` were untracked on 2026-11-18 but remain in git history until
-the owner purges it (git filter-repo + force-push `main` — owner only). The deck's mark-updater
-claim is still unbacked (open work item 3).
+The GitHub repo is **public**, so investor decks, brand guidelines, design handoffs and any
+other presentation material stay **outside git** (`.gitignore`: `Pari BD Deck*.html`,
+`Pari Brand Guidelines*.html`, `*.zip`, `*.pptx`, `*.key`). Local copies sit in the repo root
+(backup: `~/pari-local-backup/`); the current deck is `Pari BD Deck v4.html` (November 2026).
+
+History purge done 2026-11-18 (git filter-repo + force-push of every branch): `Pari BD Deck
+v2.html`, `Pari Brand Guidelines.html` and `Pari design2dev handoff.zip` are gone from all
+branches, and every commit SHA before that date changed. GitHub's read-only `refs/pull/1–20/head`
+still point at the old commits (e.g. `2fe49c3`), so the files stay reachable by direct SHA
+link until GitHub Support purges them. The deck's mark-updater claim is still unbacked (open
+work item 3).
