@@ -63,9 +63,9 @@ at 80¢.
 - On-chain bounds: raise `maxMarkStep` so a repricing lands in at most one or two updates,
   and shorten `minMarkInterval`. Proposed starting point: 50 points per step, 10 minutes
   apart (open question Q2).
-- Key risk: a compromised keeper key could post a bad mark. The bound limits the size of
-  each step, the admin can revert with `adminSetMark`, and holders who keep carry paid are
-  unaffected. Optional: a separate `MARK_ROLE` so the flagging key cannot move the mark.
+- Key risk: a compromised mark key could post a bad mark. The admin can revert with
+  `adminSetMark`, and holders who keep carry paid are unaffected. The mark gets its own
+  `MARK_ROLE`, separate from the flagging `KEEPER_ROLE` (Q4).
 
 **Not changed:** the carry formula, the trigger formula, and the claim price.
 
@@ -98,8 +98,8 @@ Here runway means Epochs To Expire. During an open motion every Upbet holder wit
 a banner: *"A DC question is open on this market. Keep your carry paid: liquidations
 continue until the ruling."*
 
-Delivery: on-site alerts reach only holders who visit. Opt-in push or email alerts need a
-contact channel the protocol doesn't have today (open question Q3).
+Delivery: on-site only (owner decision, Q3). Alerts reach only holders who visit, which the
+user docs must say plainly.
 
 ## 5. Motion = EDD marker + carry escrow
 
@@ -213,7 +213,7 @@ Liquidations run until the confirm transaction lands.
 | CreditMarket | Keep the PR #22 post-confirmation guards and `MotionPendingSet`. Remove the `motionPending` check from `flagClaimable`. `setMotionPending(true)` opens motion `k` with snapshot `I_k`; `false` resolves it `No`. `confirmCreditEvent` requires an open motion and resolves it `Yes`. `settleFunding` gains the pre/post split, `E/D/R` and lazy folding. `owed()` includes `D`. `collectDebt` and the redeem, cure and settleYES deductions take pre-EDD debt first. New refund pull for `R`. `cure()` opened to all (§4). |
 | LiquidationEngine | Remove the `motionPending` revert in `claim`. Report P's pre/post split to CreditMarket so `R[liquidator]` and `R[InsuranceFund]` are recorded. |
 | CLOBSettlement | `collectDebt` call unchanged; the split happens inside CreditMarket. |
-| OracleRouter | Keep the PR #22 forwarder. Optional narrow `MOTION_ROLE` that can open a motion only, for the monitor or the on-call rota (§7). |
+| OracleRouter | Keep the PR #22 forwarder. New narrow `MOTION_ROLE` that can open a motion only, for the on-call rota now and a monitor later (§7, Q5). |
 | MarketRegistry | Unchanged. |
 
 New per-market config: none required beyond the mark bounds. Bytecode size needs checking:
@@ -266,22 +266,22 @@ a credit event is confirmed, flagging and claims revert forever (`CreditEventAlr
   `prepayFunding` removed), `contracts/CLAUDE.md`, the credit-event runbook, and the
   batch-4 runbook.
 
-## 9. Open questions for the owner
+## 9. Owner decisions (2026-11-18)
 
-- **Q1.** Should the `R` refund on a "Yes" go to the liquidator who paid post-EDD carry
-  through P? Proposed: yes, refunds go to whoever paid. The original holder lost the
-  position by letting it become seizable.
-- **Q2.** What mark-updater bounds and sources? Proposed: 50 points per step, 10 minutes
-  apart, fills TWAP with a depth-filtered mid fallback.
-- **Q3.** Health alerts: on-site only for batch 4, or also opt-in push/email/Telegram?
-- **Q4.** Should `MARK_ROLE` be separate from `KEEPER_ROLE`? Proposed: yes, if it doesn't
-  push CreditMarket past the size limit.
-- **Q5.** Is a narrow motion-opener role worth adding now, or only once DC monitoring
-  permission exists?
+- **Q1 — decided:** on a "Yes", `R` is refunded to whoever paid the post-EDD carry,
+  including a liquidator through P (and the InsuranceFund for its top-up).
+- **Q2 — open:** whether to keep an on-chain step bound on the mark at all (§3), or let the
+  updater move it freely.
+- **Q3 — decided:** health alerts are on-site only for batch 4.
+- **Q4 — decided:** separate `MARK_ROLE` for the mark updater, distinct from the flagging
+  `KEEPER_ROLE` (subject to the CreditMarket size limit).
+- **Q5 — decided:** add the narrow motion-opener role on OracleRouter now. The on-call
+  person can open a motion within minutes without a multisig quorum; a monitor service can
+  use it later if the DC site operator permits polling.
 
 ## 10. Build order
 
-1. Owner signs off on this note (and Q1–Q5).
+1. Owner signs off on this note (Q2 still open).
 2. Contracts + unit tests + invariant 11 + the rewritten invariant 5 suite, on a branch
    based on PR #22.
 3. Keepers (mark updater, flagging rules), order-book-server pre-filter.
