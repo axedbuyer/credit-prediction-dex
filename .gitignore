@@ -49,5 +49,8 @@ scripts/demo/node_modules
 scripts/smoke/node_modules
 scripts/smoke/.run/
 
-# Investor decks — confidential; this repo is public. Keep local only.
+# BD / investor / presentation material — this repo is PUBLIC. Keep local only.
 Pari BD Deck*.html
+Pari Brand Guidelines*.html
+*.pptx
+*.key
