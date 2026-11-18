@@ -217,9 +217,10 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
    pay $1 at the stale mark (proof-of-concept test: ~951 USDC net per 1,000 Upbets).
    Fixed in code (branch `fix/post-event-liquidation-guard`: on-chain post-event guards,
    `OracleRouter.setMotionPending`, keeper/bot skips, `/admin` motion control); deploys as
-   **batch 4** (`docs/redeploy-batch4-runbook.md`). Until then, batch-3 stop-gap (OWNER):
-   `forge script script/GrantMotionRole.s.sol --broadcast` (simulated OK 2026-11-18) and follow
-   `docs/credit-event-runbook.md` §7. Also confirm each launch name has ISDA DC coverage —
+   **batch 4** (`docs/redeploy-batch4-runbook.md`). Batch-3 stop-gap DONE 2026-11-18:
+   `GrantMotionRole.s.sol` broadcast (block 60319124) — the attester holds CreditMarket
+   `ORACLE_ROLE` on mstr/crwv/try, so `/admin` can open motions. Until batch 4, follow
+   `docs/credit-event-runbook.md` §7 (never confirm without an open motion; never close after). Also confirm each launch name has ISDA DC coverage —
    the deck claims it.
 5. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
