@@ -43,7 +43,8 @@ One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is share
 - Seed marks are placeholders until the owner supplies CDS-implied marks
   (`m = 1 − exp(−s/(1−R))`).
 - Marks follow trading via the Railway `mark-updater` service (`docs/hosted-env-vars.md`).
-- Blockscout source verification of the 19 batch-4 contracts: see the deployment-files PR.
+- Blockscout source verification of the batch-4 contracts (2026-11-19): 18/19 verified; the
+  crwv `NOToken` `0xA008…623b` was still being rate-limited (429) — retry it with the recipe.
   Recipe: `forge verify-contract <addr> src/<F>.sol:<C>
   --chain-id 84532 --verifier blockscout --verifier-url https://base-sepolia.blockscout.com/api
   --constructor-args $(cast abi-encode …)`, args from the CREATE tx `arguments` in

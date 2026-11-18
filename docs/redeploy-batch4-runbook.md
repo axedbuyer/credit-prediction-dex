@@ -226,4 +226,6 @@ deployer nonce).
   - router: deployer holds `ORACLE_ROLE`; the opener holds `MOTION_ROLE` only;
   - tokens: `YES-/NO-<TICKER>`, CLOB role on CLOB + engine, supply 0/0;
   - InsuranceFund grants `LIQUIDATOR_ROLE` to all three engines.
-- Wind-down, Redis key counts, verification status: fill in at §3–§6.
+- Blockscout verification (2026-11-19): 18/19 verified; crwv `NOToken`
+  `0xA008B310D534b0169672550eF4169730b9a9623b` pending (verifier 429s, retrying).
+- Wind-down, Redis key counts: fill in at §3–§6.
