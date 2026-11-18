@@ -48,3 +48,9 @@ scripts/demo/.run/
 scripts/demo/node_modules
 scripts/smoke/node_modules
 scripts/smoke/.run/
+
+# BD / investor / presentation material — this repo is PUBLIC. Keep local only.
+Pari BD Deck*.html
+Pari Brand Guidelines*.html
+*.pptx
+*.key

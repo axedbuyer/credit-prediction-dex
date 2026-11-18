@@ -4,55 +4,91 @@ export const metadata: Metadata = {
   title: 'Credit events — Pari Docs',
 }
 
+const DC_URL = 'https://www.cdsdeterminationscommittees.org/'
+
 export default function CreditEventsPage() {
   return (
     <div>
       <h1>Credit events</h1>
 
-      <h2>What counts (MVP)</h2>
-      <p>Two events settle the market:</p>
+      <p>
+        Pari markets settle on the same credit events that settle credit default swaps in
+        TradFi, as ruled on by the{' '}
+        <a href={DC_URL} target="_blank" rel="noreferrer">
+          Credit Derivatives Determinations Committees
+        </a>{' '}
+        (ISDA DC) — the industry panel of dealers and investors whose requests and rulings
+        are public and free to check.
+      </p>
+
+      <h2>What counts</h2>
+      <p>Each market lists the credit events it covers:</p>
       <ul>
         <li>
-          <strong>Bankruptcy</strong> — the reference company files for (or is put into)
-          bankruptcy or an equivalent insolvency proceeding.
+          <strong>Companies</strong> (MicroStrategy, CoreWeave): <strong>Bankruptcy</strong>{' '}
+          — the company files for, or is put into, bankruptcy or an equivalent insolvency
+          proceeding; and <strong>Failure to Pay</strong> — it misses a required payment on
+          its debt beyond any grace period.
         </li>
         <li>
-          <strong>Failure to Pay</strong> — the company misses a required payment on its
-          debt (beyond any grace period).
+          <strong>Countries</strong> (Republic of Turkey): <strong>Failure to Pay</strong>;{' '}
+          <strong>Repudiation/Moratorium</strong> — the government disowns its debt or
+          declares a halt on paying it; and <strong>Restructuring</strong> — the terms of its
+          debt are changed to creditors&rsquo; detriment (for example, reduced or deferred
+          payments).
         </li>
       </ul>
       <p>
-        Anything else — downgrades, stock crashes, restructuring rumors — is NOT a credit
-        event and does not settle the market.
+        These follow the ISDA credit derivatives definitions. Anything else — downgrades,
+        stock or bond price crashes, rumors — is NOT a credit event and does not settle the
+        market. Only an ISDA DC &ldquo;Yes&rdquo; on an event the market covers settles it.
       </p>
 
-      <h2>Lifecycle</h2>
+      <h2>How a credit event is triggered</h2>
+      <p>
+        Pari&rsquo;s oracle is the team&rsquo;s multisig (2-of-3 before mainnet; a single
+        team key on the current testnet). It bases every decision on the ISDA DC&rsquo;s
+        public record, in this order — CoreWeave is used as an illustrative example:
+      </p>
       <ol>
         <li>
-          <strong>Event occurs</strong> in the real world.
+          <strong>Continuous monitoring.</strong> The team watches the{' '}
+          <em>All DC Requests</em> list on{' '}
+          <a href={DC_URL} target="_blank" rel="noreferrer">
+            cdsdeterminationscommittees.org
+          </a>{' '}
+          for every entity listed on Pari.
         </li>
         <li>
-          <strong>Motion raised.</strong> In the MVP, determination is made by the Pari
-          team&rsquo;s multisig oracle — an industry-standard external determination
-          process is on the roadmap. A pending motion is announced.
+          <strong>A DC question is raised.</strong> A new request appears for the entity,
+          phrased like: <em>&ldquo;Question: Has a Bankruptcy Credit Event occurred with
+          respect to CoreWeave, Inc.?&rdquo;</em>
         </li>
         <li>
-          <strong>Determination window.</strong> The market can be paused and — always —
-          flagging and liquidation claims are paused while the motion is pending. Nobody&rsquo;s
-          Upbet can be seized while its payout is being decided.
+          <strong>Motion opened.</strong> As soon as the team picks up the question, the
+          multisig opens a credit-event motion on that market. From that moment no position
+          can be flagged and no liquidation claim can go through, so nobody&rsquo;s Upbet is
+          seized while its payout is being decided. The market can also be paused, which
+          halts minting and redeeming.
         </li>
         <li>
-          <strong>Confirmed:</strong> every Upbet redeems for <strong>$1.00</strong> (its
-          full backing); every Downbet is worth <strong>$0.00</strong>. Redemption is a
-          one-click settle from the Portfolio page. If your position was locked
-          pre-event, settlement auto-cures it: the carry bill accrued up to that moment
-          is deducted from your $1.00-per-Upbet payout.
+          <strong>DC rules &ldquo;Yes&rdquo;:</strong> the multisig confirms the credit
+          event on-chain. Every Upbet redeems for <strong>$1.00</strong> (its full backing);
+          every Downbet is worth <strong>$0.00</strong>. Redemption is a one-click settle
+          from the Portfolio page. If your position was locked before the event, settlement
+          auto-cures it: the carry bill accrued up to that moment is deducted from your
+          $1.00-per-Upbet payout.
         </li>
         <li>
-          <strong>Rejected:</strong> the motion is dismissed, the market unpauses, trading
-          and carry resume.
+          <strong>DC rules &ldquo;No&rdquo; or declines the question:</strong> the motion
+          is closed and the market unpauses. Nothing settles; flagging and liquidations
+          resume. Carry keeps accruing throughout the motion.
         </li>
       </ol>
+      <p>
+        You cannot raise a motion on-chain yourself. If you think the team has missed a DC
+        request on a listed entity, contact the team with a link to it.
+      </p>
 
       <h2>Zero recovery, by design</h2>
       <p>
@@ -67,22 +103,10 @@ export default function CreditEventsPage() {
         happens, then it resolves like any prediction market).
       </p>
 
-      <h2>How events are determined</h2>
+      <h2>On the roadmap</h2>
       <p>
-        In the MVP you cannot raise a motion on-chain; contact the team with evidence
-        (bankruptcy filing, missed-payment notice).
-      </p>
-      <p>
-        On the roadmap, Pari&rsquo;s oracle will follow the rulings of the{' '}
-        <a
-          href="https://www.cdsdeterminationscommittees.org/"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Credit Derivatives Determinations Committees
-        </a>{' '}
-        — the panel that rules on these same credit events in TradFi. Their live and past
-        determinations are public on that site.
+        A Pari Determinations Committee of prominent credit investors and market makers,
+        modelled on the ISDA DC, for names the ISDA DC does not cover.
       </p>
     </div>
   )

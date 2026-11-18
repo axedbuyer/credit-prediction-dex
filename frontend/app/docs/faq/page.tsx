@@ -56,8 +56,10 @@ export default function FaqPage() {
 
       <h3>Who decides a credit event happened?</h3>
       <p>
-        In the MVP, the Pari team&rsquo;s multisig oracle, against public evidence
-        (bankruptcy filing, missed payment). See{' '}
+        The ISDA Determinations Committee — the same panel that rules on credit events for
+        credit default swaps. The Pari team&rsquo;s multisig oracle watches its public
+        requests, freezes liquidations when a question is raised on a listed entity, and
+        confirms the credit event on-chain when the committee rules &ldquo;Yes&rdquo;. See{' '}
         <Link href="/docs/credit-events">Credit events</Link>.
       </p>
 

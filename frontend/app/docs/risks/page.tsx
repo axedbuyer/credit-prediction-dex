@@ -30,9 +30,10 @@ export default function RisksPage() {
           Downbet to $0.00, regardless of entry price or carry earned to date.
         </li>
         <li>
-          <strong>Oracle trust (MVP):</strong> credit events are determined by the Pari
-          team&rsquo;s multisig, not an independent process. You are trusting the
-          team&rsquo;s honesty and diligence.
+          <strong>Oracle trust:</strong> credit events follow public ISDA Determinations
+          Committee rulings, but the team&rsquo;s multisig is what relays them on-chain (a
+          single team key on the current testnet). You are trusting the team to relay each
+          ruling promptly and faithfully.
         </li>
         <li>
           <strong>Smart-contract risk:</strong> contracts are tested but{' '}
