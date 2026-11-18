@@ -1,7 +1,7 @@
-# Hosted env vars — Railway + Vercel (Base Sepolia, batch 3 since 2026-10-17)
+# Hosted env vars — Railway + Vercel (Base Sepolia, batch 4 since 2026-11-18)
 
 Single source of truth for what each hosted service needs. Services run in registry mode:
-the CURRENT addresses are the batch-3 registry below (2026-10-17). The single-set
+the CURRENT addresses are the batch-4 registry below (2026-11-18). The single-set
 address sections further down are the batch-1 redeploy of 2026-10-01 (`docs/redeploy-batch1-runbook.md`; deploy start
 block 47528136). The 2026-07 contracts (CreditMarket `0x26C3…F51b`, CLOB `0xC317…cB8e`)
 are paused and empty.
@@ -22,11 +22,12 @@ ignored (legacy one-market `mstr` mode only). Registry vars:
 | `CHAIN_ID` | matching-engine | Optional, default 84532 (only for local anvil). |
 | `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS` | Vercel | Set → frontend discovers markets on-chain; the `NEXT_PUBLIC_*_ADDRESS` market vars are then ignored (`NEXT_PUBLIC_USDC_ADDRESS` still used). |
 
-**MarketRegistry (batch 3, CURRENT): `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`** (deployed
-2026-10-17, start block 48217498; `docs/redeploy-batch3-runbook.md`; partial fills
-`docs/partial-fills-plan.md`). CreditMarkets: `mstr` `0x89e54F5e5C996174D9d2e52dbf90589b2f355d3A`,
-`crwv` `0xB6bc5e9FA166520536453FD667B79Fb705ca09b5`, `try`
-`0xdD1202B077b9B89253006610F80DAD23B9fDf76e` — full address sets in
+**MarketRegistry (batch 4, CURRENT): `0x36a1507fef705E8760d40bD8c959F40d242e342a`** (deployed
+2026-11-18, start block 60461374; `docs/redeploy-batch4-runbook.md`; motion escrow
+`docs/design/motion-escrow-and-mark.md`). Batch 3 (registry `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`,
+2026-10-17) is paused + inactive, files in `contracts/deployments/base-sepolia/archive/batch3/`. CreditMarkets: `mstr` `0x5914fCd859Bfdf3FB28c31718b3d710e83B217B1`,
+`crwv` `0x0E086feb7A91a89291460Cb81A045B5deac96Ae6`, `try`
+`0xD089e1A07e4BFCCf6CA432521240Ac1406D84566` — full address sets in
 `contracts/deployments/base-sepolia/markets/<slug>.json`. Set as `MARKET_REGISTRY_ADDRESS` on
 all five Railway services and as Vercel `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS`.
 

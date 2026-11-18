@@ -21,29 +21,30 @@ F1–F4 — all fixed).
 
 ## Current state
 
-### Contracts — Base Sepolia (chainId 84532), batch 3, live since 2026-10-17
+### Contracts — Base Sepolia (chainId 84532), batch 4, live since 2026-11-18
 
-MarketRegistry **`0xA7bcc124aF821388886012B905Ba8cF4B79469b1`** (start block 48217498).
+MarketRegistry **`0x36a1507fef705E8760d40bD8c959F40d242e342a`** (start block 60461374).
 One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is shared.
 
 | Slug | CreditMarket | Seed mark |
 |---|---|---|
-| `mstr` | `0x89e54F5e5C996174D9d2e52dbf90589b2f355d3A` | 23% |
-| `crwv` | `0xB6bc5e9FA166520536453FD667B79Fb705ca09b5` | 10% |
-| `try` | `0xdD1202B077b9B89253006610F80DAD23B9fDf76e` | 2% |
+| `mstr` | `0x5914fCd859Bfdf3FB28c31718b3d710e83B217B1` | 23% |
+| `crwv` | `0x0E086feb7A91a89291460Cb81A045B5deac96Ae6` | 10% |
+| `try` | `0xD089e1A07e4BFCCf6CA432521240Ac1406D84566` | 2% |
 
 - Full address sets: `contracts/deployments/base-sepolia/{core.json,markets/*.json}`
   (written by the deploy scripts — do not hand-edit). Every older contract set is paused and
   inactive, archived under `deployments/base-sepolia/archive/`.
-- Per market: `depositCap` 50,000 USDC, keeper `setMark` ≤ 5 points per update and ≥ 1h
-  apart (admin `adminSetMark` bypasses), fee 50 bps split 50/50 team wallet / InsuranceFund.
+- Per market: `depositCap` 50,000 USDC, `setMark` only by the mark updater
+  `0x115D6536d37435e97228c0ecc0126D531cA02aD7` (`MARK_ROLE`; not the keeper) ≤ 50 points per
+  update and ≥ 10 min apart (admin `adminSetMark` bypasses), fee 50 bps split 50/50 team
+  wallet / InsuranceFund. OracleRouter: attester = deployer (`ORACLE_ROLE`: open, close,
+  confirm); on-call opener `0x7587Ac4ab25D037aa9D4A6abf592fd67C58262f9` (`MOTION_ROLE`: open only).
 - Seed marks are placeholders until the owner supplies CDS-implied marks
   (`m = 1 − exp(−s/(1−R))`).
-- **Nothing updates the marks automatically.** The keeper wallet holds `KEEPER_ROLE`, but
-  no service calls `setMark`; marks move only by owner `adminSetMark`. Carry, the seizure
-  trigger and the claim cap all run off that static mark (open work item 3).
-- All 19 batch-3 contracts (+ the shared InsuranceFund) are source-verified on Blockscout
-  (2026-11-17). Recipe for the next batch: `forge verify-contract <addr> src/<F>.sol:<C>
+- Marks follow trading via the Railway `mark-updater` service (`docs/hosted-env-vars.md`).
+- Blockscout source verification of the 19 batch-4 contracts: see the deployment-files PR.
+  Recipe: `forge verify-contract <addr> src/<F>.sol:<C>
   --chain-id 84532 --verifier blockscout --verifier-url https://base-sepolia.blockscout.com/api
   --constructor-args $(cast abi-encode …)`, args from the CREATE tx `arguments` in
   `contracts/broadcast/<script>/84532/run-*.json`; one contract at a time, 20–45s apart.
@@ -54,7 +55,9 @@ One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is share
 Deploy history, for orientation: 2026-07-06 first deploy → 07-12 fee-aware CLOB → 10-01
 batch 1 (unified `owed()` fix for F1/F2/F4, deposit cap, bounded `setMark`) → 10-03 multi-market
 (registry, CoreWeave + Turkey) → 10-15 batch 2 (carry = −(1−m)·ln(1−m)) → 10-17 batch 3
-(partial fills, on-chain cancel, pro-rata carry debt, 1-Upbet minimum). Each batch was a
+(partial fills, on-chain cancel, pro-rata carry debt, 1-Upbet minimum) → 11-18 batch 4
+(informational motions with carry escrow from the EDD, Pay carry for all, post-confirmation
+flag/claim guards, `MARK_ROLE` + trade-following mark, router `MOTION_ROLE`). Each batch was a
 full redeploy under a new registry, because CreditMarket changed.
 
 ### Hosting — all green

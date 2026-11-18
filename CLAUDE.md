@@ -20,10 +20,11 @@ on an off-chain CLOB with on-chain settlement. On a credit event YES redeems 1:1
 NO for $0. (Custom ERC-20 rather than Gnosis CTF/ERC-1155: simpler, auto-visible in
 wallets, same economics; CTF is a V2 option.)
 
-## Current State (2026-11-17)
+## Current State (2026-11-18)
 
-- **Base Sepolia (testnet) only — nothing on mainnet.** Batch-3 contracts live since
-  2026-10-17 under MarketRegistry `0xA7bcc124aF821388886012B905Ba8cF4B79469b1`; three
+- **Base Sepolia (testnet) only — nothing on mainnet.** Batch-4 contracts (motion escrow,
+  Pay carry for all, `MARK_ROLE`) live since 2026-11-18 under MarketRegistry
+  `0x36a1507fef705E8760d40bD8c959F40d242e342a`; three
   markets (MSTR, CoreWeave, Turkey). Addresses: `contracts/deployments/base-sepolia/`. Older
   contract sets are paused + inactive (`deployments/base-sepolia/archive/`).
 - Five backend services on Railway + frontend on Vercel, all in registry mode; pushes to
