@@ -4,6 +4,8 @@ pragma solidity 0.8.24;
 import {Test, StdInvariant, console2} from "forge-std/Test.sol";
 import {MarketRegistry} from "../../src/MarketRegistry.sol";
 import {InsuranceFund} from "../../src/InsuranceFund.sol";
+import {EscrowMath} from "./EscrowMath.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Handler, MockUSDC} from "./Handler.sol";
 import {MarketSetBuilder} from "../helpers/MarketSetBuilder.sol";
 
@@ -91,6 +93,7 @@ contract MultiMarketInvariantTest is StdInvariant, Test {
 
     function _grantHandler(MarketSetBuilder.MarketSet memory s, Handler h) internal {
         s.market.grantRole(s.market.KEEPER_ROLE(), address(h));
+        s.market.grantRole(s.market.MARK_ROLE(), address(h));
         s.market.grantRole(s.market.ORACLE_ROLE(), address(h));
         s.market.grantRole(s.market.DEFAULT_ADMIN_ROLE(), address(h));
         s.router.grantRole(s.router.ORACLE_ROLE(), address(h));
@@ -99,7 +102,7 @@ contract MultiMarketInvariantTest is StdInvariant, Test {
     }
 
     function _selectors() internal pure returns (bytes4[] memory s) {
-        s = new bytes4[](23);
+        s = new bytes4[](24);
         s[0] = Handler.mint.selector;
         s[1] = Handler.redeem.selector;
         s[2] = Handler.settleYES.selector;
@@ -123,6 +126,7 @@ contract MultiMarketInvariantTest is StdInvariant, Test {
         s[20] = Handler.probeDepositCap.selector;
         s[21] = Handler.scenarioTailClaim.selector; // multi-market only: forces the IF shortfall path
         s[22] = Handler.scenarioFeeTrade.selector; // multi-market only: forces fee -> IF
+        s[23] = Handler.scenarioMotionLifecycle.selector; // batch 4: motion + escrow paths
     }
 
     // ── per-market invariants (each market, same checks as the single-market suite) ──
@@ -134,28 +138,25 @@ contract MultiMarketInvariantTest is StdInvariant, Test {
         assertEq(s.yes.totalSupply(), s.no.totalSupply(), "complete-set violated");
     }
 
-    // Same exact equality as invariant_CollateralSolvencyPreEvent, per market.
+    // Same two-world check as invariant_CollateralSolvencyPreEvent, per market.
     function _solvency(MarketSetBuilder.MarketSet memory s, Handler h) internal view {
-        if (s.market.creditEventConfirmed()) return;
-        uint256 cumYES = s.market.cumulativeFundingPerYES();
-        uint256 cumNO = s.market.cumFundingPerNO();
-        int256 sumDebt;
-        int256 sumYesDebit;
-        int256 sumNoCredit;
         uint256 n = h.numActors();
-        for (uint256 i = 0; i < n; i++) {
-            address u = h.actorAt(i);
-            sumDebt += int256(s.market.fundingDebt(u));
-            uint256 yesX = s.yes.balanceOf(u) * (cumYES - s.market.fundingSnapshot(u));
-            sumYesDebit += int256(yesX == 0 ? 0 : (yesX - 1) / 1e18 + 1); // rounds up, as settleFunding records it
-            sumNoCredit += int256(s.no.balanceOf(u) * (cumNO - s.market.snapNO(u)) / 1e18);
-        }
-        int256 expected = int256(s.yes.totalSupply()) - sumDebt - sumYesDebit + sumNoCredit;
-        // Same asymmetric check as invariant_CollateralSolvencyPreEvent: never short;
-        // a surplus only up to settlement rounding (YES debits round up).
+        address[] memory actors = new address[](n);
+        for (uint256 i = 0; i < n; i++) actors[i] = h.actorAt(i);
+        EscrowMath.Ctx memory c = EscrowMath.Ctx(
+            s.market, IERC20(address(s.yes)), IERC20(address(s.no)), s.market.cumulativeFundingPerYES()
+        );
+        (int256 noWorld, int256 yesWorld, bool hasYes) = EscrowMath.solvency(c, actors, address(insuranceFund));
         int256 bal = int256(usdc.balanceOf(address(s.market)));
-        assertGe(bal, expected - int256(2 * n), "market collateral SHORT of the derived solvency formula");
-        assertLe(bal, expected + int256(2 * n) + 10_000, "market collateral above the solvency formula by more than settlement rounding");
+        int256 slack = int256(4 * n + 4);
+        if (!s.market.creditEventConfirmed()) {
+            assertGe(bal, noWorld - slack, "market collateral SHORT of the derived solvency formula");
+            assertLe(bal, noWorld + slack + 10_000, "market collateral above the solvency formula by more than settlement rounding");
+        }
+        if (hasYes) {
+            assertGe(bal, yesWorld - slack, "market collateral SHORT of the DC-Yes world");
+            assertLe(bal, yesWorld + slack + 10_000, "market collateral above the DC-Yes world by more than rounding");
+        }
     }
 
     function invariant_A_CompleteSetAndSupply() public view {
@@ -194,8 +195,9 @@ contract MultiMarketInvariantTest is StdInvariant, Test {
             assertEq(h.ghost_frozenTradeSuccesses(), 0, "frozen trade succeeded");
             assertEq(h.ghost_owedDecreasedWhileFlagged(), 0, "owed decreased while flagged");
             assertEq(h.ghost_mintExceededCap(), 0, "deposit cap exceeded");
-            assertEq(h.ghost_motionPendingFlagSuccesses(), 0, "flag during motion");
-            assertEq(h.ghost_motionPendingClaimSuccesses(), 0, "claim during motion");
+            assertEq(h.ghost_owedAfterCure(), 0, "cure left owed > 0");
+            assertEq(h.ghost_postEventFlagSuccesses(), 0, "flag after credit event");
+            assertEq(h.ghost_postEventClaimSuccesses(), 0, "claim after credit event");
             assertEq(h.ghost_liquidationLedgerNotCleared(), 0, "ledger not cleared after claim");
             assertEq(h.ghost_missedSeizureFlag(), 0, "missed seizure flag");
             assertEq(h.ghost_redeemPayoutMismatch(), 0, "redeem payout mismatch");

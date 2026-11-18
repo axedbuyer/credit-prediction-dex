@@ -59,6 +59,20 @@ export const CREDIT_MARKET_ABI = [
     outputs: [{ name: '', type: 'bool' }],
   },
   {
+    name: 'motionPending',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    name: 'creditEventConfirmed',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
     name: 'flagClaimable',
     type: 'function' as const,
     stateMutability: 'nonpayable' as const,
@@ -536,6 +550,29 @@ export class FundingKeeper {
    * awaits only a cheap incremental sync once caught up.
    */
   private async checkHolders(ts: string): Promise<void> {
+    // Never flag once a credit event is confirmed or a motion is pending: the
+    // Upbet is about to pay $1 (or already does). Fail safe: unreadable = skip.
+    try {
+      const [motion, confirmed] = await Promise.all([
+        this.publicClient.readContract({
+          address: this.config.creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'motionPending',
+        }) as Promise<boolean>,
+        this.publicClient.readContract({
+          address: this.config.creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'creditEventConfirmed',
+        }) as Promise<boolean>,
+      ])
+      if (confirmed) {
+        console.log(`${this.tag} ${ts} — flagging skipped: credit event confirmed`)
+        return
+      }
+      if (motion) {
+        console.log(`${this.tag} ${ts} — flagging skipped: motion pending`)
+        return
+      }
+    } catch (err) {
+      console.error(`${this.tag} ${ts} — flagging skipped: could not read motionPending/creditEventConfirmed:`, briefError(err))
+      return
+    }
     await this.holderSource.refresh()
     const holders = this.holderSource.holders()
     const idxStatus = this.holderSource.status()

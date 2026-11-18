@@ -1,6 +1,6 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Last updated 2026-11-17. This doc holds current state, ops knowledge and open work that
+*Last updated 2026-11-18. This doc holds current state, ops knowledge and open work that
 are NOT derivable from the code. The product/economics spec — including the 10 hard
 invariants — is the root `CLAUDE.md`; if code and that spec disagree, treat it as a bug.*
 
@@ -88,9 +88,9 @@ full redeploy under a new registry, because CreditMarket changed.
 
 ### Tests and CI
 
-`.github/workflows/ci.yml` runs on every PR and push to `main`: `forge test` (225 tests,
+`.github/workflows/ci.yml` runs on every PR and push to `main`: `forge test` (252 tests,
 incl. single- and 2-market stateful invariant suites), vitest for order-book-server (131),
-matching-engine (94) and keepers (237), and a frontend type-check (the frontend has no test
+matching-engine (94) and keepers (243), and a frontend type-check (the frontend has no test
 suite). Local end-to-end: `scripts/smoke/run-smoke.sh` (multi-market anvil smoke, 12/12,
 ≈1 min). Counts as of PR #17 (2026-10-16).
 
@@ -203,21 +203,33 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
    InsuranceFund, the OracleRouter attester role and `PAUSER_ROLE` to the Safe; keeper and
    settler keep only their operational role on dedicated hot EOAs; the deployer renounces
    everything. Fold in the deploy-script fix below.
-2. **Credit-event dress rehearsal on Sepolia** (requirement 4) — motion → pause → attest →
-   settle, plus a live flag → cure and flag → claim, run through the Safe. Gate for mainnet.
-3. **Mark updater** — no service moves the mark (see "Current state"). The BD deck (v4)
-   tells investors the keeper updates it from the market. Either build it (e.g. funding-keeper
-   pushes a TWAP of the CLOB mid via `setMark`, inside the on-chain ≤ 5-point / ≥ 1h bound —
-   the policy production-plan Phase 3 already names) or change the deck copy. Land it before
-   the audit so the audit covers it.
-4. **Nobody can open a credit-event motion yet** — needed before the dress rehearsal. The policy
-   is decided (2026-11-18: follow ISDA DC requests/rulings — root CLAUDE.md "Credit-event
-   policy"; user docs updated). But `setMotionPending` needs `ORACLE_ROLE` on each
-   CreditMarket, which only its OracleRouter holds, and the router forwards only
-   `confirmCreditEvent` (verified on-chain for crwv, 2026-11-18). Fix without a redeploy: the
-   admin grants CreditMarket `ORACLE_ROLE` to the attester (to the Safe in `TransferRoles.s.sol`),
-   and `/admin` gets an open/close-motion control (it only has confirm + pause today). Also
-   confirm each launch name has ISDA DC coverage — the deck claims it.
+2. **Credit-event dress rehearsal on Sepolia** (requirement 4) — batch 4 flow: open motion
+   → flag + claim + Pay carry during it → close (No: escrow paid) on one market, and confirm
+   (Yes: refunds, settleYES) on a throwaway market, run through the Safe. Gate for mainnet.
+3. **Mark updater** — no service moves the mark (see "Current state"). Owner decision
+   2026-11-18: the mark must follow trades (fills TWAP, depth-filtered mid fallback, jumps
+   both ways) — REQUIRED for batch 4 (design note §3). Batch-4 contracts give it its own
+   `MARK_ROLE` key (not the flagging keeper) with a wide 50-point / 10-minute circuit
+   breaker. Not built yet.
+4. **Credit-event motion redesign + post-event liquidation bug** — gate for the dress
+   rehearsal. Owner rejected the motion freeze 2026-11-18; batch-4 contracts implement the
+   escrow design (`docs/design/motion-escrow-and-mark.md`, branch
+   `feat/batch4-motion-escrow`, supersedes PR #22): informational motions, post-EDD carry
+   escrow, Pay carry for all, `MARK_ROLE`, router `MOTION_ROLE`. Off-chain work (keepers,
+   liquidator-bot, mark updater, frontend, docs pages) still to do before the batch-4 flip.
+   DC site `robots.txt` disallows bots: no automated monitor without operator permission.
+   History:
+   Found 2026-11-18: on batch 3 nobody can open a motion (only the OracleRouter holds
+   CreditMarket `ORACLE_ROLE`; the router forwards only `confirmCreditEvent`), AND
+   confirmation alone does not block flag/claim — a liquidator could seize an Upbet about to
+   pay $1 at the stale mark (proof-of-concept test: ~951 USDC net per 1,000 Upbets).
+   Fixed in code (branch `fix/post-event-liquidation-guard`: on-chain post-event guards,
+   `OracleRouter.setMotionPending`, keeper/bot skips, `/admin` motion control); deploys as
+   **batch 4** (`docs/redeploy-batch4-runbook.md`). Batch-3 stop-gap DONE 2026-11-18:
+   `GrantMotionRole.s.sol` broadcast (block 60319124) — the attester holds CreditMarket
+   `ORACLE_ROLE` on mstr/crwv/try, so `/admin` can open motions. Until batch 4, follow
+   `docs/credit-event-runbook.md` §7 (never confirm without an open motion; never close after). Also confirm each launch name has ISDA DC coverage —
+   the deck claims it.
 5. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
 6. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.

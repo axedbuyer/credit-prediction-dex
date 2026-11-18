@@ -79,6 +79,7 @@ contract LiquidationEngineTest is Test {
         noToken.grantRole(noToken.MINTER_ROLE(), address(m));
         noToken.grantRole(noToken.BURNER_ROLE(), address(m));
         m.grantRole(m.KEEPER_ROLE(), keeper);
+        m.grantRole(m.MARK_ROLE(), keeper);
         m.grantRole(m.ORACLE_ROLE(), oracle);
     }
 
@@ -256,15 +257,72 @@ contract LiquidationEngineTest is Test {
 
     // ── guard tests ────────────────────────────────────────────────────────────
 
-    function test_Claim_DuringMotionPending_Reverts() public {
+    // Batch 4: a motion is informational — claims still go through.
+    function test_Claim_DuringMotion_Succeeds() public {
         _mintAndFlag(alice, MINT_AMT);
 
         vm.prank(oracle);
         market.setMotionPending(true);
 
         vm.prank(bob);
-        vm.expectRevert(LiquidationEngine.MotionPending.selector);
         engine.claim(alice);
+        assertEq(yesToken.balanceOf(bob), MINT_AMT, "Upbets transferred to the liquidator");
+        assertFalse(market.claimable(alice), "flag cleared");
+    }
+
+    // ── post-credit-event guards (batch 4) ──────────────────────────────────────
+    // Before the fix, a position flagged before the event could still be claimed
+    // after confirmCreditEvent (no motion open) at the stale mark, and the liquidator
+    // then redeemed the Upbets for $1 each — netting ~951 USDC per 1,000 Upbets here.
+
+    function test_Claim_AfterCreditEvent_Reverts() public {
+        _mintAndFlag(alice, MINT_AMT);
+        vm.prank(oracle);
+        market.confirmCreditEvent();
+        assertFalse(market.motionPending(), "no motion: the guard must not depend on one");
+
+        vm.prank(bob);
+        vm.expectRevert(CreditMarket.CreditEventAlreadyConfirmed.selector);
+        engine.claim(alice);
+    }
+
+    function test_Flag_AfterCreditEvent_Reverts() public {
+        vm.prank(alice);
+        market.mint(MINT_AMT);
+        vm.warp(block.timestamp + 365 days);
+        market.accrueFunding();
+        vm.prank(oracle);
+        market.confirmCreditEvent();
+        assertTrue(market.isSeizable(alice), "would be seizable on the stale mark (pre-EDD debt)");
+
+        vm.prank(keeper);
+        vm.expectRevert(CreditMarket.CreditEventAlreadyConfirmed.selector);
+        market.flagClaimable(alice);
+    }
+
+    // A position flagged before the event keeps its protection: settleYES pays
+    // $1 per Upbet less the carry owed, and auto-cures the flag.
+    function test_FlaggedHolder_SettlesYES_AfterCreditEvent() public {
+        uint256 Q = _mintAndFlag(alice, MINT_AMT);
+        uint256 owedAtEvent = market.owed(alice);
+        vm.prank(oracle);
+        market.confirmCreditEvent();
+
+        uint256 before = mockUsdc.balanceOf(alice);
+        vm.prank(alice);
+        market.settleYES(Q);
+        assertEq(yesToken.balanceOf(alice), 0, "Upbets settled");
+        assertFalse(market.claimable(alice), "auto-cured");
+        assertGe(mockUsdc.balanceOf(alice) - before, Q - owedAtEvent, "paid $1/Upbet less carry owed");
+    }
+
+    event MotionPendingSet(bool pending);
+
+    function test_SetMotionPending_EmitsEvent() public {
+        vm.expectEmit(false, false, false, true, address(market));
+        emit MotionPendingSet(true);
+        vm.prank(oracle);
+        market.setMotionPending(true);
     }
 
     function test_Claim_NotClaimable_Reverts() public {

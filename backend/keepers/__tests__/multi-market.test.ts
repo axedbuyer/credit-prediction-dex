@@ -336,7 +336,7 @@ describe('FundingKeeperService', () => {
 
 const WAD = 10n ** 18n
 
-function liqClient(perMarket: Record<string, { claimable: Address[]; mark?: bigint; motion?: boolean; owed?: bigint; fail?: boolean }>): LiqPublic {
+function liqClient(perMarket: Record<string, { claimable: Address[]; mark?: bigint; motion?: boolean; confirmed?: boolean; owed?: bigint; fail?: boolean }>): LiqPublic {
   return {
     readContract: vi.fn(async ({ address, functionName, args }) => {
       const m = perMarket[address.toLowerCase()] ?? perMarket[Object.keys(perMarket).find(k => k === address.toLowerCase())!]
@@ -347,6 +347,7 @@ function liqClient(perMarket: Record<string, { claimable: Address[]; mark?: bigi
       if (mk.fail) throw new Error('rpc down')
       if (functionName === 'currentMark') return mk.mark ?? 50_000_000_000_000_000n
       if (functionName === 'motionPending') return mk.motion ?? false
+      if (functionName === 'creditEventConfirmed') return mk.confirmed ?? false
       if (functionName === 'claimable') return mk.claimable.map(h => h.toLowerCase()).includes((args![0] as string).toLowerCase())
       if (functionName === 'owed') return mk.owed ?? 1_000n
       if (functionName === 'balanceOf') return 1_000_000n
@@ -452,7 +453,7 @@ interface BotWorld {
   usdc?: bigint
   insurance?: bigint
   /** per market (creditMarket address): */
-  markets: Record<string, { mark?: bigint; claimable: Address[]; q?: bigint; owed?: bigint; motion?: boolean; yes?: bigint }>
+  markets: Record<string, { mark?: bigint; claimable: Address[]; q?: bigint; owed?: bigint; motion?: boolean; confirmed?: boolean; yes?: bigint }>
 }
 
 function botClients(w: BotWorld) {
@@ -464,6 +465,7 @@ function botClients(w: BotWorld) {
       const cm = w.markets[a]
       if (cm) {
         if (functionName === 'motionPending') return cm.motion ?? false
+        if (functionName === 'creditEventConfirmed') return cm.confirmed ?? false
         if (functionName === 'currentMark') return cm.mark ?? 50_000_000_000_000_000n
         if (functionName === 'claimable') return cm.claimable.map(h => h.toLowerCase()).includes((args![0] as string).toLowerCase())
         if (functionName === 'owed') return cm.owed ?? 0n

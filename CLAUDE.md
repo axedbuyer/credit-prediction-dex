@@ -68,19 +68,26 @@ admin-only (forge script + `MarketRegistry`); no permissionless listing.
 | `crwv` | CoreWeave (CoreWeave, Inc.) | corporate | CRWV | Bankruptcy, Failure to Pay | 10% |
 | `try` | Turkey (Republic of Turkey) | sovereign | TRY | Failure to Pay, Repudiation/Moratorium, Restructuring | 2% |
 
-**Per-market config:** `depositCap` 50,000 USDC; keeper `setMark` ≤ 5 points per update,
-≥ 1h apart (admin `adminSetMark` bypasses); fee 50 bps, 50/50 team wallet / shared
-InsuranceFund. **No service calls `setMark` yet** — marks move only by admin
+**Per-market config:** `depositCap` 50,000 USDC; `setMark` by the mark updater's own key
+(`MARK_ROLE`, batch 4; separate from the flagging `KEEPER_ROLE`) ≤ 50 points per update,
+≥ 10 min apart — a wide circuit breaker, not a speed limit (batch 3 live: KEEPER_ROLE, 5
+points, 1h); admin `adminSetMark` bypasses; fee 50 bps, 50/50 team wallet / shared
+InsuranceFund. **The mark must follow trades** (fills TWAP, depth-filtered mid fallback;
+jumps allowed both ways) — **no service calls `setMark` yet**: marks move only by admin
 `adminSetMark`, and carry, the seizure trigger and the claim cap all read that mark (mark
-updater = HANDOVER open work). Seed marks are set manually per market from the entity's CDS spread
+updater = HANDOVER open work, required for batch 4). Seed marks are set manually per market from the entity's CDS spread
 (`m = 1 − exp(−s/(1−R))`); current ones are placeholders. Credit-event types are display
 copy + attestation runbook only — nothing on-chain encodes them (OracleRouter has a single
 `confirmCreditEvent()`). **Credit-event policy:** the team multisig follows the ISDA DC — a
 DC question on a listed entity ("Has a Bankruptcy Credit Event occurred with respect to …?",
 from the All DC Requests list on cdsdeterminationscommittees.org) → open a motion
-(`setMotionPending(true)`, freezes flagging/claims; optional pause) → DC "Yes" on a covered
-event → `confirmCreditEvent()`; DC "No"/declined → close the motion. User copy:
-`frontend/app/docs/credit-events/page.tsx`. Keep listings well below m ≈ 63% (carry falls above it).
+(`OracleRouter.openMotion()` / `setMotionPending(true)`; batch 4: it marks the EDD, escrows
+carry accrued after it and blocks nothing) → DC "Yes" on a covered event →
+`confirmCreditEvent()` (post-EDD carry void, refunded to its payers); DC "No"/declined →
+`setMotionPending(false)` (escrow released). Each market's covered events are framed by the
+team before listing; never name industry transaction types or settlement matrices in
+anything public or in git. Design: `docs/design/motion-escrow-and-mark.md`. User copy:
+`frontend/app/docs/credit-events/page.tsx`; ops: `docs/credit-event-runbook.md`. Keep listings well below m ≈ 63% (carry falls above it).
 
 **Topology (decisions D1–D5, `docs/multi-market-design.md`):**
 - **D1 — one contract set per market + on-chain `MarketRegistry`.** Each market = its own
@@ -131,19 +138,23 @@ Scripts: `AddMarket.s.sol` (one market against an existing registry + fund),
 - Roles — CreditMarket: `DEFAULT_ADMIN_ROLE`, `ORACLE_ROLE`, `KEEPER_ROLE`, `PAUSER_ROLE`,
   `CLOB_ROLE`, `LIQUIDATOR_ROLE`. YES/NO: `MINTER_ROLE`, `BURNER_ROLE`, `CLOB_ROLE`.
   CLOBSettlement: `OPERATOR_ROLE` (the only filler). InsuranceFund: `LIQUIDATOR_ROLE`.
-  OracleRouter: `ORACLE_ROLE` (attester).
+  OracleRouter: `ORACLE_ROLE` (attester), `MOTION_ROLE` (may only open a motion; batch 4).
+  CreditMarket `MARK_ROLE` (mark updater; batch 4).
 - `ReentrancyGuard` on every function that moves USDC or YES/NO. **Pull-over-push** for all
   USDC payouts — never push to arbitrary addresses.
 - **YES/NO transfers are restricted** via the OZ v5 `_update()` override: only `CLOB_ROLE`
   (CLOBSettlement, and LiquidationEngine's `forcedTransfer`) and CreditMarket may move
   tokens. Direct wallet-to-wallet transfers revert, so every movement passes a
   funding-sync path. Never loosen this.
-- `Pausable` on CreditMarket (PAUSER_ROLE halts the market during a determination window).
+- `Pausable` on CreditMarket (PAUSER_ROLE halts mint and redeem in an emergency; a credit
+  event confirmation pauses for good. Pay carry (`cure`) works while paused).
 - Emit events on every state change. CreditMarket: TokensMinted, TokensRedeemed,
   YESSettled, FundingAccrued, MarkUpdated, CreditEventTriggered, FlaggedClaimable,
-  FundingSettled, PositionCured (+ config events). CLOBSettlement: OrderFilled,
-  OrderCancelled, MinNonceUpdated, FeeCharged, FeeConfigUpdated. LiquidationEngine:
-  Liquidated. MarketRegistry: MarketRegistered, MarketActiveSet.
+  FundingSettled, PositionCured, MotionPendingSet, MotionOpened, MotionResolved,
+  MotionRefundRecorded (+ config events). CLOBSettlement:
+  OrderFilled, OrderCancelled, MinNonceUpdated, FeeCharged, FeeConfigUpdated.
+  LiquidationEngine: Liquidated. OracleRouter: CreditEventConfirmed, MotionPendingSet.
+  MarketRegistry: MarketRegistered, MarketActiveSet.
 - **Decimals quirk:** YES/NO report `decimals() == 18`, but every amount is raw 6-decimal
   USDC scale. Never normalize by 1e18.
 
@@ -249,7 +260,7 @@ drift).
 |---|---|
 | `order-book-server` | REST: `GET /markets`, `GET /orderbook?market=`, `POST /order`, `DELETE /order/:id`, `POST /orders/sync`, `GET /health`. Derives the market from the order's token; rejects bad pairs, orders under the minimum, flagged makers (`PositionFrozen`) and un-fundable YES sells (`FundingShortfall` + `minSellProceeds`). Chain pre-filters fail open — the on-chain check is the backstop. Redis books `orderbook:<slug>:*`. Rate-limited per client IP. |
 | `matching-engine` | Price-time priority per market; the earlier order is the maker; fill size = min of both remaining sizes. Settles via `fillOrders`, records `filled`. Revert handling follows the Order removal policy. `GET /health` (503 when the loop is stale). |
-| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger. Retries transient errors without double-sending; `[ALERT]` log on failure. |
+| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger — during a motion too (batch 4), but never after a confirmed credit event, nor once the runbook's "DC Yes announced" switch is set; the liquidator-bot likewise never claims after confirmation. Retries transient errors without double-sending; `[ALERT]` log on failure. |
 | `keepers/liquidation-keeper` | `GET /claimable[?market=]` — flagged positions + formulaic price P. Does not claim (claiming is permissionless). |
 | `keepers/liquidator-bot` | Team liquidator of last resort: claims EVERY flagged position promptly, profitable or not (stalls cost the InsuranceFund) — simulates first, uses only `claim()`, alerts on a short float / short InsuranceFund / pending motion — then sells the Upbet on the CLOB (crosses bids down to mark − `SELL_MAX_DISCOUNT_BPS` (3%), else rests at the mark). |
 
@@ -267,8 +278,12 @@ Key UX behaviour:
   to cover carry + fee and its pro-rata carry share; signs NO buys gross and says so; enforces
   the 1-Upbet minimum; order expiry uses chain time.
 - **PositionCard** shows Cost Basis, Equity, P&L, Breakeven Mark and (YES) Epochs To Expire;
-  a flagged position gets a cure-cost estimate + approve → `cure()` (redeem disabled while
-  flagged; `settleYES` stays enabled).
+  every Upbet position gets **"Pay carry"** (approve → `cure()`; batch 4) and a health badge
+  (alerts on-site only); a flagged position must pay to unlock (redeem disabled while flagged;
+  `settleYES` stays enabled). During a motion: a banner, and Downbets show "pending carry,
+  paid if the DC rules No". User docs say to close a position by SELLING what you hold;
+  buying the other side doesn't close it (the Upbet side can still be flagged on its own
+  carry) unless you then redeem the pair.
 - **OpenOrders** — the wallet's resting orders with on-chain Cancel / "Cancel all in this
   market", then `POST /orders/sync`.
 - Carry figures always read `currentCarryRate` on-chain — never derive carry from the mark.
@@ -403,6 +418,17 @@ CLOB sale — YES seller: settleFunding(seller) records the net debit D. PRO-RAT
   D − debtShare stays on the ledger against the YES still held. settleFunding(buyer) runs too.
 ```
 
+**Credit-event motion escrow (batch 4, `docs/design/motion-escrow-and-mark.md` §5):** while
+a motion is open, accrual is split at the EDD index (`motionIndex`). The pre-EDD part settles
+exactly as above. The post-EDD part nets within the address into escrowed credit
+(`escrowOf`: Downbet side, never paid out during the motion) or post-EDD debt (counted in
+`fundingDebt`/`owed()`, so liquidations stay live). Every collection takes ordinary debt
+first; post-EDD carry paid in cash (Pay carry, YES-sale proceeds, redeem, a liquidator's P,
+the InsuranceFund's top-up) is recorded as refundable to its payer. Records fold lazily at the
+address's next `settleFunding` (public, callable for anyone): **DC No** → escrow paid, post-EDD
+debt becomes ordinary, refunds lapse; **DC Yes** → escrow and post-EDD debt void, refunds paid.
+Escrow stays with the address that earned it (a Downbet buyer gets none of the seller's).
+
 A buyer's (or NO seller's) net debit is never collected at trade time — one party's debt
 never blocks a third party's fill. **Worked examples:** NO sells at $95 with $25 credit →
 nets $120. YES sells its whole position at $30 with $8 debit → nets $22, $8 collected. Sells
@@ -427,8 +453,12 @@ backstop.
 4. NO holders are ALWAYS made whole on a liquidation — P = owed in the normal case,
    topped up by InsuranceFund in the tail case. NO is never haircut, and collateral always
    backs every outstanding pair (no accounting freeze may break this — F1).
-5. FREEZE all flagging and claims during a pending credit-event motion (motionPending).
-   Never seize someone's protection at a discount moments before it could pay.
+5. A credit-event motion NEVER blocks trading, flagging, claims or cure — it marks the EDD.
+   Carry accrued after the motion opened is escrowed per address and resolves with it:
+   released on a DC "No", void and refunded to whoever paid it on a DC "Yes". Once a credit
+   event is confirmed, flagging and claims revert FOREVER (`flagClaimable` and
+   `clearLiquidatedPosition` revert `CreditEventAlreadyConfirmed` — on-chain, not by
+   procedure; a flagged holder exits via settleYES). Never seize a paying Upbet.
 6. Liquidation claims are permissionless and first-come — no single liquidator is
    load-bearing. (Known MVP limitation: first-valid-tx-wins has MEV/front-run exposure;
    acceptable for MVP, revisit with private relay if it becomes a problem.)
@@ -451,7 +481,13 @@ backstop.
     either side, or acting as a liquidator — while its funding keeps accruing (owed() is
     non-decreasing while flagged). The only exits are claim(), cure(), or
     post-credit-event settleYES. Liquidation itself touches ONLY the YES side: the
-    holder's NO-side credit survives a claim untouched.
+    holder's NO-side credit survives a claim untouched. (owed() may drop when a DC Yes
+    voids post-EDD debt, and by ≤ 1 wei when a motion closes — bucket rounding.)
+11. Motion escrow is conserved: at every point during an open motion, collateral covers
+    BOTH resolutions — DC "No" (pairs + all accrued Downbet credit incl. escrow, net of all
+    recorded and live Upbet debt) and DC "Yes" (every Upbet at $1 + pre-EDD credit net of
+    pre-EDD debt + every refund owed to post-EDD payers). After a confirmed event the Yes
+    world must hold (`contracts/test/invariant/EscrowMath.sol`).
 ```
 
 Tests encode these (incl. the stateful invariant suites in `contracts/test/invariant/`); if a
@@ -471,12 +507,10 @@ Build only after the current model validates PMF and the no-buffer tradeoff (tig
 frequent liquidations) proves to be a real UX problem:
 - Per-wallet prepaid USDC buffer (runway before liquidation) and a Dutch-auction discount
   ramp instead of the fixed formulaic price.
-- `prepayFunding()` — voluntary cash settlement of accrued funding for UNFLAGGED holders
-  (zeroes `fundingDebt`, resets snapshots, pushes the trigger away).
 - Shared registry-aware CLOBSettlement; Gnosis CTF tokens.
 - Explicitly NOT building: a fee-only top-up for FundingShortfall-blocked YES sales (the
-  blocked band is ≤ fee-width and the escape is one price tick); `cure()` stays exclusively
-  the flagged-position exit.
+  blocked band is ≤ fee-width and the escape is one price tick). (`prepayFunding()` is no
+  longer on the roadmap: batch 4 opens `cure()` — "Pay carry" — to every holder.)
 
 ---
 

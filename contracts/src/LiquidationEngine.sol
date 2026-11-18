@@ -7,12 +7,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 interface ICreditMarket {
     function claimable(address user) external view returns (bool);
-    function motionPending() external view returns (bool);
     function owed(address user) external view returns (uint256);
     function currentMark() external view returns (uint256);
     function yesToken() external view returns (address);
     function usdc() external view returns (address);
-    function clearLiquidatedPosition(address originalHolder, address liquidator) external;
+    function clearLiquidatedPosition(address originalHolder, address liquidator, uint256 paid, address fund) external;
 }
 
 interface IInsuranceFund {
@@ -44,7 +43,6 @@ contract LiquidationEngine is ReentrancyGuard {
     );
 
     error NotClaimable();
-    error MotionPending();
     error ZeroAddress();
 
     constructor(address _creditMarket, address _insuranceFund) {
@@ -70,7 +68,8 @@ contract LiquidationEngine is ReentrancyGuard {
     function claim(address user) external nonReentrant {
         // ── checks ───────────────────────────────────────────────────────────────
         if (!ICreditMarket(creditMarket).claimable(user)) revert NotClaimable();
-        if (ICreditMarket(creditMarket).motionPending())  revert MotionPending();
+        // A credit-event motion blocks nothing (batch 4); after a confirmed event
+        // CreditMarket.clearLiquidatedPosition reverts CreditEventAlreadyConfirmed.
 
         // ── price from live state (owed() projects accrual to this block) ─────────
         address yesAddr    = ICreditMarket(creditMarket).yesToken();
@@ -93,7 +92,9 @@ contract LiquidationEngine is ReentrancyGuard {
         // touchpoint (redeem, settleYES, a CLOB sale, or a cure). No cash is ever
         // pushed to the original holder inside claim() (pull-over-push — a
         // USDC-blacklisted holder must not be able to brick liquidation).
-        ICreditMarket(creditMarket).clearLiquidatedPosition(user, msg.sender);
+        // P and the InsuranceFund go along so CreditMarket can record who paid any
+        // post-EDD carry during an open motion (refundable if the DC rules Yes).
+        ICreditMarket(creditMarket).clearLiquidatedPosition(user, msg.sender, P, insuranceFund);
 
         // ── interactions ──────────────────────────────────────────────────────────
         // Liquidator pays P USDC → CreditMarket (replenishes NO accretion pool).

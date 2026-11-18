@@ -166,6 +166,8 @@ contract CreditMarketTest is Test {
 
         market.grantRole(market.KEEPER_ROLE(), admin); // admin = address(this)
 
+        market.grantRole(market.MARK_ROLE(), admin);
+
         vm.prank(alice);
         market.mint(1000e18);
 
@@ -214,6 +216,8 @@ contract CreditMarketTest is Test {
         assertEq(market.cumFundingPerNO(), market.cumulativeFundingPerYES(), "equal after 7 days");
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.5e18); // internally accrues at old mark then updates
         assertEq(market.cumFundingPerNO(), market.cumulativeFundingPerYES(), "equal after mark change");
 
@@ -302,6 +306,7 @@ contract CreditMarketTest is Test {
 
         // Change mark before second mint.
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.50e18);
 
         vm.prank(alice);
@@ -429,6 +434,7 @@ contract CreditMarketTest is Test {
 
         // change mark to 0.05 in the same block (no time elapsed → _accrueFunding no-op)
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
         mkt.setMark(0.05e18);
 
         // bob mints at mark=0.05 → costBasis[bob] = 0.05e18; same fundingSnapshot = 0
@@ -461,6 +467,7 @@ contract CreditMarketTest is Test {
 
         // mark collapses to 0.05 in same block (no accrual)
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
         mkt.setMark(0.05e18);
 
         // only 1 day passes → fNow ≈ 0.05/365 ≈ 1.37e14, far below m=0.05e18
@@ -492,6 +499,8 @@ contract CreditMarketTest is Test {
         assertTrue(mkt.isSeizable(bob), "must be seizable before flag");
 
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
         mkt.flagClaimable(bob);
 
         assertTrue(mkt.claimable(bob), "claimable flag is set");
@@ -522,6 +531,8 @@ contract CreditMarketTest is Test {
         assertFalse(mkt.isSeizable(bob), "must not be seizable after 1 day");
 
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
         vm.expectRevert(CreditMarket.PositionNotSeizable.selector);
         mkt.flagClaimable(bob);
     }
@@ -764,6 +775,7 @@ contract CreditMarketTest is Test {
     function test_SettleYES_ChargesFullLiveAccrual_NoFreeze() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
 
         address bob = makeAddr("bob-freeze-settle");
         mockUsdc.mint(bob, 1000e18);
@@ -810,6 +822,7 @@ contract CreditMarketTest is Test {
     function test_Lockout_MintAndRedeem_Revert() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
 
         address bob = makeAddr("bob-lockout");
         mockUsdc.mint(bob, 1000e18);
@@ -845,6 +858,7 @@ contract CreditMarketTest is Test {
     function test_Cure_PaysLiveOwedIncludingPostFlagAccrual() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
 
         address bob = makeAddr("bob-cure");
         mockUsdc.mint(bob, 1000e18);
@@ -903,13 +917,52 @@ contract CreditMarketTest is Test {
             "post-cure accrual counts only from the cure time");
     }
 
-    function test_Cure_NonFlagged_Reverts() public {
+    // Batch 4: setMark needs MARK_ROLE; the flagging key (KEEPER_ROLE) can't move the mark.
+    function test_SetMark_RequiresMarkRole() public {
+        address k = makeAddr("keeperOnly");
+        market.grantRole(market.KEEPER_ROLE(), k);
+        vm.prank(k);
+        vm.expectRevert();
+        market.setMark(0.25e18);
+
+        address u = makeAddr("markUpdater");
+        market.grantRole(market.MARK_ROLE(), u);
+        vm.prank(u);
+        market.setMark(0.25e18);
+        assertEq(market.currentMark(), 0.25e18);
+    }
+
+    // Batch 4: "Pay carry" — any holder may cure at any time, flagged or not.
+    function test_Cure_NonFlagged_PaysCarryAndResetsClock() public {
         vm.prank(alice);
         market.mint(100e18);
+        vm.warp(block.timestamp + 30 days);
+        uint256 due = market.owed(alice);
+        assertGt(due, 0, "carry accrued");
 
+        uint256 collBefore = mockUsdc.balanceOf(address(market));
         vm.prank(alice);
-        vm.expectRevert(CreditMarket.PositionNotFlagged.selector);
         market.cure();
+
+        assertEq(market.owed(alice), 0, "nothing owed after paying carry");
+        assertEq(market.fundingDebt(alice), 0, "ledger cleared");
+        // Alice minted a pair, so her Downbet credit nets her Upbet carry: she pays only
+        // the rounding (Upbet debit rounds up, Downbet credit down).
+        uint256 collAfter = mockUsdc.balanceOf(address(market));
+        assertGe(collAfter, collBefore, "pay carry never drains collateral");
+        assertLe(collAfter - collBefore, 1, "pair holder pays only rounding");
+        assertFalse(market.claimable(alice), "still unflagged");
+    }
+
+    function test_Cure_WorksWhilePaused() public {
+        vm.prank(alice);
+        market.mint(100e18);
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(pauser);
+        market.pause();
+        vm.prank(alice);
+        market.cure();
+        assertEq(market.owed(alice), 0, "pay carry works while paused");
     }
 
     // ─── F4 regression + owed()/display-layer coverage (2026-09-26 fix) ───────
@@ -924,6 +977,7 @@ contract CreditMarketTest is Test {
     function test_F4_TradeResetsSnapshot_ButOwedStillTriggersSeizure() public {
         CreditMarket mkt = _marketAt(0.05e18);
         mkt.grantRole(mkt.KEEPER_ROLE(), admin);
+        mkt.grantRole(mkt.MARK_ROLE(), admin);
 
         address bob = makeAddr("bob-f4");
         mockUsdc.mint(bob, 10_000e18);
@@ -1123,6 +1177,7 @@ contract CreditMarketTest is Test {
 
     function test_SetMark_KeeperWithinBound_Succeeds_AccruesAtOldMarkFirst() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMarkBounds(0.05e18, 1 hours);
         vm.warp(block.timestamp + 2 hours); // clear the constructor-set interval
 
@@ -1142,6 +1197,7 @@ contract CreditMarketTest is Test {
 
     function test_SetMark_StepTooLarge_Reverts() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMarkBounds(0.05e18, 1 hours);
         vm.warp(block.timestamp + 2 hours);
 
@@ -1152,6 +1208,7 @@ contract CreditMarketTest is Test {
 
     function test_SetMark_TooSoon_Reverts_ThenSucceedsAfterInterval() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMarkBounds(0.05e18, 1 hours);
         vm.warp(block.timestamp + 2 hours);
 
@@ -1176,6 +1233,7 @@ contract CreditMarketTest is Test {
     // from the first update to the last).
     function test_SetMark_WalkingFarRequiresMultipleIntervals() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMarkBounds(0.05e18, 1 hours);
         vm.warp(block.timestamp + 1 hours); // clear the constructor-set interval
 
@@ -1197,6 +1255,7 @@ contract CreditMarketTest is Test {
 
     function test_SetMark_ZeroOrOneE18_Reverts() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
 
         vm.expectRevert(CreditMarket.InvalidMark.selector);
         market.setMark(0);
@@ -1212,6 +1271,7 @@ contract CreditMarketTest is Test {
     // a big jump works immediately, with no warp needed between calls.
     function test_SetMark_BoundsOffByDefault_BigJumpWorks() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
 
         market.setMark(0.05e18); // big jump down from 0.23e18
         assertEq(market.currentMark(), 0.05e18);
@@ -1222,6 +1282,7 @@ contract CreditMarketTest is Test {
 
     function test_AdminSetMark_BypassesStepAndInterval_ResetsIntervalClock() public {
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMarkBounds(0.01e18, 1 hours); // tight bound
 
         uint256 oldMark = market.currentMark(); // 0.23e18
@@ -1347,6 +1408,8 @@ contract CreditMarketTest is Test {
         assertEq(market.currentCarryRate(), market.carryRateFor(0.23e18), "constructor");
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.25e18);
         assertEq(market.currentCarryRate(), market.carryRateFor(0.25e18), "keeper setMark");
 

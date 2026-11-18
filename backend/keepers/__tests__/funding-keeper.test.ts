@@ -449,6 +449,52 @@ describe('FundingKeeper — seizure checks', () => {
 // whether the accrueFunding phase succeeded — an RPC blip or on-chain revert
 // at accrual time must not also cost up to 8h of missed liquidation coverage.
 
+describe('FundingKeeper — flagging guard (credit event / motion)', () => {
+  const run = async (gate: (fn: string) => Promise<unknown> | undefined) => {
+    const { publicClient, walletClient } = makeMocks({
+      readContract: ({ functionName }) => {
+        const g = gate(functionName)
+        if (g) return g
+        if (functionName === 'isSeizable') return Promise.resolve(true)
+        return defaultReadContract({ functionName })
+      },
+    })
+    const { scheduler, fire } = makeMockScheduler()
+    const keeper = new FundingKeeper(publicClient, walletClient, makeFakeHolderSource([HOLDER_ADDR]), CONFIG)
+    keeper.start(scheduler)
+    await fire()
+    const calls = (walletClient.writeContract as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c: unknown[]) => (c[0] as { functionName: string }).functionName,
+    )
+    return { calls, publicClient }
+  }
+
+  it('skips flagging when creditEventConfirmed, but still accrues', async () => {
+    const { calls, publicClient } = await run(fn => fn === 'creditEventConfirmed' ? Promise.resolve(true) : undefined)
+    expect(calls).toContain('accrueFunding')
+    expect(calls).not.toContain('flagClaimable')
+    const reads = (publicClient.readContract as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => (c[0] as { functionName: string }).functionName)
+    expect(reads).not.toContain('isSeizable')
+  })
+
+  it('skips flagging when motionPending', async () => {
+    const { calls } = await run(fn => fn === 'motionPending' ? Promise.resolve(true) : undefined)
+    expect(calls).toContain('accrueFunding')
+    expect(calls).not.toContain('flagClaimable')
+  })
+
+  it('skips flagging (fail safe) when the state read fails, without crashing', async () => {
+    const { calls } = await run(fn => fn === 'creditEventConfirmed' ? Promise.reject(new Error('rpc down')) : undefined)
+    expect(calls).toContain('accrueFunding')
+    expect(calls).not.toContain('flagClaimable')
+  })
+
+  it('still flags when neither is set', async () => {
+    const { calls } = await run(() => undefined)
+    expect(calls).toContain('flagClaimable')
+  })
+})
+
 describe('FundingKeeper — seizure checks survive an accrual failure', () => {
   const seizableReadContract = ({ functionName }: { functionName: string }): Promise<unknown> => {
     if (functionName === 'claimable')  return Promise.resolve(false)

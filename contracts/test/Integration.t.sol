@@ -387,6 +387,7 @@ contract IntegrationV1bTest is Test {
 
         // ── keeper ─────────────────────────────────────────────────────────
         market.grantRole(market.KEEPER_ROLE(), keeper);
+        market.grantRole(market.MARK_ROLE(), keeper);
 
         // ── fund actors ────────────────────────────────────────────────────
         usdc.mint(alice, 1_000e18);

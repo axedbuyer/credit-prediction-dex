@@ -66,6 +66,13 @@ export const CREDIT_MARKET_ABI = [
     outputs: [{ name: '', type: 'bool' }],
   },
   {
+    name: 'creditEventConfirmed',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
     name: 'currentMark',
     type: 'function' as const,
     stateMutability: 'view' as const,
@@ -260,6 +267,7 @@ export interface BotMarketsProvider {
 
 export type SkipReason =
   | 'motionPending'
+  | 'creditEventConfirmed'
   | 'zeroBalance'
   | 'insufficientFloat'
   | 'notClaimable'
@@ -286,6 +294,7 @@ export interface BotMarketHealth {
   lastError: string | null
   yesBalance: string | null
   motionPending: boolean | null
+  creditEventConfirmed: boolean | null
   pendingClaims: number
   pendingTailShortfall: string
   holderIndex: HolderIndexStatus
@@ -327,6 +336,7 @@ interface MarketBotState {
   lastError: string | null
   yesBalance: bigint | null
   motionPending: boolean | null
+  creditEventConfirmed: boolean | null
   pendingClaims: number
   pendingTailShortfall: bigint
 }
@@ -572,7 +582,7 @@ export class LiquidatorBot {
   private mstate(slug: string): MarketBotState {
     let s = this.marketStates.get(slug)
     if (!s) {
-      s = { lastCycleAt: null, claims: 0, tailClaims: 0, skippedByReason: {}, lastError: null, yesBalance: null, motionPending: null, pendingClaims: 0, pendingTailShortfall: 0n }
+      s = { lastCycleAt: null, claims: 0, tailClaims: 0, skippedByReason: {}, lastError: null, yesBalance: null, motionPending: null, creditEventConfirmed: null, pendingClaims: 0, pendingTailShortfall: 0n }
       this.marketStates.set(slug, s)
     }
     return s
@@ -598,7 +608,7 @@ export class LiquidatorBot {
     const markets = this.provider.markets()
 
     // ── 1. per-market state ────────────────────────────────────────────────
-    const live: Array<{ market: BotMarket; motionPending: boolean; currentMark: bigint }> = []
+    const live: Array<{ market: BotMarket; motionPending: boolean; creditEventConfirmed: boolean; currentMark: bigint }> = []
     for (const market of markets) {
       try {
         await market.holderSource.refresh()
@@ -607,7 +617,7 @@ export class LiquidatorBot {
       }
 
       try {
-        const [motionPending, currentMark] = await Promise.all([
+        const [motionPending, creditEventConfirmed, currentMark] = await Promise.all([
           this.publicClient.readContract({
             address:      market.creditMarketAddress,
             abi:          CREDIT_MARKET_ABI,
@@ -616,11 +626,17 @@ export class LiquidatorBot {
           this.publicClient.readContract({
             address:      market.creditMarketAddress,
             abi:          CREDIT_MARKET_ABI,
+            functionName: 'creditEventConfirmed',
+          }) as Promise<boolean>,
+          this.publicClient.readContract({
+            address:      market.creditMarketAddress,
+            abi:          CREDIT_MARKET_ABI,
             functionName: 'currentMark',
           }) as Promise<bigint>,
         ])
         this.mstate(market.slug).motionPending = motionPending
-        live.push({ market, motionPending, currentMark })
+        this.mstate(market.slug).creditEventConfirmed = creditEventConfirmed
+        live.push({ market, motionPending, creditEventConfirmed, currentMark })
       } catch (err) {
         console.error(`[liquidator-bot] ${ts} — failed to read market state for ${market.slug}:`, err)
         this.setError(market.slug, this.errMsg(err))
@@ -629,7 +645,12 @@ export class LiquidatorBot {
 
     // ── 2. discovery across every non-frozen market ────────────────────────
     const pending: PendingClaim[] = []
-    for (const { market, motionPending, currentMark } of live) {
+    for (const { market, motionPending, creditEventConfirmed, currentMark } of live) {
+      if (creditEventConfirmed) {
+        console.log(`[liquidator-bot] ${ts} — ${market.slug}: credit event confirmed — never claiming in this market`)
+        this.bumpSkip('creditEventConfirmed', market.slug)
+        continue
+      }
       if (motionPending) {
         console.log(`[liquidator-bot] ${ts} — ${market.slug}: motion pending — skipping all claims this cycle`)
         this.bumpSkip('motionPending', market.slug)
@@ -1117,6 +1138,7 @@ export class LiquidatorBot {
           lastError:            ms.lastError,
           yesBalance:           ms.yesBalance?.toString() ?? null,
           motionPending:        ms.motionPending,
+          creditEventConfirmed: ms.creditEventConfirmed,
           pendingClaims:        ms.pendingClaims,
           pendingTailShortfall: ms.pendingTailShortfall.toString(),
           holderIndex:          m.holderSource.status(),

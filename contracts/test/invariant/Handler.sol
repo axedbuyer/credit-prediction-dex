@@ -11,6 +11,8 @@ import {CLOBSettlement} from "../../src/CLOBSettlement.sol";
 import {OracleRouter} from "../../src/OracleRouter.sol";
 import {InsuranceFund} from "../../src/InsuranceFund.sol";
 import {LiquidationEngine} from "../../src/LiquidationEngine.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {EscrowMath} from "./EscrowMath.sol";
 
 contract MockUSDC is ERC20 {
     constructor() ERC20("USD Coin", "USDC") {}
@@ -81,9 +83,14 @@ contract Handler is Test {
     // if no time elapsed).
     uint256 public ghost_owedDecreasedWhileFlagged;
 
-    // Invariant 5 — nothing seizes/claims during a pending credit-event motion.
-    uint256 public ghost_motionPendingFlagSuccesses;
-    uint256 public ghost_motionPendingClaimSuccesses;
+    // Invariant 5 (batch 4): a motion blocks nothing — these only count coverage.
+    uint256 public ghost_motionFlagSuccesses;
+    uint256 public ghost_motionClaimSuccesses;
+    uint256 public ghost_motionCures;
+    // Invariant 5 (post-event half): once creditEventConfirmed, no flag or claim may
+    // ever succeed — a paying Upbet must never be seized at the stale mark.
+    uint256 public ghost_postEventFlagSuccesses;
+    uint256 public ghost_postEventClaimSuccesses;
 
     // F4-type direct probe (docs/security/invariant-findings-2026-09-26.md,
     // "Recommended fix" + "Next"): whenever an actor's owed() + one epoch of
@@ -96,6 +103,10 @@ contract Handler is Test {
     // drops the fundingDebt term back out) and attempts the flag; any revert
     // increments this ghost, which the invariant asserts stays 0.
     uint256 public ghost_missedSeizureFlag;
+    // Pay carry must leave nothing owed (same block, so no new accrual).
+    uint256 public ghost_owedAfterCure;
+    bool internal _confirmedBefore;
+    uint256 internal _motionBefore;
 
     // Liquidation ledger must be fully cleared (fundingDebt==0) for the original
     // holder immediately after every successful claim(). (frozenFunding no longer
@@ -226,17 +237,14 @@ contract Handler is Test {
     // every user, flagged or not (flagged users just can't reach it except via
     // cure()/settleYES()).
     function _projectSettleDelta(address user) internal view returns (int256 delta) {
-        uint256 yesBal = yesToken.balanceOf(user);
-        uint256 noBal = noToken.balanceOf(user);
+        return EscrowMath.projectSettle(_ctx(), user, yesToken.balanceOf(user), noToken.balanceOf(user));
+    }
 
+    // Projection context: the funding index as of now (settleFunding accrues first).
+    function _ctx() internal view returns (EscrowMath.Ctx memory) {
         uint256 elapsed = block.timestamp - market.lastFundingTime();
-        uint256 projectedCum = market.cumulativeFundingPerYES() + market.currentCarryRate() * elapsed / 365 days;
-
-        uint256 yesOwed = _ceil1e18(yesBal * (projectedCum - market.fundingSnapshot(user))); // YES debit rounds up
-        uint256 noCredit = noBal * (projectedCum - market.snapNO(user)) / 1e18;
-        uint256 debit = market.fundingDebt(user) + yesOwed;
-
-        delta = noCredit >= debit ? int256(noCredit - debit) : -int256(debit - noCredit);
+        uint256 idx = market.cumulativeFundingPerYES() + market.currentCarryRate() * elapsed / 365 days;
+        return EscrowMath.Ctx(market, IERC20(address(yesToken)), IERC20(address(noToken)), idx);
     }
 
     function _sign(uint256 key, CLOBSettlement.Order memory order) internal view returns (bytes memory) {
@@ -263,13 +271,20 @@ contract Handler is Test {
             snap[i] = wasFlagged[i] ? market.owed(actors[i]) : 0;
         }
         uint256 foreignBefore = watchedMarket == address(0) ? 0 : usdc.balanceOf(watchedMarket);
+        _confirmedBefore = market.creditEventConfirmed(); // storage: keeps clobTrade's stack shallow
+        _motionBefore = market.motionId() * 2 + (market.motionPending() ? 1 : 0);
         _;
         if (watchedMarket != address(0) && usdc.balanceOf(watchedMarket) != foreignBefore) {
             ghost_foreignCollateralDelta++;
         }
-        for (uint256 i = 0; i < n; i++) {
+        // A DC Yes (confirm) legitimately voids post-EDD debt, so owed() may fall then.
+        bool justConfirmed = !_confirmedBefore && market.creditEventConfirmed();
+        for (uint256 i = 0; i < n && !justConfirmed; i++) {
             if (wasFlagged[i] && market.claimable(actors[i])) {
-                if (market.owed(actors[i]) < snap[i]) {
+                // Closing a motion merges the live accrual's two rounded-up buckets
+                // (pre/post EDD) back into one, so owed() may drop by at most 1 wei then.
+                bool closed = _motionBefore % 2 == 1 && !market.motionPending();
+                if (market.owed(actors[i]) + (closed ? 1 : 0) < snap[i]) {
                     ghost_owedDecreasedWhileFlagged++;
                 }
             }
@@ -726,8 +741,10 @@ contract Handler is Test {
     function flagClaimable(uint256 actorSeed) external trackFlagged {
         address a = _actor(actorSeed);
         bool pendingBefore = market.motionPending();
+        bool eventBefore = market.creditEventConfirmed();
         try market.flagClaimable(a) {
-            if (pendingBefore) ghost_motionPendingFlagSuccesses++;
+            if (pendingBefore) ghost_motionFlagSuccesses++;
+            if (eventBefore) ghost_postEventFlagSuccesses++;
             _record("flagClaimable", true);
         } catch {
             _record("flagClaimable", false);
@@ -867,7 +884,7 @@ contract Handler is Test {
     // flagClaimable() MUST succeed. Any revert is a direct violation of the
     // trigger spec and increments ghost_missedSeizureFlag.
     function probeMissedSeizureFlag() external trackFlagged {
-        if (market.motionPending()) {
+        if (market.creditEventConfirmed()) {
             _record("probeMissedSeizureFlag", false);
             return;
         }
@@ -897,15 +914,14 @@ contract Handler is Test {
         _record("probeMissedSeizureFlag", probedAny);
     }
 
+    // Batch 4 "Pay carry": any actor may cure, flagged or not.
     function cure(uint256 actorSeed) external trackFlagged {
         address a = _actor(actorSeed);
-        if (!market.claimable(a)) {
-            _record("cure", false);
-            return;
-        }
-
+        bool pendingBefore = market.motionPending();
         vm.prank(a);
         try market.cure() {
+            if (pendingBefore) ghost_motionCures++;
+            if (market.owed(a) != 0) ghost_owedAfterCure++;
             _record("cure", true);
         } catch {
             _record("cure", false);
@@ -925,6 +941,7 @@ contract Handler is Test {
         // did). No special-casing needed here any more -- a flagged liquidator's
         // claim attempt is just another expected revert, tallied like any other.
         bool pendingBefore = market.motionPending();
+        bool eventBefore = market.creditEventConfirmed();
         uint256 Q = yesToken.balanceOf(target);
         uint256 m = market.currentMark();
         uint256 owedTotal = market.owed(target);
@@ -943,7 +960,8 @@ contract Handler is Test {
             if (usdc.balanceOf(address(market)) != collateralBefore + owedTotal - liquidatorPayout) {
                 ghost_claimCollateralMismatch++;
             }
-            if (pendingBefore) ghost_motionPendingClaimSuccesses++;
+            if (pendingBefore) ghost_motionClaimSuccesses++;
+            if (eventBefore) ghost_postEventClaimSuccesses++;
             if (market.fundingDebt(target) != 0) {
                 ghost_liquidationLedgerNotCleared++;
             }
@@ -965,7 +983,7 @@ contract Handler is Test {
         address victim = _actor(victimSeed);
         address liquidator = _actor(liqSeed);
         if (
-            victim == liquidator || market.creditEventConfirmed() || market.motionPending() || market.paused()
+            victim == liquidator || market.creditEventConfirmed() || market.paused()
                 || market.claimable(victim) || market.claimable(liquidator)
         ) {
             _record("scenarioTailClaim", false);
@@ -996,6 +1014,47 @@ contract Handler is Test {
         try market.adminSetMark(0.0001e18) {} catch {}
         this.liquidationClaim(liqSeed, victimSeed);
         _record("scenarioTailClaim", true);
+    }
+
+    // Batch-4 scenario: open a motion (if none), run an actor past the trigger on
+    // post-EDD carry, flag + claim it, have another actor pay carry, then resolve the
+    // motion No or Yes (Yes throttled, as in confirmCreditEvent). Every step bails
+    // quietly when its precondition fails; the solvency invariant checks both worlds
+    // after each one.
+    function scenarioMotionLifecycle(uint256 victimSeed, uint256 liqSeed, uint256 resolveSeed) external trackFlagged {
+        address victim = _actor(victimSeed);
+        address liquidator = _actor(liqSeed);
+        if (market.creditEventConfirmed() || market.paused() || victim == liquidator) {
+            _record("scenarioMotionLifecycle", false);
+            return;
+        }
+        if (!market.motionPending()) {
+            try market.setMotionPending(true) {} catch {}
+        }
+        if (yesToken.balanceOf(victim) == 0 && !market.claimable(victim)) {
+            uint256 amount = 10e18;
+            uint256 supplyBefore = yesToken.totalSupply();
+            vm.prank(victim);
+            try market.mint(amount) {
+                ghost_yesMinted += amount;
+                if (supplyBefore + amount > market.depositCap()) ghost_mintExceededCap++;
+            } catch {}
+        }
+        vm.warp(block.timestamp + 400 days);
+        market.accrueFunding();
+        if (!market.claimable(victim) && market.isSeizable(victim)) {
+            try market.flagClaimable(victim) {
+                ghost_motionFlagSuccesses++;
+            } catch {}
+        }
+        if (market.claimable(victim) && !market.claimable(liquidator)) this.liquidationClaim(liqSeed, victimSeed);
+        this.cure(resolveSeed); // a random actor pays carry mid-motion
+        if (resolveSeed % 3 == 0) {
+            try market.setMotionPending(false) {} catch {}
+        } else if (resolveSeed % 25 == 1) {
+            try router.confirmCreditEvent() {} catch {}
+        }
+        _record("scenarioMotionLifecycle", true);
     }
 
     // Multi-market-suite scenario: mint for the seller, then a YES sale through clobTrade

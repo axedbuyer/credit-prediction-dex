@@ -9,6 +9,8 @@ import {CLOBSettlement} from "../../src/CLOBSettlement.sol";
 import {OracleRouter} from "../../src/OracleRouter.sol";
 import {InsuranceFund} from "../../src/InsuranceFund.sol";
 import {LiquidationEngine} from "../../src/LiquidationEngine.sol";
+import {EscrowMath} from "./EscrowMath.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Handler, MockUSDC} from "./Handler.sol";
 
 /// @title Stateful invariant suite for the Credit Prediction DEX protocol
@@ -124,6 +126,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         clob.grantRole(clob.OPERATOR_ROLE(), admin); // direct regression tests below
 
         market.grantRole(market.KEEPER_ROLE(), address(handler));
+
+        market.grantRole(market.MARK_ROLE(), address(handler));
         market.grantRole(market.ORACLE_ROLE(), address(handler)); // setMotionPending
         market.grantRole(market.DEFAULT_ADMIN_ROLE(), address(handler)); // adminSetMark (bypasses the bounds above)
         router.grantRole(router.ORACLE_ROLE(), address(handler)); // confirmCreditEvent
@@ -139,7 +143,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](21);
+        bytes4[] memory selectors = new bytes4[](22);
         selectors[0] = Handler.mint.selector;
         selectors[1] = Handler.redeem.selector;
         selectors[2] = Handler.settleYES.selector;
@@ -161,6 +165,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         selectors[18] = Handler.adminSetMark.selector;
         selectors[19] = Handler.probeMarkStepBound.selector;
         selectors[20] = Handler.probeDepositCap.selector;
+        selectors[21] = Handler.scenarioMotionLifecycle.selector; // batch 4: motion + escrow paths
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -211,55 +216,33 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
     // flagged, because a flag no longer changes how funding is priced (it only
     // locks mint/redeem/trade). See the contract-level doc comment above for the
     // full derivation.
+    // Batch 4: the formula now covers both resolutions of an open motion
+    // (EscrowMath.solvency): if the DC ruled No right now, collateral must back pairs
+    // plus released escrow; if it ruled Yes, every Upbet at $1 plus refunds to post-EDD
+    // payers. After a confirmed event only the Yes world applies. Same asymmetric
+    // tolerance as before: never short; above only by settlement rounding.
     function invariant_CollateralSolvencyPreEvent() public view {
-        if (market.creditEventConfirmed()) return;
-
-        uint256 cumYES = market.cumulativeFundingPerYES();
-        uint256 cumNO = market.cumFundingPerNO();
-
-        int256 sumFundingDebt;
-        int256 sumUnsyncedYesDebit;
-        int256 sumUnsyncedNoCredit;
-
-        uint256 n = handler.numActors();
-        for (uint256 i = 0; i < n; i++) {
-            address u = handler.actorAt(i);
-
-            sumFundingDebt += int256(market.fundingDebt(u));
-
-            uint256 yesBal = yesToken.balanceOf(u);
-            uint256 fPerUnit = cumYES - market.fundingSnapshot(u);
-            sumUnsyncedYesDebit += int256(_ceilDiv1e18(yesBal * fPerUnit)); // as settleFunding would record it
-
-            uint256 noBal = noToken.balanceOf(u);
-            uint256 nPerUnit = cumNO - market.snapNO(u);
-            sumUnsyncedNoCredit += int256(noBal * nPerUnit / 1e18);
-        }
-
-        int256 expected =
-            int256(yesToken.totalSupply()) - sumFundingDebt - sumUnsyncedYesDebit + sumUnsyncedNoCredit;
-
-        // Two-sided, deliberately asymmetric check.
-        //
-        // (1) Projection noise: this reconstructs "what the balance SHOULD be now" by
-        // projecting every actor's unsynced funding as if all were synced at once, and
-        // per-actor rounding of fragmented holdings can differ from the aggregate by
-        // < 1 wei per actor per side (see test_Repro_SolvencyFormulaOneWeiRoundingSlack)
-        // — hence 2*N_ACTORS of slack in either direction.
-        //
-        // (2) Settlement rounding: each settleFunding rounds a YES debit UP and a NO
-        // credit DOWN (batch 3), so every settlement leaves < 1 wei per side IN
-        // collateral. That surplus accumulates with the number of settlements, so the
-        // balance may sit above `expected` — but never below it. Before batch 3 the
-        // YES debit rounded down and the deep 2-market run (partial fills) drove
-        // collateral 11 wei SHORT of this formula; that direction is now a hard failure.
-        //
-        // The upper bound only has to catch a real over-collection, which would be many
-        // orders of magnitude above rounding (token amounts here are 1e15+ per mint).
+        (int256 noWorld, int256 yesWorld, bool hasYes) = EscrowMath.solvency(_escrowCtx(), _actors(), address(insuranceFund));
         int256 bal = int256(usdc.balanceOf(address(market)));
-        int256 slack = int256(2 * handler.numActors());
-        assertGe(bal, expected - slack, "CreditMarket collateral SHORT of the derived solvency formula (invariants 4/7/9)");
-        assertLe(bal, expected + slack + SETTLEMENT_ROUNDING_BUDGET, "CreditMarket collateral above the solvency formula by more than settlement rounding");
+        int256 slack = int256(4 * handler.numActors() + 4);
+        if (!market.creditEventConfirmed()) {
+            assertGe(bal, noWorld - slack, "CreditMarket collateral SHORT of the derived solvency formula (invariants 4/7/9)");
+            assertLe(bal, noWorld + slack + SETTLEMENT_ROUNDING_BUDGET, "CreditMarket collateral above the solvency formula by more than settlement rounding");
+        }
+        if (hasYes) {
+            assertGe(bal, yesWorld - slack, "collateral SHORT of the DC-Yes world (Upbets at $1 + refunds) - invariant 11");
+            assertLe(bal, yesWorld + slack + SETTLEMENT_ROUNDING_BUDGET, "collateral above the DC-Yes world by more than rounding - invariant 11");
+        }
+    }
+
+    function _escrowCtx() internal view returns (EscrowMath.Ctx memory) {
+        return EscrowMath.Ctx(market, IERC20(address(yesToken)), IERC20(address(noToken)), market.cumulativeFundingPerYES());
+    }
+
+    function _actors() internal view returns (address[] memory a) {
+        uint256 n = handler.numActors();
+        a = new address[](n);
+        for (uint256 i = 0; i < n; i++) a[i] = handler.actorAt(i);
     }
 
     // Generous ceiling for the rounding surplus a run can accumulate (< 2 wei per
@@ -333,19 +316,17 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         assertTrue(m > 0 && m < 1e18, "currentMark left the valid (0, 1e18) range");
     }
 
-    // ── invariant 5: no flag/claim succeeds during a pending motion ─────────────
+    // ── pay carry clears the obligation ─────────────────────────────────────────
 
-    function invariant_NoActionDuringMotionPending() public view {
-        assertEq(
-            handler.ghost_motionPendingFlagSuccesses(),
-            0,
-            "flagClaimable() succeeded while motionPending was true"
-        );
-        assertEq(
-            handler.ghost_motionPendingClaimSuccesses(),
-            0,
-            "LiquidationEngine.claim() succeeded while motionPending was true"
-        );
+    function invariant_PayCarryLeavesNothingOwed() public view {
+        assertEq(handler.ghost_owedAfterCure(), 0, "cure() left owed() > 0");
+    }
+
+    // ── invariant 5, post-event half: no flag/claim after a confirmed credit event ─
+
+    function invariant_NoLiquidationAfterCreditEvent() public view {
+        assertEq(handler.ghost_postEventFlagSuccesses(), 0, "flagClaimable() succeeded after a confirmed credit event");
+        assertEq(handler.ghost_postEventClaimSuccesses(), 0, "claim() succeeded after a confirmed credit event");
     }
 
     // ── liquidation ledger fully cleared after every claim ───────────────────────
@@ -392,7 +373,6 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
     // cannot depend on it if an independent, cost-basis-free reimplementation
     // always agrees with the contract's own isSeizable().
     function invariant_SeizureTriggerConsistency() public view {
-        uint256 cumYES = market.cumulativeFundingPerYES();
         uint256 m = market.currentMark();
         uint256 epochLength = market.epochLength();
 
@@ -403,8 +383,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
 
             bool expected;
             if (yesBal != 0) {
-                uint256 accruedPerUnit = cumYES - market.fundingSnapshot(u);
-                uint256 owedTotal = market.fundingDebt(u) + _ceilDiv1e18(yesBal * accruedPerUnit); // YES debit rounds up
+                uint256 owedTotal = EscrowMath.owed(_escrowCtx(), u); // per-bucket YES debit rounds up
                 uint256 value = yesBal * m / 1e18;
                 uint256 nextEpoch = yesBal * (market.currentCarryRate() * epochLength / 365 days) / 1e18;
                 // Evaluated in totals (value vs owed+nextEpoch) rather than
@@ -556,6 +535,8 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         vm.stopPrank();
 
         market.grantRole(market.KEEPER_ROLE(), address(this));
+
+        market.grantRole(market.MARK_ROLE(), address(this));
     }
 
     function _reproMintAndSplit(ReproActors memory a) internal {
@@ -825,6 +806,7 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         console2.log(handler.callSummary());
         console2.log("normalCaseClaims", handler.ghost_normalCaseClaims());
         console2.log("tailCaseClaims", handler.ghost_tailCaseClaims());
+        console2.log("flags/claims/cures during an open motion", handler.ghost_motionFlagSuccesses(), handler.ghost_motionClaimSuccesses(), handler.ghost_motionCures());
         console2.log("yesMinted", handler.ghost_yesMinted());
         console2.log("yesBurnedTotal", handler.ghost_yesBurnedTotal());
         console2.log("noBurnedTotal", handler.ghost_noBurnedTotal());

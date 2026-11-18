@@ -32,8 +32,11 @@ abstract contract MarketScriptBase is Script {
     uint256 constant FEE_BPS = 50;
     uint256 constant INSURANCE_SHARE_BPS = 5_000;
     uint256 constant DEFAULT_DEPOSIT_CAP = 50_000e6;
-    uint256 constant DEFAULT_MAX_MARK_STEP = 0.05e18;
-    uint256 constant DEFAULT_MIN_MARK_INTERVAL = 1 hours;
+    // Batch 4: the mark follows trades, so the bound is a wide circuit breaker against a bad
+    // or stolen updater key, not a speed limit (owner decision Q2): 50 points per update,
+    // 10 minutes apart — 10% → 95% takes two updates.
+    uint256 constant DEFAULT_MAX_MARK_STEP = 0.50e18;
+    uint256 constant DEFAULT_MIN_MARK_INTERVAL = 10 minutes;
     address constant DEFAULT_KEEPER = 0x63F98358246D5860A5b4c85fBB7936494F4FeC54;
     // The matching engine's settler wallet: CLOBSettlement OPERATOR_ROLE (only it may submit
     // fills — docs/partial-fills-plan.md decision E). OPERATOR_ADDRESS overrides.
@@ -61,6 +64,8 @@ abstract contract MarketScriptBase is Script {
     address internal _liquidationEngine;
 
     address internal _keeperAddress;
+    address internal _markUpdater;  // MARK_ROLE (setMark); address(0) = not granted yet
+    address internal _motionOpener; // OracleRouter MOTION_ROLE (open only); address(0) = none
     address internal _operatorAddress;
     address internal _pauserAddress;
     address internal _oracleAttester;
@@ -82,6 +87,9 @@ abstract contract MarketScriptBase is Script {
     function _readOpsEnv() internal {
         _teamWallet = vm.envOr("TEAM_WALLET", _deployer);
         _keeperAddress = vm.envOr("KEEPER_ADDRESS", DEFAULT_KEEPER);
+        // Optional (no default key): grant later with grantRole if unset at deploy.
+        _markUpdater = vm.envOr("MARK_UPDATER_ADDRESS", address(0));
+        _motionOpener = vm.envOr("MOTION_OPENER_ADDRESS", address(0));
         _operatorAddress = vm.envOr("OPERATOR_ADDRESS", DEFAULT_OPERATOR);
         _pauserAddress = vm.envOr("PAUSER_ADDRESS", _deployer);
         _oracleAttester = vm.envOr("ORACLE_ATTESTER_ADDRESS", _deployer);
@@ -148,6 +156,8 @@ abstract contract MarketScriptBase is Script {
         insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(), address(engine));
 
         market.grantRole(market.KEEPER_ROLE(), _keeperAddress);
+        if (_markUpdater != address(0)) market.grantRole(market.MARK_ROLE(), _markUpdater);
+        if (_motionOpener != address(0)) oracleRouter.grantRole(oracleRouter.MOTION_ROLE(), _motionOpener);
         clob.grantRole(clob.OPERATOR_ROLE(), _operatorAddress);
         market.grantRole(market.PAUSER_ROLE(), _pauserAddress);
         oracleRouter.grantRole(oracleRouter.ORACLE_ROLE(), _oracleAttester);
@@ -213,6 +223,13 @@ abstract contract MarketScriptBase is Script {
 
         // Ops roles
         require(market.hasRole(market.KEEPER_ROLE(), _keeperAddress), "assert: KEEPER_ROLE");
+        if (_markUpdater != address(0)) {
+            require(market.hasRole(market.MARK_ROLE(), _markUpdater), "assert: MARK_ROLE");
+            require(_markUpdater != _keeperAddress, "assert: mark updater must not be the flagging keeper");
+        }
+        if (_motionOpener != address(0)) {
+            require(oracleRouter.hasRole(oracleRouter.MOTION_ROLE(), _motionOpener), "assert: router MOTION_ROLE");
+        }
         require(clob.hasRole(clob.OPERATOR_ROLE(), _operatorAddress), "assert: clob OPERATOR_ROLE");
         require(market.hasRole(market.PAUSER_ROLE(), _pauserAddress), "assert: PAUSER_ROLE");
 

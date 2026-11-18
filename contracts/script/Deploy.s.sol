@@ -43,8 +43,8 @@ contract Deploy is Script {
     // 6-decimal USDC scale (YES/NO report decimals()==18 but every amount in the system,
     // including this cap, is 6-dec — see docs/HANDOVER.md "Non-obvious semantics").
     uint256 constant DEFAULT_DEPOSIT_CAP      = 50_000e6;   // 50k USDC
-    uint256 constant DEFAULT_MAX_MARK_STEP    = 0.05e18;    // 5 percentage points per update
-    uint256 constant DEFAULT_MIN_MARK_INTERVAL = 1 hours;
+    uint256 constant DEFAULT_MAX_MARK_STEP    = 0.50e18;    // batch 4: wide circuit breaker (50 points per update)
+    uint256 constant DEFAULT_MIN_MARK_INTERVAL = 10 minutes; // MARK_ROLE (setMark) is granted separately
 
     // Today's live keeper EOA (docs/HANDOVER.md "Ops wallets and secrets") — the default
     // KEEPER_ADDRESS if the env var isn't set.
