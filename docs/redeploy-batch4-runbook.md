@@ -7,35 +7,58 @@ read-only checks, PRs and docs.
 
 ## Why
 
-Bug on batch-3 contracts: after `confirmCreditEvent()`, `flagClaimable` / `claim` are NOT
-blocked unless a motion is open. A liquidator can seize an Upbet that is about to pay $1,
-at the stale mark (a proof-of-concept test showed the liquidator netting about 951 USDC per
-1,000 Upbets; now regression tests `forge test --match-test AfterCreditEvent` plus the
-`invariant_NoLiquidationAfterCreditEvent` invariant). Also, nobody can open a motion on batch 3: only the OracleRouter
-holds CreditMarket `ORACLE_ROLE`, and the router only forwards `confirmCreditEvent`.
+Two things change in batch 4.
 
-Stop-gap until batch 4 is live: the admin grants CreditMarket `ORACLE_ROLE` to the attester
-on all 3 batch-3 markets with `contracts/script/GrantMotionRole.s.sol` (env
-`MARKET_REGISTRY_ADDRESS`, `ORACLE_ATTESTER_ADDRESS`; **OWNER** broadcasts). `/admin` then
-offers Open/Close motion and refuses to confirm without an open motion. See
-`docs/credit-event-runbook.md`.
+1. **Post-event liquidation bug (batch 3).** After `confirmCreditEvent()`, `flagClaimable` /
+   `claim` are NOT blocked unless a motion is open. A liquidator could seize an Upbet that is
+   about to pay $1, at the stale mark. A proof-of-concept test showed the liquidator netting
+   about 951 USDC per 1,000 Upbets. Regression tests: `forge test --match-test
+   AfterCreditEvent` and `invariant_NoLiquidationAfterCreditEvent`. Nobody could open a
+   motion on batch 3 either; the stop-gap (`GrantMotionRole.s.sol`) was broadcast at block
+   60319124.
+2. **Motion redesign** (`docs/design/motion-escrow-and-mark.md`, owner decisions
+   2026-11-18). A motion marks the EDD and escrows post-EDD carry; it blocks nothing.
+   Pay carry (`cure()`) is open to every holder, and the mark follows trades.
 
 ## What changed
 
-- `CreditMarket.flagClaimable` and `clearLiquidatedPosition` revert
-  `CreditEventAlreadyConfirmed()` after confirmation (so `claim` reverts).
-- `CreditMarket.setMotionPending` emits `MotionPendingSet(bool)`.
-- `OracleRouter.setMotionPending(bool)` (`ORACLE_ROLE`) emits
-  `MotionPendingSet(address indexed by, bool pending)`; the attester no longer needs
-  CreditMarket `ORACLE_ROLE`.
-- Keepers and liquidator-bot skip flag/claim when `creditEventConfirmed` or `motionPending`.
-- `/admin` Open/Close motion buttons (router path; direct CreditMarket path if the wallet
-  holds that role).
+Contracts:
+- `CreditMarket`:
+  - Motion lifecycle: `setMotionPending(true)` opens motion `k` and records the EDD index;
+    `false` resolves it No; `confirmCreditEvent()` resolves it Yes (with no motion open, it
+    opens and resolves one in the same call).
+  - Per-address escrow (`escrowOf`): escrowed credit, post-EDD debt, refundable cash. It
+    folds lazily in `settleFunding`, which is public.
+  - `fundingDebt(user)` is now a view: ordinary debt plus live post-EDD debt.
+  - `previewFunding` stays exact for the off-chain formulas.
+  - `flagClaimable` and claims run during motions; both revert
+    `CreditEventAlreadyConfirmed` after confirmation.
+  - `cure()` works for any holder, also while paused, but not after confirmation.
+  - `setMark` needs the new `MARK_ROLE`.
+  - New events: `MotionOpened`, `MotionResolved`, `MotionRefundRecorded`.
+- `LiquidationEngine.claim`: no motion check. It passes P and the InsuranceFund to
+  `clearLiquidatedPosition`, which records the post-EDD part each payer covered as
+  refundable.
+- `OracleRouter`: `setMotionPending(bool)` (`ORACLE_ROLE`) and `openMotion()` (`ORACLE_ROLE`
+  or the new open-only `MOTION_ROLE`).
+- Deploy scripts:
+  - mark bounds default to **50 points / 10 minutes**;
+  - optional `MARK_UPDATER_ADDRESS` (gets `MARK_ROLE`; must differ from `KEEPER_ADDRESS`);
+  - optional `MOTION_OPENER_ADDRESS` (gets router `MOTION_ROLE`).
 
-Constructors are unchanged, so deploy scripts are unchanged. CreditMarket and OracleRouter
-changed, so **every market gets a new contract set** under a **new MarketRegistry** (slugs
-`mstr`, `crwv`, `try`); the shared **InsuranceFund is reused**. Seeds (23% / 10% / 2%), cap
-(50,000 USDC), keeper bounds (5 points, 1h) and fee (50 bps, 50/50) are unchanged.
+Off-chain (**must ship before the flip in step 4**; tracked in the design note §8):
+- funding-keeper: flag during motions; add the "DC Yes announced" flagging switch.
+- liquidator-bot: claim during motions.
+- `/claimable`: no longer reports frozen during a motion.
+- A mark updater service (`MARK_ROLE` key).
+- Frontend: Pay carry for every Upbet, health badge, motion banner, pending carry for
+  Downbets, `/admin` (`openMotion`), docs pages.
+- The multi-market smoke must grant `MARK_ROLE` before calling `setMark`.
+
+Constructors are unchanged. CreditMarket, LiquidationEngine and OracleRouter changed, so
+**every market gets a new contract set** under a **new MarketRegistry** (slugs `mstr`, `crwv`,
+`try`); the shared **InsuranceFund is reused**. Seeds (23% / 10% / 2%), cap (50,000 USDC)
+and fee (50 bps, 50/50) are unchanged. The mark bounds change to 50 points / 10 minutes.
 
 Deploy first while batch-3 markets trade; downtime is steps 3–5.
 
@@ -47,6 +70,11 @@ Deploy first while batch-3 markets trade; downtime is steps 3–5.
 2. Deployer `0x0D09…80f1` ETH ≥ 0.0005.
 3. Operator = settler `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` (script default); if
    the settler key changed, `export OPERATOR_ADDRESS=<address>` first.
+3a. New keys (owner generates; never commit them):
+   - `export MARK_UPDATER_ADDRESS=<mark updater wallet>` (MARK_ROLE; not the keeper wallet);
+   - optionally `export MOTION_OPENER_ADDRESS=<on-call wallet>` (router MOTION_ROLE).
+   If unset, grant later with `cast send $CREDIT_MARKET "grantRole(bytes32,address)"
+   $(cast keccak MARK_ROLE) <addr>` (and `MOTION_ROLE` on the router).
 4. Archive the batch-3 files: copy `contracts/deployments/base-sepolia/core.json` and
    `markets/*.json` to `contracts/deployments/base-sepolia/archive/batch3/` before the
    deploy rewrites them.
@@ -66,7 +94,8 @@ MARKET_SLUG=try ENTITY_NAME=Turkey ENTITY_TYPE=sovereign TOKEN_TICKER=TRY INITIA
 ```
 
 Each must log `Operator : 0x1a4A…98b9` and end with `Post-broadcast configuration
-assertions passed`. Record the new registry address and start block: **TBD**.
+assertions passed` (which now also checks `MARK_ROLE` / `MOTION_ROLE` when their env is set,
+and the 50-point / 10-minute mark bounds). Record the new registry address and start block: **TBD**.
 
 **Blockscout verification** (Claude can run it; one contract at a time, 20–45s apart to
 avoid 429s): recipe in `docs/HANDOVER.md` (`forge verify-contract <addr> src/<F>.sol:<C>
@@ -77,7 +106,8 @@ avoid 429s): recipe in `docs/HANDOVER.md` (`forge verify-contract <addr> src/<F>
 ## 2. On-chain sanity (no downtime)
 
 `marketCount()` 3; per market: CLOB `hasRole(OPERATOR_ROLE(), 0x1a4A…98b9)` true, `feeBps()`
-50, `insuranceFund()` = `0x1a0d…403b`; `currentCarryRate()` MSTR 0.20125 / CRWV 0.09482 /
+50, `insuranceFund()` = `0x1a0d…403b`, `maxMarkStep()` 0.5e18, `minMarkInterval()` 600,
+`hasRole(MARK_ROLE, <mark updater>)` true and `hasRole(MARK_ROLE, <keeper>)` false; `currentCarryRate()` MSTR 0.20125 / CRWV 0.09482 /
 TRY 0.01980; InsuranceFund `hasRole(LIQUIDATOR_ROLE, <new engine>)` true.
 
 ## 3. Wind down the batch-3 markets (downtime starts) — OWNER
@@ -103,7 +133,8 @@ paused. Rollback: `unpause()` + `setActive(id, true)`.
    Any Railway domain change is also owner-run.
 4. **Merge** the deployment-files PR (new `core.json` + `markets/*.json`, frontend
    contract-addresses page, `docs/hosted-env-vars.md`, uptime fallback address) so Railway
-   and Vercel rebuild. Keepers must run the batch-4 skip logic before or with the flip.
+   and Vercel rebuild. The batch-4 keepers (flag during motions), liquidator-bot, mark
+   updater and frontend must be merged before or with the flip.
 
 ## 5. Re-seed (downtime ends) — OWNER
 
@@ -127,15 +158,18 @@ for m in mstr crwv try; do ORDER_BOOK_URL=https://order-book-server-production-9
 ```bash
 cast call $CREDIT_MARKET "hasRole(bytes32,address)(bool)" $(cast keccak ORACLE_ROLE) $ATTESTER --rpc-url $R   # false
 cast call $CREDIT_MARKET "hasRole(bytes32,address)(bool)" $(cast keccak ORACLE_ROLE) $ORACLE_ROUTER --rpc-url $R   # true
-cast send $ORACLE_ROUTER "setMotionPending(bool)" true  --rpc-url $R --private-key $ATTESTER_KEY   # OWNER
-cast call $CREDIT_MARKET "motionPending()(bool)" --rpc-url $R   # true; MotionPendingSet logged by both contracts
+cast send $ORACLE_ROUTER "openMotion()" --rpc-url $R --private-key $ATTESTER_KEY   # OWNER
+cast call $CREDIT_MARKET "motionPending()(bool)" --rpc-url $R   # true; MotionOpened(1, index) + MotionPendingSet logged
 cast send $ORACLE_ROUTER "setMotionPending(bool)" false --rpc-url $R --private-key $ATTESTER_KEY   # OWNER
-cast call $CREDIT_MARKET "motionPending()(bool)" --rpc-url $R   # false
+cast call $CREDIT_MARKET "motionPending()(bool)" --rpc-url $R   # false; MotionResolved(1, false)
 ```
+
+  A test motion escrows carry for its duration and releases it on close; keep it short.
 
 - Do NOT confirm a credit event on the live markets to test the guard; it is covered by
   `forge test --match-test AfterCreditEvent` and the invariant suites.
 - `/admin` on the new registry shows Open/Close motion working with the attester wallet.
+- The mark updater moves the mark on each market (MarkUpdated events, `adminOverride` false).
 - Next funding-keeper tick accrues on the new markets; uptime workflow (manual run) green.
 
 ## 7. After

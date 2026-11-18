@@ -21,9 +21,10 @@ import {MarketScriptBase} from "./MarketScriptBase.sol";
 //   sovereign), TOKEN_TICKER, INITIAL_MARK (1e18-scaled integer, e.g. 100000000000000000
 //   for 10%).
 // Env (optional, defaults = Deploy.s.sol): KEEPER_ADDRESS, PAUSER_ADDRESS,
-//   ORACLE_ATTESTER_ADDRESS, TEAM_WALLET, DEPOSIT_CAP (50_000e6), MAX_MARK_STEP (0.05e18),
-//   MIN_MARK_INTERVAL (1h), DEPLOYMENTS_DIR (deployments/base-sepolia; core.json is read
-//   from here).
+//   ORACLE_ATTESTER_ADDRESS, TEAM_WALLET, DEPOSIT_CAP (50_000e6), MAX_MARK_STEP (0.50e18),
+//   MIN_MARK_INTERVAL (10 min), MARK_UPDATER_ADDRESS (MARK_ROLE; none by default, must differ
+//   from KEEPER_ADDRESS), MOTION_OPENER_ADDRESS (OracleRouter MOTION_ROLE; none by default),
+//   DEPLOYMENTS_DIR (deployments/base-sepolia; core.json is read from here).
 contract AddMarket is MarketScriptBase {
     using stdJson for string;
 

@@ -68,7 +68,8 @@ contract V1bSmokeTest is Test {
         no.grantRole(no.BURNER_ROLE(),   address(market));
 
         // Contract roles
-        market.grantRole(market.KEEPER_ROLE(),     keeper);
+        market.grantRole(market.KEEPER_ROLE(), keeper);
+        market.grantRole(market.MARK_ROLE(), keeper);
         market.grantRole(market.ORACLE_ROLE(),     oracle);
         market.grantRole(market.LIQUIDATOR_ROLE(), address(engine));
         insuranceFund.grantRole(insuranceFund.LIQUIDATOR_ROLE(), address(engine));

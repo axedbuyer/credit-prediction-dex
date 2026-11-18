@@ -62,7 +62,7 @@ at 80¢.
   mark can't seize them: the trigger needs m ≤ 1.03 × (owed + one day of carry).
 - On-chain bounds: raise `maxMarkStep` so a repricing lands in at most one or two updates,
   and shorten `minMarkInterval`. Proposed starting point: 50 points per step, 10 minutes
-  apart (open question Q2).
+  apart (decided, Q2).
 - Key risk: a compromised mark key could post a bad mark. The admin can revert with
   `adminSetMark`, and holders who keep carry paid are unaffected. The mark gets its own
   `MARK_ROLE`, separate from the flagging `KEEPER_ROLE` (Q4).
@@ -266,12 +266,35 @@ a credit event is confirmed, flagging and claims revert forever (`CreditEventAlr
   `prepayFunding` removed), `contracts/CLAUDE.md`, the credit-event runbook, and the
   batch-4 runbook.
 
+## 8a. User note: closing a position
+
+Netting happens only within one market and one address. Tell users to close a position by
+**selling what they hold**. Buying the other side doesn't close it: until the pair is
+redeemed, the Upbet side still accrues carry against `owed()` (which excludes Downbet
+credit) and can be flagged. If they do buy the other side, they should redeem the pair
+right away. This goes in the trading docs and the FAQ.
+
+## 8b. Implementation notes (batch-4 contracts)
+
+- `fundingDebt(user)` became a view (ordinary debt + live post-EDD debt); storage is
+  `_debt`. CLOBSettlement and the off-chain readers need no change.
+- `previewFunding` returns `cashOut − debtAfter + fundingDebt`, so the off-chain formulas
+  (`max(0, fundingDebt − preview)` and `preview − fundingDebt`) stay exact during a motion.
+- `confirmCreditEvent` without an open motion opens and resolves one in the same call
+  (EDD = now, nothing voided). The runbook still always opens a motion first.
+- `setMotionPending` reverts `MotionStateUnchanged` on a no-op and
+  `CreditEventAlreadyConfirmed` after confirmation.
+- Ordinary credit paying post-EDD debt (refundable) is in the code for completeness. With
+  balances unchanged since the last settlement, both buckets have the same sign, so in
+  practice it only triggers on rounding.
+- Closing a motion can lower `owed()` by at most 1 wei: the two rounded-up buckets merge.
+
 ## 9. Owner decisions (2026-11-18)
 
 - **Q1 — decided:** on a "Yes", `R` is refunded to whoever paid the post-EDD carry,
   including a liquidator through P (and the InsuranceFund for its top-up).
-- **Q2 — open:** whether to keep an on-chain step bound on the mark at all (§3), or let the
-  updater move it freely.
+- **Q2 — decided:** keep a wide on-chain bound as a circuit breaker against a bad or
+  stolen updater key: 50 points per update, at least 10 minutes apart (deploy defaults).
 - **Q3 — decided:** health alerts are on-site only for batch 4.
 - **Q4 — decided:** separate `MARK_ROLE` for the mark updater, distinct from the flagging
   `KEEPER_ROLE` (subject to the CreditMarket size limit).
@@ -281,7 +304,7 @@ a credit event is confirmed, flagging and claims revert forever (`CreditEventAlr
 
 ## 10. Build order
 
-1. Owner signs off on this note (Q2 still open).
+1. Owner signs off on this note — done 2026-11-18 (Q1–Q5 decided).
 2. Contracts + unit tests + invariant 11 + the rewritten invariant 5 suite, on a branch
    based on PR #22.
 3. Keepers (mark updater, flagging rules), order-book-server pre-filter.

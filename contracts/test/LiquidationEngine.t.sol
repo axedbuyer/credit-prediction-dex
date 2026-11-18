@@ -79,6 +79,7 @@ contract LiquidationEngineTest is Test {
         noToken.grantRole(noToken.MINTER_ROLE(), address(m));
         noToken.grantRole(noToken.BURNER_ROLE(), address(m));
         m.grantRole(m.KEEPER_ROLE(), keeper);
+        m.grantRole(m.MARK_ROLE(), keeper);
         m.grantRole(m.ORACLE_ROLE(), oracle);
     }
 
@@ -256,15 +257,17 @@ contract LiquidationEngineTest is Test {
 
     // ── guard tests ────────────────────────────────────────────────────────────
 
-    function test_Claim_DuringMotionPending_Reverts() public {
+    // Batch 4: a motion is informational — claims still go through.
+    function test_Claim_DuringMotion_Succeeds() public {
         _mintAndFlag(alice, MINT_AMT);
 
         vm.prank(oracle);
         market.setMotionPending(true);
 
         vm.prank(bob);
-        vm.expectRevert(LiquidationEngine.MotionPending.selector);
         engine.claim(alice);
+        assertEq(yesToken.balanceOf(bob), MINT_AMT, "Upbets transferred to the liquidator");
+        assertFalse(market.claimable(alice), "flag cleared");
     }
 
     // ── post-credit-event guards (batch 4) ──────────────────────────────────────
@@ -286,11 +289,11 @@ contract LiquidationEngineTest is Test {
     function test_Flag_AfterCreditEvent_Reverts() public {
         vm.prank(alice);
         market.mint(MINT_AMT);
-        vm.prank(oracle);
-        market.confirmCreditEvent();
         vm.warp(block.timestamp + 365 days);
         market.accrueFunding();
-        assertTrue(market.isSeizable(alice), "would be seizable on the stale mark");
+        vm.prank(oracle);
+        market.confirmCreditEvent();
+        assertTrue(market.isSeizable(alice), "would be seizable on the stale mark (pre-EDD debt)");
 
         vm.prank(keeper);
         vm.expectRevert(CreditMarket.CreditEventAlreadyConfirmed.selector);

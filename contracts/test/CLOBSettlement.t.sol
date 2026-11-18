@@ -294,6 +294,8 @@ contract CLOBSettlementTest is Test {
         usdc.mint(address(market), 1_000e18);
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18); // elapsed == 0 here, so this is a no-op accrual
 
         vm.warp(block.timestamp + 365 days);
@@ -323,6 +325,8 @@ contract CLOBSettlementTest is Test {
         _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18);
 
         vm.warp(block.timestamp + 365 days);
@@ -349,6 +353,8 @@ contract CLOBSettlementTest is Test {
         _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18);
 
         vm.warp(block.timestamp + 365 days);
@@ -431,6 +437,7 @@ contract CLOBSettlementTest is Test {
         vm.warp(block.timestamp + 410 days); // past the ~404-day runway at a 23% mark
         market.accrueFunding();
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         assertTrue(market.isSeizable(taker), "must be seizable before flag");
         market.flagClaimable(taker);
         assertTrue(market.claimable(taker), "taker flagged");
@@ -460,6 +467,7 @@ contract CLOBSettlementTest is Test {
         vm.warp(block.timestamp + 410 days); // past the ~404-day runway at a 23% mark
         market.accrueFunding();
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         assertTrue(market.isSeizable(maker), "maker must be seizable before flag");
         market.flagClaimable(maker);
         assertTrue(market.claimable(maker), "maker flagged");
@@ -591,6 +599,8 @@ contract CLOBSettlementTest is Test {
         _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18);
         vm.warp(block.timestamp + 365 days);
 
@@ -624,6 +634,8 @@ contract CLOBSettlementTest is Test {
         _stripTakerToPureYes();
 
         market.grantRole(market.KEEPER_ROLE(), admin);
+
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18);
         vm.warp(block.timestamp + 365 days);
 
@@ -745,6 +757,7 @@ contract CLOBSettlementTest is Test {
         // at or below 10e18, comfortably under the price floor chosen below.
         uint256 mark = bound(uint256(markRaw), 1, 0.01e18); // 0 is an invalid mark (setMark reverts InvalidMark)
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(mark);                 // elapsed == 0: sets the rate, accrues nothing
         vm.warp(block.timestamp + 365 days);  // → cumFundingPerYES == cumFundingPerNO == carryRateFor(mark)
 
@@ -980,6 +993,7 @@ contract CLOBSettlementTest is Test {
     function test_YESSale_ProRataDebt_PerFill() public {
         _stripTakerToPureYes(); // taker: 1000 YES, 0 NO
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18);
         vm.warp(block.timestamp + 365 days);
         market.accrueFunding();
@@ -1009,6 +1023,7 @@ contract CLOBSettlementTest is Test {
     function test_YESSale_ProRata_FundingShortfallPerFill_PositionUnchanged() public {
         _stripTakerToPureYes();
         market.grantRole(market.KEEPER_ROLE(), admin);
+        market.grantRole(market.MARK_ROLE(), admin);
         market.setMark(0.03e18);
         vm.warp(block.timestamp + 365 days);
         market.accrueFunding();

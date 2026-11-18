@@ -64,6 +64,7 @@ contract MultiMarketTest is Test {
         MarketRegistry.EntityType t
     ) internal {
         s.market.grantRole(s.market.KEEPER_ROLE(), keeper);
+        s.market.grantRole(s.market.MARK_ROLE(), keeper);
         s.router.grantRole(s.router.ORACLE_ROLE(), oracle);
         s.clob.setFeeConfig(50, teamWallet, address(insuranceFund), 5_000);
         registry.register(
@@ -277,7 +278,7 @@ contract MultiMarketTest is Test {
         // nor call into A's CreditMarket as a liquidator/clob
         vm.prank(address(B.engine));
         vm.expectRevert();
-        A.market.clearLiquidatedPosition(bob, alice);
+        A.market.clearLiquidatedPosition(bob, alice, 0, address(0));
         vm.prank(address(B.clob));
         vm.expectRevert();
         A.market.collectDebt(bob, 0);
