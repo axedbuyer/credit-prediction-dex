@@ -114,6 +114,7 @@ from `Transfer` events (requirement 1 below).
 - ✅ **`setMark` bound** (contract change, batch-1 2026-10-01: ≤ 5 points per update, ≥ 1h
   apart, plus an admin override): on-chain max-Δ-per-update so a compromised
   keeper key can't teleport the mark; document the off-chain policy (TWAP of CLOB mid).
+  **The off-chain updater itself is not built** — no service calls `setMark` (HANDOVER open work).
 - ✅ **`depositCap`** (contract change, batch-1 2026-10-01): admin-settable cap enforced in
   `CreditMarket.mint`; 50,000 USDC per market.
 - Size and fund the InsuranceFund (it backstops tail-case liquidations).

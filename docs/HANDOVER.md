@@ -39,6 +39,9 @@ One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is share
   apart (admin `adminSetMark` bypasses), fee 50 bps split 50/50 team wallet / InsuranceFund.
 - Seed marks are placeholders until the owner supplies CDS-implied marks
   (`m = 1 − exp(−s/(1−R))`).
+- **Nothing updates the marks automatically.** The keeper wallet holds `KEEPER_ROLE`, but
+  no service calls `setMark`; marks move only by owner `adminSetMark`. Carry, the seizure
+  trigger and the claim cap all run off that static mark (open work item 3).
 - All 19 batch-3 contracts (+ the shared InsuranceFund) are source-verified on Blockscout
   (2026-11-17). Recipe for the next batch: `forge verify-contract <addr> src/<F>.sol:<C>
   --chain-id 84532 --verifier blockscout --verifier-url https://base-sepolia.blockscout.com/api
@@ -100,7 +103,7 @@ Keys live only in gitignored `.env` files (`.gitignore` ignores every `.env*` ex
 |---|---|---|---|---|
 | Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` | DEFAULT_ADMIN everywhere, PAUSER, OracleRouter attester, team wallet | 0.00116 ETH, 17.9 USDC |
 | Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE | 0.00249 ETH |
-| Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | CLOBSettlement OPERATOR_ROLE (only it can fill) | **0.000136 ETH — top up** |
+| Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | CLOBSettlement OPERATOR_ROLE (only it can fill) | 0.00714 ETH (topped up 2026-11-17) |
 | Liquidator | `0x941A8B4707ccC1f9811DE3fFE7937dFe22e59661` | Railway `liquidator-bot` var only | none (`claim()` is permissionless) | 0.0015 ETH, 30 USDC float |
 | Test taker | `0x3fB5c914c574eefbe32b3a8AA882cdc13Dfe2c0C` | `contracts/.env` `TEST_TAKER_PRIVATE_KEY` | none — used by `sepolia-test-trade.ts` / `sepolia-cancel-check.ts`; ignore it as a holder | — |
 
@@ -194,20 +197,29 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
 
 ## Open work, in priority order
 
-1. **Top up the settler** (0.000136 ETH, alert at 0.0001) — trivial, but the matching engine
-   stops settling when it runs dry.
-2. **Safe role ceremony** (production-plan requirement 2 — the largest launch blocker we can
+1. **Safe role ceremony** (production-plan requirement 2 — the largest launch blocker we can
    build ourselves). Nothing written yet: deploy a 2-of-3 Safe; write `TransferRoles.s.sol`
    to move `DEFAULT_ADMIN_ROLE` on every per-market contract + MarketRegistry +
    InsuranceFund, the OracleRouter attester role and `PAUSER_ROLE` to the Safe; keeper and
    settler keep only their operational role on dedicated hot EOAs; the deployer renounces
    everything. Fold in the deploy-script fix below.
-3. **Credit-event dress rehearsal on Sepolia** (requirement 4) — motion → pause → attest →
+2. **Credit-event dress rehearsal on Sepolia** (requirement 4) — motion → pause → attest →
    settle, plus a live flag → cure and flag → claim, run through the Safe. Gate for mainnet.
-4. **Audit** (deliberately deferred by the owner — not forgotten) and an external
+3. **Mark updater** — no service moves the mark (see "Current state"). The BD deck (v4)
+   tells investors the keeper updates it from the market. Either build it (e.g. funding-keeper
+   pushes a TWAP of the CLOB mid via `setMark`, inside the on-chain ≤ 5-point / ≥ 1h bound —
+   the policy production-plan Phase 3 already names) or change the deck copy. Land it before
+   the audit so the audit covers it.
+4. **Credit-event source policy** — the BD deck (v4) says launch markets trigger on ISDA
+   Determinations Committee rulings, relayed on-chain by the attester. The user docs
+   (`frontend/app/docs/credit-events/page.tsx`) call DC-following *roadmap* and say the MVP
+   determination is the team's "multisig oracle" (today it is the deployer EOA). Owner decides;
+   then align the docs page, `frontend/lib/marketCopy.ts` and the attestation runbook. Verify
+   each launch name actually has DC coverage before claiming it.
+5. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
-5. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
-6. **Runbooks** for mainnet: deploy/rollback and incident response (keeper down, Redis
+6. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
+7. **Runbooks** for mainnet: deploy/rollback and incident response (keeper down, Redis
    loss, pause, credit event, key rotation).
 
 ### Before any Base MAINNET deploy (owner: "not in a rush")
@@ -227,5 +239,14 @@ deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, mainnet USDC pinn
 - Fresh mainnet hot wallets (keeper, settler, liquidator) — never reuse testnet keys.
 - Pick a mainnet RPC provider; fork-rehearse the full deploy sequence on a Base mainnet
   fork (`anvil --fork-url $BASE_RPC_URL`) before broadcasting.
-- Gates: Safe ceremony, dress rehearsal, audit + legal read (items 2–4 above); a
+- Gates: Safe ceremony, dress rehearsal, audit + legal read (items 1, 2 and 5 above); a
   two-sided quoting bot for the team wallet (adapt `mm-sepolia-seed.ts`).
+
+## BD deck
+
+The investor deck lives **outside git**: the GitHub repo is public and the deck is marked
+"Strictly Confidential". Current version: `Pari BD Deck v4.html` (November 2026; local copy in
+the repo root, gitignored via `Pari BD Deck*.html`). `Pari BD Deck v2.html` (June 2026) was
+committed before this rule and is still tracked and in public history; untracking or purging
+it is the owner's call. Product claims the deck makes that the code does not back yet: open work
+items 3 and 4.
