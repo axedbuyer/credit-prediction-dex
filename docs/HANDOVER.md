@@ -88,9 +88,9 @@ full redeploy under a new registry, because CreditMarket changed.
 
 ### Tests and CI
 
-`.github/workflows/ci.yml` runs on every PR and push to `main`: `forge test` (225 tests,
+`.github/workflows/ci.yml` runs on every PR and push to `main`: `forge test` (233 tests,
 incl. single- and 2-market stateful invariant suites), vitest for order-book-server (131),
-matching-engine (94) and keepers (237), and a frontend type-check (the frontend has no test
+matching-engine (94) and keepers (243), and a frontend type-check (the frontend has no test
 suite). Local end-to-end: `scripts/smoke/run-smoke.sh` (multi-market anvil smoke, 12/12,
 ≈1 min). Counts as of PR #17 (2026-10-16).
 
@@ -210,14 +210,17 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
    pushes a TWAP of the CLOB mid via `setMark`, inside the on-chain ≤ 5-point / ≥ 1h bound —
    the policy production-plan Phase 3 already names) or change the deck copy. Land it before
    the audit so the audit covers it.
-4. **Nobody can open a credit-event motion yet** — needed before the dress rehearsal. The policy
-   is decided (2026-11-18: follow ISDA DC requests/rulings — root CLAUDE.md "Credit-event
-   policy"; user docs updated). But `setMotionPending` needs `ORACLE_ROLE` on each
-   CreditMarket, which only its OracleRouter holds, and the router forwards only
-   `confirmCreditEvent` (verified on-chain for crwv, 2026-11-18). Fix without a redeploy: the
-   admin grants CreditMarket `ORACLE_ROLE` to the attester (to the Safe in `TransferRoles.s.sol`),
-   and `/admin` gets an open/close-motion control (it only has confirm + pause today). Also
-   confirm each launch name has ISDA DC coverage — the deck claims it.
+4. **Credit-event motion + post-event liquidation bug** — gate for the dress rehearsal.
+   Found 2026-11-18: on batch 3 nobody can open a motion (only the OracleRouter holds
+   CreditMarket `ORACLE_ROLE`; the router forwards only `confirmCreditEvent`), AND
+   confirmation alone does not block flag/claim — a liquidator could seize an Upbet about to
+   pay $1 at the stale mark (proof-of-concept test: ~951 USDC net per 1,000 Upbets).
+   Fixed in code (branch `fix/post-event-liquidation-guard`: on-chain post-event guards,
+   `OracleRouter.setMotionPending`, keeper/bot skips, `/admin` motion control); deploys as
+   **batch 4** (`docs/redeploy-batch4-runbook.md`). Until then, batch-3 stop-gap (OWNER):
+   `forge script script/GrantMotionRole.s.sol --broadcast` (simulated OK 2026-11-18) and follow
+   `docs/credit-event-runbook.md` §7. Also confirm each launch name has ISDA DC coverage —
+   the deck claims it.
 5. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
 6. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.

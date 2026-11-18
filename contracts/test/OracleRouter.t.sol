@@ -155,4 +155,38 @@ contract OracleRouterTest is Test {
         vm.expectRevert(OracleRouter.ZeroAddress.selector);
         new OracleRouter(admin, address(0));
     }
+
+    // ─── motion forwarding (batch 4) ──────────────────────────────────────────
+
+    event MotionPendingSet(address indexed by, bool pending);
+
+    function test_SetMotionPending_ForwardsToMarket() public {
+        assertFalse(market.motionPending());
+        vm.expectEmit(true, false, false, true, address(router));
+        emit MotionPendingSet(oracle, true);
+        vm.prank(oracle);
+        router.setMotionPending(true);
+        assertTrue(market.motionPending(), "motion opened via router");
+
+        vm.prank(oracle);
+        router.setMotionPending(false);
+        assertFalse(market.motionPending(), "motion closed via router");
+    }
+
+    function test_SetMotionPending_RequiresRole() public {
+        bytes32 oracleRole = router.ORACLE_ROLE();
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, oracleRole)
+        );
+        router.setMotionPending(true);
+    }
+
+    // The attester needs ORACLE_ROLE only on the router — not on CreditMarket.
+    function test_SetMotionPending_AttesterNeedsNoMarketRole() public {
+        assertFalse(market.hasRole(market.ORACLE_ROLE(), oracle));
+        vm.prank(oracle);
+        router.setMotionPending(true);
+        assertTrue(market.motionPending());
+    }
 }

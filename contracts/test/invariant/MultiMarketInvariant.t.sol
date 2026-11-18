@@ -196,6 +196,8 @@ contract MultiMarketInvariantTest is StdInvariant, Test {
             assertEq(h.ghost_mintExceededCap(), 0, "deposit cap exceeded");
             assertEq(h.ghost_motionPendingFlagSuccesses(), 0, "flag during motion");
             assertEq(h.ghost_motionPendingClaimSuccesses(), 0, "claim during motion");
+            assertEq(h.ghost_postEventFlagSuccesses(), 0, "flag after credit event");
+            assertEq(h.ghost_postEventClaimSuccesses(), 0, "claim after credit event");
             assertEq(h.ghost_liquidationLedgerNotCleared(), 0, "ledger not cleared after claim");
             assertEq(h.ghost_missedSeizureFlag(), 0, "missed seizure flag");
             assertEq(h.ghost_redeemPayoutMismatch(), 0, "redeem payout mismatch");

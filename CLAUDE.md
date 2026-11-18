@@ -78,9 +78,10 @@ copy + attestation runbook only — nothing on-chain encodes them (OracleRouter 
 `confirmCreditEvent()`). **Credit-event policy:** the team multisig follows the ISDA DC — a
 DC question on a listed entity ("Has a Bankruptcy Credit Event occurred with respect to …?",
 from the All DC Requests list on cdsdeterminationscommittees.org) → open a motion
-(`setMotionPending(true)`, freezes flagging/claims; optional pause) → DC "Yes" on a covered
-event → `confirmCreditEvent()`; DC "No"/declined → close the motion. User copy:
-`frontend/app/docs/credit-events/page.tsx`. Keep listings well below m ≈ 63% (carry falls above it).
+(`OracleRouter.setMotionPending(true)`, freezes flagging/claims; optional pause) → DC "Yes"
+on a covered event → `confirmCreditEvent()`, motion stays open; DC "No"/declined → close the
+motion. User copy: `frontend/app/docs/credit-events/page.tsx`; ops:
+`docs/credit-event-runbook.md`. Keep listings well below m ≈ 63% (carry falls above it).
 
 **Topology (decisions D1–D5, `docs/multi-market-design.md`):**
 - **D1 — one contract set per market + on-chain `MarketRegistry`.** Each market = its own
@@ -141,9 +142,10 @@ Scripts: `AddMarket.s.sol` (one market against an existing registry + fund),
 - `Pausable` on CreditMarket (PAUSER_ROLE halts the market during a determination window).
 - Emit events on every state change. CreditMarket: TokensMinted, TokensRedeemed,
   YESSettled, FundingAccrued, MarkUpdated, CreditEventTriggered, FlaggedClaimable,
-  FundingSettled, PositionCured (+ config events). CLOBSettlement: OrderFilled,
-  OrderCancelled, MinNonceUpdated, FeeCharged, FeeConfigUpdated. LiquidationEngine:
-  Liquidated. MarketRegistry: MarketRegistered, MarketActiveSet.
+  FundingSettled, PositionCured, MotionPendingSet (+ config events). CLOBSettlement:
+  OrderFilled, OrderCancelled, MinNonceUpdated, FeeCharged, FeeConfigUpdated.
+  LiquidationEngine: Liquidated. OracleRouter: CreditEventConfirmed, MotionPendingSet.
+  MarketRegistry: MarketRegistered, MarketActiveSet.
 - **Decimals quirk:** YES/NO report `decimals() == 18`, but every amount is raw 6-decimal
   USDC scale. Never normalize by 1e18.
 
@@ -249,7 +251,7 @@ drift).
 |---|---|
 | `order-book-server` | REST: `GET /markets`, `GET /orderbook?market=`, `POST /order`, `DELETE /order/:id`, `POST /orders/sync`, `GET /health`. Derives the market from the order's token; rejects bad pairs, orders under the minimum, flagged makers (`PositionFrozen`) and un-fundable YES sells (`FundingShortfall` + `minSellProceeds`). Chain pre-filters fail open — the on-chain check is the backstop. Redis books `orderbook:<slug>:*`. Rate-limited per client IP. |
 | `matching-engine` | Price-time priority per market; the earlier order is the maker; fill size = min of both remaining sizes. Settles via `fillOrders`, records `filled`. Revert handling follows the Order removal policy. `GET /health` (503 when the loop is stale). |
-| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger. Retries transient errors without double-sending; `[ALERT]` log on failure. |
+| `keepers/funding-keeper` | `accrueFunding()` every epoch on every market, then flags any position breaching the seizure trigger (never while a motion is pending or after a confirmed credit event; the liquidator-bot likewise never claims then). Retries transient errors without double-sending; `[ALERT]` log on failure. |
 | `keepers/liquidation-keeper` | `GET /claimable[?market=]` — flagged positions + formulaic price P. Does not claim (claiming is permissionless). |
 | `keepers/liquidator-bot` | Team liquidator of last resort: claims EVERY flagged position promptly, profitable or not (stalls cost the InsuranceFund) — simulates first, uses only `claim()`, alerts on a short float / short InsuranceFund / pending motion — then sells the Upbet on the CLOB (crosses bids down to mark − `SELL_MAX_DISCOUNT_BPS` (3%), else rests at the mark). |
 
@@ -427,8 +429,11 @@ backstop.
 4. NO holders are ALWAYS made whole on a liquidation — P = owed in the normal case,
    topped up by InsuranceFund in the tail case. NO is never haircut, and collateral always
    backs every outstanding pair (no accounting freeze may break this — F1).
-5. FREEZE all flagging and claims during a pending credit-event motion (motionPending).
-   Never seize someone's protection at a discount moments before it could pay.
+5. FREEZE all flagging and claims during a pending credit-event motion (motionPending),
+   and FOREVER once a credit event is confirmed (`flagClaimable` and
+   `clearLiquidatedPosition` revert `CreditEventAlreadyConfirmed` — enforced on-chain, not
+   by procedure; a flagged holder exits via settleYES). Never seize someone's protection
+   at a discount moments before, or after, it pays.
 6. Liquidation claims are permissionless and first-come — no single liquidator is
    load-bearing. (Known MVP limitation: first-valid-tx-wins has MEV/front-run exposure;
    acceptable for MVP, revisit with private relay if it becomes a problem.)

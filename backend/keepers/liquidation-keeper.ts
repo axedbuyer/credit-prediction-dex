@@ -46,6 +46,13 @@ export const CREDIT_MARKET_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'bool' }],
   },
+  {
+    name: 'creditEventConfirmed',
+    type: 'function' as const,
+    stateMutability: 'view' as const,
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
 ] as const
 
 export const ERC20_ABI = [
@@ -69,7 +76,7 @@ export interface ClaimablePosition {
   tokenValue: string // Q * currentMark / WAD
   claimPrice: string  // min(owed, tokenValue) — priced fresh each poll, not fixed at flag time
   tailCase: boolean
-  frozen: boolean        // true while motionPending — claim() will revert
+  frozen: boolean        // true while motionPending / creditEventConfirmed — claim() will revert
   frozenReason?: string  // only set when frozen === true
 }
 
@@ -114,6 +121,7 @@ export function computePosition(
   currentMark: bigint,
   owed: bigint,
   motionPending: boolean,
+  creditEventConfirmed = false,
 ): ClaimablePosition {
   const tokenValue = (Q * currentMark) / WAD
   const tailCase   = owed > tokenValue
@@ -126,9 +134,10 @@ export function computePosition(
     tokenValue: tokenValue.toString(),
     claimPrice: claimPrice.toString(),
     tailCase,
-    frozen:     motionPending,
+    frozen:     motionPending || creditEventConfirmed === true,
   }
-  if (motionPending) position.frozenReason = 'credit event under review'
+  if (creditEventConfirmed) position.frozenReason = 'credit event confirmed'
+  else if (motionPending) position.frozenReason = 'credit event under review'
   return position
 }
 
@@ -196,8 +205,9 @@ export class LiquidationKeeper {
     // Read market-level state first (single RPC calls shared across all holders).
     let currentMark: bigint
     let motionPending: boolean
+    let creditEventConfirmed: boolean
     try {
-      ;[currentMark, motionPending] = await Promise.all([
+      ;[currentMark, motionPending, creditEventConfirmed] = await Promise.all([
         this.publicClient.readContract({
           address:      this.config.creditMarketAddress,
           abi:          CREDIT_MARKET_ABI,
@@ -207,6 +217,11 @@ export class LiquidationKeeper {
           address:      this.config.creditMarketAddress,
           abi:          CREDIT_MARKET_ABI,
           functionName: 'motionPending',
+        }) as Promise<boolean>,
+        this.publicClient.readContract({
+          address:      this.config.creditMarketAddress,
+          abi:          CREDIT_MARKET_ABI,
+          functionName: 'creditEventConfirmed',
         }) as Promise<boolean>,
       ])
     } catch (err) {
@@ -248,6 +263,7 @@ export class LiquidationKeeper {
           currentMark,
           owed,
           motionPending,
+          creditEventConfirmed,
         )
 
         positions.push(position)
@@ -255,7 +271,7 @@ export class LiquidationKeeper {
           `[liq-keeper] ${ts} — ${holder}` +
           `  claimPrice=${position.claimPrice}` +
           `  tailCase=${position.tailCase}` +
-          (motionPending ? '  [FROZEN: motion pending]' : ''),
+          (creditEventConfirmed ? '  [FROZEN: credit event confirmed]' : motionPending ? '  [FROZEN: motion pending]' : ''),
         )
       } catch (err) {
         console.error(`[liq-keeper] ${ts} — error for holder ${holder}:`, err)

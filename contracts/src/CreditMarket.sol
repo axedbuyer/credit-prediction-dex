@@ -65,6 +65,7 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     event MarkUpdated(uint256 oldMark, uint256 newMark, bool adminOverride);
     event DepositCapUpdated(uint256 depositCap);
     event MarkBoundsUpdated(uint256 maxMarkStep, uint256 minMarkInterval);
+    event MotionPendingSet(bool pending);
 
     error CreditEventAlreadyConfirmed();
     error CreditEventNotConfirmed();
@@ -310,7 +311,10 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
     // mint, redeem, or CLOB trade), not an accounting freeze: funding keeps accruing
     // on the position until it is claimed (priced at claim time from owed()), cured,
     // or settled after a credit event.
+    // Never after a confirmed credit event: the Upbet is about to pay $1, and seizing it
+    // at the stale mark would hand the liquidator the holder's payout (invariant 5).
     function flagClaimable(address user) external onlyRole(KEEPER_ROLE) {
+        if (creditEventConfirmed) revert CreditEventAlreadyConfirmed();
         if (motionPending) revert MotionInProgress();
         if (claimable[user]) revert AlreadyFlagged();
         _accrueFunding();
@@ -319,10 +323,12 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         emit FlaggedClaimable(user, _owedPerUnit(user, IERC20(yesToken).balanceOf(user)), block.timestamp);
     }
 
-    // ORACLE_ROLE: raise or lower the motion-pending flag to freeze liquidation activity
-    // during a credit-event determination window.
+    // ORACLE_ROLE (the OracleRouter, which forwards the attester's call): raise or lower
+    // the motion-pending flag to freeze liquidation activity during a credit-event
+    // determination window. After confirmation, flag/claim are blocked regardless.
     function setMotionPending(bool pending) external onlyRole(ORACLE_ROLE) {
         motionPending = pending;
+        emit MotionPendingSet(pending);
     }
 
     // LIQUIDATOR_ROLE: called by LiquidationEngine, which has priced the claim from
@@ -335,6 +341,9 @@ contract CreditMarket is ReentrancyGuard, Pausable, AccessControl {
         external
         onlyRole(LIQUIDATOR_ROLE)
     {
+        // A confirmed credit event ends liquidation for good: a flagged holder exits via
+        // settleYES (which auto-cures), never by having the paying Upbet seized.
+        if (creditEventConfirmed) revert CreditEventAlreadyConfirmed();
         if (claimable[liquidator]) revert PositionFrozen();
         settleFunding(liquidator);
 

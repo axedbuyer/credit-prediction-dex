@@ -348,6 +348,13 @@ contract CreditMarketInvariantTest is StdInvariant, Test {
         );
     }
 
+    // ── invariant 5, post-event half: no flag/claim after a confirmed credit event ─
+
+    function invariant_NoLiquidationAfterCreditEvent() public view {
+        assertEq(handler.ghost_postEventFlagSuccesses(), 0, "flagClaimable() succeeded after a confirmed credit event");
+        assertEq(handler.ghost_postEventClaimSuccesses(), 0, "claim() succeeded after a confirmed credit event");
+    }
+
     // ── liquidation ledger fully cleared after every claim ───────────────────────
 
     function invariant_LiquidationLedgerCleared() public view {

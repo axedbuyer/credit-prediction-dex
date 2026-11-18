@@ -5,6 +5,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 interface ICreditMarketOracle {
     function confirmCreditEvent() external;
+    function setMotionPending(bool pending) external;
 }
 
 contract OracleRouter is AccessControl {
@@ -13,6 +14,7 @@ contract OracleRouter is AccessControl {
     address public immutable creditMarket;
 
     event CreditEventConfirmed(address indexed by);
+    event MotionPendingSet(address indexed by, bool pending);
 
     error ZeroAddress();
 
@@ -27,5 +29,13 @@ contract OracleRouter is AccessControl {
     function confirmCreditEvent() external onlyRole(ORACLE_ROLE) {
         ICreditMarketOracle(creditMarket).confirmCreditEvent();
         emit CreditEventConfirmed(msg.sender);
+    }
+
+    // Open (true) or close (false) a credit-event motion on the market: while open,
+    // flagging and liquidation claims are frozen. Opened when an ISDA DC question is
+    // raised on the entity; closed only if the DC rules No or declines the question.
+    function setMotionPending(bool pending) external onlyRole(ORACLE_ROLE) {
+        ICreditMarketOracle(creditMarket).setMotionPending(pending);
+        emit MotionPendingSet(msg.sender, pending);
     }
 }

@@ -270,6 +270,22 @@ describe('LiquidationKeeper — motionPending', () => {
   })
 })
 
+describe('LiquidationKeeper — creditEventConfirmed', () => {
+  it('lists claimable positions as frozen with reason when creditEventConfirmed', async () => {
+    const readFn = makeReadContract({ claimable: true, owed: 40_000n, yesBalance: DEFAULT_Q })
+    const client = makePublicClient((args => args.functionName === 'creditEventConfirmed'
+      ? Promise.resolve(true) : readFn(args)) as IPublicClient['readContract'])
+    const keeper = new LiquidationKeeper(client, makeHolderSource({ initialHolders: [HOLDER_A] }), BASE_CONFIG)
+
+    await keeper.poll()
+
+    const positions = keeper.getPositions()
+    expect(positions).toHaveLength(1)
+    expect(positions[0].frozen).toBe(true)
+    expect(positions[0].frozenReason).toBe('credit event confirmed')
+  })
+})
+
 describe('LiquidationKeeper — multiple holders', () => {
   it('only lists claimable holders among tracked set', async () => {
     const readFn: IPublicClient['readContract'] = ({ functionName, args }) => {

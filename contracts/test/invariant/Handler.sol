@@ -84,6 +84,10 @@ contract Handler is Test {
     // Invariant 5 — nothing seizes/claims during a pending credit-event motion.
     uint256 public ghost_motionPendingFlagSuccesses;
     uint256 public ghost_motionPendingClaimSuccesses;
+    // Invariant 5 (post-event half): once creditEventConfirmed, no flag or claim may
+    // ever succeed — a paying Upbet must never be seized at the stale mark.
+    uint256 public ghost_postEventFlagSuccesses;
+    uint256 public ghost_postEventClaimSuccesses;
 
     // F4-type direct probe (docs/security/invariant-findings-2026-09-26.md,
     // "Recommended fix" + "Next"): whenever an actor's owed() + one epoch of
@@ -726,8 +730,10 @@ contract Handler is Test {
     function flagClaimable(uint256 actorSeed) external trackFlagged {
         address a = _actor(actorSeed);
         bool pendingBefore = market.motionPending();
+        bool eventBefore = market.creditEventConfirmed();
         try market.flagClaimable(a) {
             if (pendingBefore) ghost_motionPendingFlagSuccesses++;
+            if (eventBefore) ghost_postEventFlagSuccesses++;
             _record("flagClaimable", true);
         } catch {
             _record("flagClaimable", false);
@@ -867,7 +873,7 @@ contract Handler is Test {
     // flagClaimable() MUST succeed. Any revert is a direct violation of the
     // trigger spec and increments ghost_missedSeizureFlag.
     function probeMissedSeizureFlag() external trackFlagged {
-        if (market.motionPending()) {
+        if (market.motionPending() || market.creditEventConfirmed()) {
             _record("probeMissedSeizureFlag", false);
             return;
         }
@@ -925,6 +931,7 @@ contract Handler is Test {
         // did). No special-casing needed here any more -- a flagged liquidator's
         // claim attempt is just another expected revert, tallied like any other.
         bool pendingBefore = market.motionPending();
+        bool eventBefore = market.creditEventConfirmed();
         uint256 Q = yesToken.balanceOf(target);
         uint256 m = market.currentMark();
         uint256 owedTotal = market.owed(target);
@@ -944,6 +951,7 @@ contract Handler is Test {
                 ghost_claimCollateralMismatch++;
             }
             if (pendingBefore) ghost_motionPendingClaimSuccesses++;
+            if (eventBefore) ghost_postEventClaimSuccesses++;
             if (market.fundingDebt(target) != 0) {
                 ghost_liquidationLedgerNotCleared++;
             }

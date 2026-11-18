@@ -104,6 +104,7 @@ function nextValue(spec: BalanceSpec | undefined, fallback: bigint): bigint {
 
 interface ReadContractState {
   motionPending?: boolean
+  creditEventConfirmed?: boolean
   currentMark?: bigint
   claimableByHolder?: Record<string, boolean>
   yesBalanceByAddr?: Record<string, BalanceSpec>
@@ -118,6 +119,7 @@ function makeReadContract(state: ReadContractState = {}): IPublicClient['readCon
 
     if (addr === CREDIT_MARKET.toLowerCase()) {
       if (functionName === 'motionPending') return state.motionPending ?? false
+      if (functionName === 'creditEventConfirmed') return state.creditEventConfirmed ?? false
       if (functionName === 'currentMark') return state.currentMark ?? DEFAULT_MARK
       if (functionName === 'claimable') {
         const holder = (args?.[0] as string).toLowerCase()
@@ -294,6 +296,25 @@ describe('LiquidatorBot — claims a flagged holder', () => {
     expect(health.tailClaims).toBe(0)
     expect(health.lastCycleAt).not.toBeNull()
     expect(health.lastError).toBeNull()
+  })
+})
+
+describe('LiquidatorBot — creditEventConfirmed', () => {
+  it('never claims in a market with a confirmed credit event', async () => {
+    const readContract = vi.fn().mockImplementation(makeReadContract({ creditEventConfirmed: true, claimableByHolder: { [HOLDER_A.toLowerCase()]: true } }))
+    const client = makePublicClient({ readContract })
+    const wallet = makeWalletClient()
+    const bot = new LiquidatorBot(
+      client, wallet, makeHolderSource({ initialHolders: [HOLDER_A, HOLDER_B] }), makeSeller(), CONFIG,
+    )
+
+    await bot.runCycle()
+
+    const claimableCalls = readContract.mock.calls.filter(([a]: [{ functionName: string }]) => a.functionName === 'claimable')
+    expect(claimableCalls).toHaveLength(0)
+    expect(wallet.writeContract).not.toHaveBeenCalled()
+    expect(bot.getHealth().skippedByReason.creditEventConfirmed).toBe(1)
+    expect(bot.getHealth().claims).toBe(0)
   })
 })
 

@@ -99,6 +99,20 @@ const CREDIT_MARKET_ABI = [
     inputs: [],
     outputs: [],
   },
+  {
+    name: 'motionPending',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    name: 'setMotionPending',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'pending', type: 'bool' }],
+    outputs: [],
+  },
 ] as const
 
 const ORACLE_ROUTER_ABI = [
@@ -117,6 +131,13 @@ const ORACLE_ROUTER_ABI = [
     type: 'function',
     stateMutability: 'nonpayable',
     inputs: [],
+    outputs: [],
+  },
+  {
+    name: 'setMotionPending',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'pending', type: 'bool' }],
     outputs: [],
   },
 ] as const
@@ -192,6 +213,9 @@ function AdminPanel({ market }: { market: Market }) {
   const [lastPauseAction, setLastPauseAction] = useState<'pause' | 'unpause' | null>(null)
   const [fundingStatus, setFundingStatus] = useState<TxStatus>('idle')
   const [fundingError, setFundingError] = useState('')
+  const [motionStatus, setMotionStatus] = useState<TxStatus>('idle')
+  const [motionError, setMotionError] = useState('')
+  const [lastMotionAction, setLastMotionAction] = useState<'open' | 'close' | null>(null)
 
   const { writeContractAsync } = useWriteContract()
   const userAddr = address ?? ZERO_ADDR
@@ -243,6 +267,15 @@ function AdminPanel({ market }: { market: Market }) {
       },
       // [9] currentCarryRate — −(1 − m)·ln(1 − m) a year, set by the mark
       { address: addrs.creditMarket, abi: CREDIT_MARKET_ABI, functionName: 'currentCarryRate' },
+      // [10] motionPending (liquidations frozen while true)
+      { address: addrs.creditMarket, abi: CREDIT_MARKET_ABI, functionName: 'motionPending' },
+      // [11] hasRole(ORACLE_ROLE, address) on CreditMarket itself
+      {
+        address: addrs.creditMarket,
+        abi: CREDIT_MARKET_ABI,
+        functionName: 'hasRole',
+        args: [ORACLE_ROLE, userAddr],
+      },
     ],
     query: { enabled: !!address },
   })
@@ -257,6 +290,8 @@ function AdminPanel({ market }: { market: Market }) {
   const hasOracleRole        = data?.[7]?.result as boolean | undefined
   const hasPauserRole        = data?.[8]?.result as boolean | undefined
   const carryRate            = data?.[9]?.result as bigint  | undefined
+  const motionPending        = data?.[10]?.result as boolean | undefined
+  const hasMarketOracleRole  = data?.[11]?.result as boolean | undefined
 
   // ── Transactions ──────────────────────────────────────────────────────────
 
@@ -282,6 +317,45 @@ function AdminPanel({ market }: { market: Market }) {
       )
     }
   }, [address, addrs, writeContractAsync, refetch])
+
+  // Route: CreditMarket directly if the wallet holds its ORACLE_ROLE, else via OracleRouter.
+  const motionRoute: 'market' | 'router' | null = hasMarketOracleRole
+    ? 'market'
+    : hasOracleRole
+    ? 'router'
+    : null
+
+  const handleSetMotion = useCallback(async (open: boolean) => {
+    if (!address || !motionRoute) return
+    setLastMotionAction(open ? 'open' : 'close')
+    setMotionStatus('pending')
+    setMotionError('')
+    try {
+      const hash =
+        motionRoute === 'market'
+          ? await writeContractAsync({
+              address: addrs.creditMarket,
+              abi: CREDIT_MARKET_ABI,
+              functionName: 'setMotionPending',
+              args: [open],
+            })
+          : await writeContractAsync({
+              address: addrs.oracleRouter,
+              abi: ORACLE_ROUTER_ABI,
+              functionName: 'setMotionPending',
+              args: [open],
+            })
+      await waitForTransactionReceipt(wagmiConfig, { hash })
+      setMotionStatus('success')
+      refetch()
+    } catch (e: unknown) {
+      setMotionStatus('error')
+      const msg = e instanceof Error ? e.message : 'Transaction failed'
+      setMotionError(
+        msg.includes('User rejected') || msg.includes('4001') ? 'Rejected by wallet' : msg,
+      )
+    }
+  }, [address, addrs, motionRoute, writeContractAsync, refetch])
 
   const handlePauseToggle = useCallback(async () => {
     if (!address || isPaused === undefined) return
@@ -406,6 +480,70 @@ function AdminPanel({ market }: { market: Market }) {
         )}
       </Section>
 
+      {/* ── 1b. Credit-event motion ───────────────────────────────────────────── */}
+      <Section title="Credit-event motion">
+        <div className="space-y-3">
+          <div
+            className={
+              motionPending
+                ? 'rounded border border-warning/40 bg-warning/10 px-4 py-3 text-sm font-semibold text-warning'
+                : 'rounded border border-subtle bg-surface-2 px-4 py-3 text-sm text-text-2'
+            }
+          >
+            {motionPending === undefined
+              ? '—'
+              : motionPending
+              ? 'Motion open — liquidations frozen'
+              : 'No motion'}
+          </div>
+          <p className="text-sm text-text-2">
+            Open when an ISDA DC question is raised on this entity; close only if the DC rules
+            No or declines.
+          </p>
+          <button
+            onClick={() => handleSetMotion(!motionPending)}
+            disabled={
+              !motionRoute ||
+              motionPending === undefined ||
+              motionStatus === 'pending' ||
+              (motionPending === true && creditEventConfirmed === true)
+            }
+            title={
+              motionPending && creditEventConfirmed
+                ? 'Never close the motion after a confirmed credit event'
+                : undefined
+            }
+            className={
+              motionPending ? 'pari-a-btn pari-a-btn--secondary' : 'pari-a-btn pari-a-btn--primary'
+            }
+          >
+            {motionStatus === 'pending'
+              ? 'Processing…'
+              : motionPending
+              ? 'Close motion'
+              : 'Open motion'}
+          </button>
+          {motionPending && creditEventConfirmed && (
+            <p className="text-xs text-text-muted">
+              Never close the motion after a confirmed credit event.
+            </p>
+          )}
+          {!motionRoute && (
+            <p className="text-xs text-text-muted">
+              Requires ORACLE_ROLE on CreditMarket or OracleRouter.
+            </p>
+          )}
+          {motionStatus === 'success' && lastMotionAction && (
+            <p className="text-xs text-success">
+              Motion {lastMotionAction === 'open' ? 'opened' : 'closed'} successfully.
+            </p>
+          )}
+          {motionStatus === 'error' && motionError && (
+            <p className="text-xs text-danger">{motionError}</p>
+          )}
+        </div>
+      </Section>
+
       {/* ── 2. Credit Event Controls ──────────────────────────────────────────── */}
       <Section title="Credit Event Controls">
         <div className="space-y-3">
@@ -422,6 +560,7 @@ function AdminPanel({ market }: { market: Market }) {
             onClick={() => setConfirmModal(true)}
             disabled={
               !hasOracleRole ||
+              motionPending !== true ||
               creditEventConfirmed === true ||
               creditEventStatus === 'pending'
             }
@@ -431,6 +570,9 @@ function AdminPanel({ market }: { market: Market }) {
           </button>
           {!hasOracleRole && (
             <p className="text-xs text-text-muted">Requires ORACLE_ROLE on OracleRouter.</p>
+          )}
+          {hasOracleRole && motionPending !== true && creditEventConfirmed !== true && (
+            <p className="text-xs text-text-muted">Open the motion first.</p>
           )}
           {creditEventStatus === 'success' && (
             <p className="text-xs text-success">Credit event confirmed on-chain.</p>
