@@ -104,7 +104,7 @@ CI fails on drift).
   `MARK_MIN_FILL_VOLUME` (50), `MARK_BOOK_MIN_DEPTH` (100 tokens per side),
   `MARK_BOOK_MAX_SPREAD` (0.10), `MARK_DEADBAND` (0.0025), `MARK_MIN`/`MARK_MAX`
   (0.001 / 0.95), `MARK_STALE_ALERT_SEC` (21600), `MARK_DRY_RUN`, `MARK_MIN_ETH`,
-  `BLOCK_TIME_SEC` (2), `LOG_CHUNK_BLOCKS` (2000). Without the key or the role it computes,
+  `BLOCK_TIME_SEC` (2), `LOG_CHUNK_BLOCKS` (200 — sepolia.base.org caps `eth_getLogs` at 200 blocks). Without the key or the role it computes,
   logs and serves `/health` but sends nothing (so it is safe against batch 3).
 
 ### Env vars added
