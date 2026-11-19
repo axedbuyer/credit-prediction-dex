@@ -74,9 +74,9 @@ admin-only (forge script + `MarketRegistry`); no permissionless listing.
 ≥ 10 min apart — a wide circuit breaker, not a speed limit; admin `adminSetMark` bypasses;
 fee 50 bps, 50/50 team wallet / shared InsuranceFund. **The mark must follow trades**
 (fills TWAP, depth-filtered mid fallback; jumps allowed both ways) — the
-`keepers/mark-updater` Railway service does this (live since 2026-11-19; it only trusts
-≥ 100 tokens of book depth or ≥ 50 tokens of fills per hour, so on thin testnet books the
-mark stays put); carry, the seizure trigger and the claim cap all read that mark. Seed marks are set manually per market from the entity's CDS spread
+`keepers/mark-updater` Railway service does this (live and sending `setMark` since 2026-11-19; it only trusts a book with
+`MARK_BOOK_MIN_DEPTH` tokens per side or `MARK_MIN_FILL_VOLUME` tokens of fills per hour —
+defaults 100 / 50, set to 10 / 10 on testnet — otherwise the mark stays put); carry, the seizure trigger and the claim cap all read that mark. Seed marks are set manually per market from the entity's CDS spread
 (`m = 1 − exp(−s/(1−R))`); current ones are placeholders. Credit-event types are display
 copy + attestation runbook only — nothing on-chain encodes them (OracleRouter has a single
 `confirmCreditEvent()`). **Credit-event policy:** the team multisig follows the ISDA DC — a

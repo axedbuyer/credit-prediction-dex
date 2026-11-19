@@ -239,7 +239,9 @@ MARKET_REGISTRY_ADDRESS=<batch-4 registry>
 MARK_UPDATER_PRIVATE_KEY=<SECRET — the wallet passed as MARK_UPDATER_ADDRESS to AddMarket; never the keeper key>
 ORDER_BOOK_URL=http://<order-book-server private domain>:<port>
 HEALTH_PORT=3005
-MARK_DRY_RUN=true          # until its logs show sane targets; then delete it AND `railway redeploy -s mark-updater` (delete does not restart)
+MARK_BOOK_MIN_DEPTH=10     # testnet (default 100): the seed books are 10-token ladders
+MARK_MIN_FILL_VOLUME=10    # testnet (default 50)
+# MARK_DRY_RUN=true        # first deploy only; deleted 2026-11-19 — delete it AND `railway redeploy -s mark-updater --yes` (delete does not restart)
 ```
 Optional tuning (defaults): `MARK_POLL_MS` (60000), `MARK_TWAP_WINDOW_SEC` (3600),
 `MARK_MIN_FILLS` (2), `MARK_MIN_FILL_TOKENS` (1), `MARK_MIN_FILL_VOLUME` (50),
