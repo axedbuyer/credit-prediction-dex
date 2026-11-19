@@ -35,8 +35,10 @@ export interface ClaimablePosition {
   tokenValue: string   // Q × currentMark / WAD, 6-decimal
   claimPrice: string   // min(owed, tokenValue), 6-decimal
   tailCase: boolean    // owed > tokenValue — insurance fund tops up
-  frozen: boolean      // true when motionPending — claim() will revert
+  frozen: boolean      // true when claim() would revert (credit event confirmed; or an
+                       // open motion on batch-3 contracts). Batch 4: a motion does NOT freeze claims.
   frozenReason?: string
+  motionPending?: boolean // a DC question is open on this market (display only)
 }
 
 type TxStatus = 'idle' | 'pending' | 'success' | 'error'
@@ -131,7 +133,17 @@ export function LiquidationCard({ position, market }: LiquidationCardProps) {
       {isFrozen && (
         <div className="mb-3 rounded-[1px] border border-subtle bg-surface-2 px-3 py-2">
           <span className="text-xs font-bold uppercase tracking-wider text-text-muted">
-            Frozen — credit event under review
+            {position.frozenReason === 'credit event confirmed'
+              ? 'Closed — credit event confirmed'
+              : 'Frozen — credit event under review'}
+          </span>
+        </div>
+      )}
+      {!isFrozen && position.motionPending && (
+        <div className="mb-3 rounded-[1px] border border-warning-a40 bg-warning-a10 px-3 py-2">
+          <span className="text-xs font-semibold text-warning">
+            A DC question is open on this market — claims continue. Carry since it opened that
+            your claim price covers is refunded to you if the DC rules a credit event happened.
           </span>
         </div>
       )}
@@ -181,7 +193,7 @@ export function LiquidationCard({ position, market }: LiquidationCardProps) {
             : `Claim — pay ${usdc(position.claimPrice)}`}
         </button>
       ) : (
-        <div className="rounded-[1px] border border-success/30 bg-success/10 p-4">
+        <div className="rounded-[1px] border border-success-a30 bg-success-a10 p-4">
           <p className="mb-1 text-sm font-bold uppercase tracking-wide text-success">
             Upbet position claimed successfully.
           </p>
@@ -252,7 +264,7 @@ export const DEV_POSITIONS: ClaimablePosition[] = [
     tokenValue: '6000000',     // $6.00
     claimPrice: '5820000',
     tailCase: false,
-    frozen: true,
-    frozenReason: 'credit event under review',
+    frozen: false,
+    motionPending: true,
   },
 ]

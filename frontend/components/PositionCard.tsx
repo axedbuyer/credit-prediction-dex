@@ -7,6 +7,8 @@ import Link from 'next/link'
 import { formatUnits } from 'viem'
 import { wagmiConfig } from '@/lib/wagmi'
 import { CREDIT_MARKET_ABI, ERC20_ABI } from '@/lib/creditMarketAbi'
+import { healthRatio, healthLevel, HEALTH_COPY, useIsBatch4 } from '@/lib/positionHealth'
+import type { HealthLevel } from '@/lib/positionHealth'
 
 // -- Constants -----------------------------------------------------------------
 
@@ -30,6 +32,9 @@ export type DevValues = {
   claimable?:      boolean
   cureCost?:       bigint
   carryNet?:       bigint // signed: positive = carry earned, negative = carry owed
+  motionPending?:  boolean
+  heldCarry?:      bigint // Downbet carry held since a DC question opened
+  batch4?:         boolean
 }
 
 export const DEV_YES_HEALTHY: DevValues = {
@@ -45,8 +50,8 @@ export const DEV_YES_HEALTHY: DevValues = {
   carryNet:       -1_250000n, // owes $1.25
 }
 
-export const DEV_YES_AMBER:    DevValues = { ...DEV_YES_HEALTHY, epochsToExpire: 14n }
-export const DEV_YES_RED:      DevValues = { ...DEV_YES_HEALTHY, epochsToExpire: 3n }
+export const DEV_YES_AMBER:    DevValues = { ...DEV_YES_HEALTHY, epochsToExpire: 14n, batch4: true, cureCost: 1_250000n }
+export const DEV_YES_RED:      DevValues = { ...DEV_YES_HEALTHY, epochsToExpire: 3n, batch4: true, cureCost: 4_100000n, motionPending: true }
 export const DEV_YES_SEIZABLE: DevValues = {
   ...DEV_YES_HEALTHY,
   epochsToExpire: 0n,
@@ -59,6 +64,21 @@ export const DEV_YES_FROZEN: DevValues = {
   claimable:      true,
   cureCost:       14_550000n, // $14.55 — live owed() net of pending NO credit (a snapshot; grows while locked)
   carryNet:       undefined,
+}
+
+export const DEV_NO_MOTION: DevValues = {
+  costBasis:     766000000000000000n,
+  equity:        812000000000000000n,
+  pnl:            46000000000000000n,
+  breakevenMark: 720000000000000000n,
+  epochsToExpire: 0n,
+  isSeizable:    false,
+  yesBalance:    0n,
+  noBalance:     500_000000n,
+  claimable:     false,
+  motionPending: true,
+  heldCarry:     2_400000n, // $2.40 held since the DC question opened
+  batch4:        true,
 }
 
 export const DEV_NO_HEALTHY: DevValues = {
@@ -168,6 +188,9 @@ export function PositionCard({
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'cumFundingPerNO' },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'lastFundingTime' },
       { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'snapNO',         args: [userAddress] },
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'motionPending' },
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'currentMark' },
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'epochLength' },
     ],
     query: { enabled: isReal },
   })
@@ -187,6 +210,32 @@ export function PositionCard({
   const cumFundingPerNO = data?.[12]?.result as bigint | undefined
   const lastFundingTime = data?.[13]?.result as bigint | undefined
   const snapNO         = data?.[14]?.result as bigint | undefined
+  const motionPending  = (_dev?.motionPending ?? data?.[15]?.result) as boolean | undefined
+  const currentMark    = data?.[16]?.result as bigint | undefined
+  const epochLength    = data?.[17]?.result as bigint | undefined
+
+  // Batch 4: Pay carry is open to every Upbet holder and post-EDD carry is held.
+  const batch4Probe = useIsBatch4(isReal ? creditMarketAddress : undefined)
+  const batch4 = _dev?.batch4 ?? batch4Probe === true
+
+  // Held-carry record (batch 4 only): escrowedCredit, motionDebt, refundable, motion id.
+  const { data: escrowData } = useReadContracts({
+    contracts: [
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'escrowOf', args: [userAddress] },
+      { address: creditMarketAddress, abi: CREDIT_MARKET_ABI, functionName: 'motionId' },
+    ],
+    query: { enabled: isReal && batch4 },
+  })
+  const escrow = escrowData?.[0]?.result as readonly [bigint, bigint, bigint, bigint] | undefined
+  const motionId = escrowData?.[1]?.result as bigint | undefined
+  const { data: eddIndexData } = useReadContract({
+    address: creditMarketAddress,
+    abi: CREDIT_MARKET_ABI,
+    functionName: 'motionIndex',
+    args: [motionId ?? 0n],
+    query: { enabled: isReal && batch4 && motionId !== undefined && motionId > 0n },
+  })
+  const eddIndex = eddIndexData as bigint | undefined
 
   const balance = isYES ? yesBalance : noBalance
 
@@ -196,12 +245,13 @@ export function PositionCard({
     abi: CREDIT_MARKET_ABI,
     functionName: 'previewFunding',
     args: [userAddress, yesBalance ?? 0n, true],
-    query: { enabled: isReal && isClaimable === false && yesBalance !== undefined },
+    // Batch 4: previewFunding is exact for flagged holders too (no accounting freeze).
+    query: { enabled: isReal && yesBalance !== undefined && (isClaimable === false || batch4) },
   })
 
   const carryNet =
     _dev?.carryNet ??
-    (isClaimable === false && previewDelta !== undefined && fundingDebt !== undefined
+    ((isClaimable === false || batch4) && previewDelta !== undefined && fundingDebt !== undefined
       ? (previewDelta as bigint) - fundingDebt
       : undefined)
 
@@ -224,9 +274,28 @@ export function PositionCard({
       ? (noBalance * (projectedCumFundingPerNO > snapNO ? projectedCumFundingPerNO - snapNO : 0n)) / ONE_E18
       : 0n
 
+  // Downbet carry held since the DC question opened (shown while a motion is open):
+  // the recorded escrow for THIS motion + live accrual since max(snapshot, EDD).
+  const recordedHeld = escrow && motionId !== undefined && escrow[3] === motionId ? escrow[0] : 0n
+  const liveHeld =
+    motionPending && projectedCumFundingPerNO !== undefined && snapNO !== undefined && eddIndex !== undefined && noBalance !== undefined
+      ? (() => {
+          const from = snapNO > eddIndex ? snapNO : eddIndex
+          return projectedCumFundingPerNO > from ? (noBalance * (projectedCumFundingPerNO - from)) / ONE_E18 : 0n
+        })()
+      : 0n
+  const heldCarry = _dev?.heldCarry ?? recordedHeld + liveHeld
+  // After a DC Yes: post-EDD carry this address paid in cash comes back at settlement.
+  const refundDue = creditEventConfirmed && escrow && motionId !== undefined && escrow[3] === motionId ? escrow[2] : 0n
+
   const debitRaw = owed ?? 0n
   const cureCostRaw = debitRaw > pendingNOCredit ? debitRaw - pendingNOCredit : 0n
-  const cureCost = _dev?.cureCost ?? cureCostRaw
+  const cureEstimate = _dev?.cureCost ?? cureCostRaw
+  // Exact quote when previewFunding is available: cure() collects
+  // max(0, fundingDebt − previewFunding(user, yesBal, true)) — i.e. −carryNet. It
+  // nets Downbet credit exactly as settlement does (incl. carry held during a motion,
+  // which the client-side estimate above can't see). Fallback: the estimate.
+  const cureCost = _dev?.cureCost ?? (carryNet !== undefined ? (carryNet < 0n ? -carryNet : 0n) : cureEstimate)
   const paddedApproval = cureCost + (cureCost * CURE_PAD_BPS) / 1000n + 1n
 
   // ── Cure flow: approve(creditMarket, paddedApproval) → cure() → refetch ──────
@@ -270,6 +339,24 @@ export function PositionCard({
     }
   }, [isReal, usdcAddress, cureCost, paddedApproval, creditMarketAddress, writeContractAsync, refetch, onCured])
 
+  // ── Health (Upbet only; on-site alerts) ───────────────────────────────────────
+  const health =
+    isYES && yesBalance !== undefined && owed !== undefined && currentMark !== undefined && carryRate !== undefined && epochLength !== undefined
+      ? healthRatio({ mark: currentMark, balance: yesBalance, owed, carryRate, epochLength })
+      : null
+  const level: HealthLevel | null =
+    !isYES || creditEventConfirmed || !balance
+      ? null
+      : _dev
+      ? healthLevel(null, epochsToExpire)
+      : health === null
+      ? null
+      : healthLevel(health, epochsToExpire)
+
+  // Pay carry: every Upbet holder on batch 4 (flagged holders on batch 3 via the locked
+  // panel). Not after a confirmed event — settlement pays it from the $1 instead.
+  const showPayCarry = isYES && batch4 && !creditEventConfirmed && !isClaimable && (cureCost > 0n)
+
   const { text: pnlText, neg: pnlNeg } = signedWadToPct(pnlRaw)
   const pnlColor = pnlRaw === undefined ? 'text-text-1' : pnlNeg ? 'text-danger' : 'text-success'
 
@@ -296,7 +383,12 @@ export function PositionCard({
         </span>
         <div className="flex items-center gap-2">
           {isLocked && (
-            <span className="pari-badge pari-badge--warning">Locked — cure required</span>
+            <span className="pari-badge pari-badge--warning">Locked — pay carry to unlock</span>
+          )}
+          {!isLocked && level && (
+            <span className={`pari-badge ${HEALTH_COPY[level].badge}`} title="Position health: how close this Upbet is to liquidation">
+              {HEALTH_COPY[level].label}
+            </span>
           )}
           {isYES && creditEventConfirmed && (
             <span className="pari-badge pari-badge--success">Credit event confirmed</span>
@@ -309,17 +401,17 @@ export function PositionCard({
           below keeps rising the longer this waits — it is a live quote, not a
           fixed bill from the moment it was flagged. */}
       {isLocked && (
-        <div className="mb-4 rounded border border-warning/30 bg-warning/10 px-3 py-2.5">
+        <div className="mb-4 rounded border border-warning-a40 bg-warning-a10 px-3 py-2.5">
           <p className="mb-1 text-xs font-semibold text-warning">
             Position locked — flagged for liquidation
           </p>
           <p className="mb-2 text-[11px] leading-relaxed text-text-2">
-            Trading and redeeming are locked until this is cured or claimed, and daily
-            carry keeps accruing while you wait — the cure cost below rises the longer
-            you leave it. Cure now to lock in today&rsquo;s cost and keep your {sideLabel}.
+            Trading and redeeming are locked until you pay carry or a liquidator claims
+            it, and daily carry keeps accruing while you wait — the amount below rises the
+            longer you leave it. Pay now to unlock and keep your {sideLabel}.
           </p>
           <div className="mb-2 flex items-center justify-between text-xs">
-            <span className="text-text-2">Cure cost (live)</span>
+            <span className="text-text-2">Carry due (live)</span>
             <span className="font-serif tabular text-text-1">{usdcDisplay(cureCost)}</span>
           </div>
           <button
@@ -328,16 +420,57 @@ export function PositionCard({
             className="pari-a-btn pari-a-btn--primary w-full"
           >
             {cureStatus === 'pending'
-              ? 'Curing…'
+              ? 'Paying…'
               : cureStatus === 'success'
-              ? 'Cured'
+              ? 'Paid'
               : cureCost > 0n
-              ? `Cure — pay ${usdcDisplay(cureCost)}`
-              : 'Cure — no payment due'}
+              ? `Pay carry — ${usdcDisplay(cureCost)}`
+              : 'Unlock — no payment due'}
           </button>
           {cureStatus === 'error' && cureError && (
             <p className="mt-2 text-xs text-danger">{cureError}</p>
           )}
+        </div>
+      )}
+
+      {/* DC question open (batch 4: informational — nothing is blocked) */}
+      {motionPending && !creditEventConfirmed && (
+        <div className="mb-4 rounded border border-warning-a40 bg-warning-a10 px-3 py-2.5">
+          <p className="mb-1 text-xs font-semibold text-warning">A DC question is open on this market</p>
+          {isYES ? (
+            <p className="text-[11px] leading-relaxed text-text-2">
+              Keep your carry paid: liquidations continue until the ruling. Carry you pay from
+              the day the question opened is refunded to you if the DC rules a credit event
+              happened.
+            </p>
+          ) : (
+            <>
+              <p className="mb-2 text-[11px] leading-relaxed text-text-2">
+                Carry earned since the question opened is held: it is paid to you if the DC
+                rules No, and cancelled if it rules a credit event happened.
+              </p>
+              {batch4 && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-2">Pending carry, paid if the DC rules No</span>
+                  <span className="font-serif tabular text-text-1">{usdcDisplay(heldCarry)}</span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Health warning (Upbet, not yet flagged) */}
+      {!isLocked && (level === 'warning' || level === 'critical') && (
+        <div className="mb-4 rounded border border-danger-a28 bg-danger-a10 px-3 py-2.5">
+          <p className="mb-1 text-xs font-semibold text-danger">
+            {level === 'critical' ? 'Close to liquidation' : 'Liquidation getting closer'}
+          </p>
+          <p className="text-[11px] leading-relaxed text-text-2">
+            {epochsToExpire !== undefined ? `About ${epochsToExpire} day${epochsToExpire === 1n ? '' : 's'} of carry left before this Upbet can be liquidated at today\u2019s chance. ` : ''}
+            Paying carry resets the clock{batch4 ? '' : ' (available once flagged on this market)'}. A falling chance
+            brings liquidation closer at once.
+          </p>
         </div>
       )}
 
@@ -363,6 +496,9 @@ export function PositionCard({
         <Stat label="P&L"            value={pnlText}              colorClass={pnlColor} />
         <Stat label="Breakeven"      value={wadToPct(breakevenMark)} />
         <Stat label="Size"           value={`${tokenAmount(balance)} ${sideLabel}`} />
+        {refundDue > 0n && (
+          <Stat label="Carry refund" value={`${usdcDisplay(refundDue)} at settlement`} colorClass="text-success" />
+        )}
         {carryLabel && (
           <Stat
             label="Carry"
@@ -382,6 +518,29 @@ export function PositionCard({
             {epochsToExpire !== undefined ? `${epochsToExpire} days` : '—'}
           </p>
         </div>
+      )}
+
+      {/* Pay carry (batch 4: any Upbet holder, any time — resets the liquidation clock) */}
+      {showPayCarry && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded border border-subtle bg-surface-2 px-3 py-2.5">
+          <div>
+            <p className="text-xs font-semibold text-text-1">Carry due {usdcDisplay(cureCost)}</p>
+            <p className="text-[11px] text-text-2">Pay it now to reset your liquidation clock.</p>
+          </div>
+          <button
+            onClick={handleCure}
+            disabled={cureStatus === 'pending' || !isReal}
+            className={`pari-a-btn ${level === 'warning' || level === 'critical' ? 'pari-a-btn--primary' : 'pari-a-btn--secondary'} shrink-0`}
+          >
+            {cureStatus === 'pending' ? 'Paying…' : 'Pay carry'}
+          </button>
+        </div>
+      )}
+      {showPayCarry && cureStatus === 'error' && cureError && (
+        <p className="-mt-2 mb-3 text-xs text-danger">{cureError}</p>
+      )}
+      {!isLocked && cureStatus === 'success' && (
+        <p className="-mt-2 mb-3 text-xs text-success">Carry paid.</p>
       )}
 
       {/* Action buttons */}
@@ -405,6 +564,13 @@ export function PositionCard({
 
       {settleStatus === 'success' && (
         <p className="mt-2 text-xs text-success">{sideLabel} settled for USDC.</p>
+      )}
+
+      {!creditEventConfirmed && (
+        <p className="mt-3 text-[11px] leading-relaxed text-text-muted">
+          To close this position, sell your {sideLabel}. Buying {isYES ? 'Downbets' : 'Upbets'} doesn&rsquo;t
+          close it{isYES ? ': your Upbet keeps owing carry and can still be liquidated, unless you then redeem the pair' : ' unless you then redeem the pair'}.
+        </p>
       )}
     </div>
   )

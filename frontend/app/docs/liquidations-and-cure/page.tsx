@@ -2,13 +2,13 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 
 export const metadata: Metadata = {
-  title: 'Liquidations & cure — Pari Docs',
+  title: 'Liquidations & paying carry — Pari Docs',
 }
 
 export default function LiquidationsAndCurePage() {
   return (
     <div>
-      <h1>Liquidations &amp; cure</h1>
+      <h1>Liquidations &amp; paying carry</h1>
 
       <h2>Why liquidation exists</h2>
       <p>
@@ -35,16 +35,39 @@ export default function LiquidationsAndCurePage() {
           The 3% buffer means positions are seized while there&rsquo;s still a sliver of
           value left — that sliver is the liquidator&rsquo;s reward.
         </li>
+        <li>
+          The price is the market&rsquo;s: Pari&rsquo;s mark follows trading (recent trades,
+          or the order book when trades are thin), and moves in both directions. A sharp
+          fall in the chance brings liquidation closer <strong>at once</strong> &mdash; there
+          is no grace period. A holder who keeps carry paid owes almost nothing, so a falling
+          price alone can&rsquo;t get them liquidated.
+        </li>
       </ul>
+
+      <h2>Position health</h2>
+      <p>
+        Every Upbet on your Portfolio shows a health badge, worked out from the same numbers
+        as the trigger:
+      </p>
+      <ul>
+        <li><strong>Healthy</strong> &mdash; more than 30 days of carry left.</li>
+        <li><strong>Watch</strong> &mdash; 30 days or fewer: a prompt to pay carry.</li>
+        <li><strong>Warning</strong> &mdash; 7 days or fewer, or the price is within 1.5× of the trigger: a red banner on the market page and Portfolio.</li>
+        <li><strong>Critical</strong> &mdash; 2 days or fewer, or within 1.15× of the trigger: a pop-up when you connect.</li>
+      </ul>
+      <p>
+        These alerts are <strong>on-site only</strong>: you see them when you visit Pari.
+        Nothing is emailed or pushed to you, so check in regularly while you hold an Upbet.
+      </p>
 
       <h2>The lock</h2>
       <p>
         When the trigger fires, a keeper flags the position. From that moment it is fully
         locked: no trading, no minting, no redeeming. Daily carry keeps accruing the whole
-        time it&rsquo;s locked &mdash; there is no freeze &mdash; so the bill you&rsquo;d
-        pay to cure, or the price a claimer would pay, keeps growing the longer it waits.
-        Three exits only: someone claims it, you cure it, or a credit event is confirmed
-        (settlement auto-collects the live bill from your $1.00 payout).
+        time it&rsquo;s locked &mdash; there is no freeze &mdash; so the carry you&rsquo;d
+        pay to unlock it, or the price a claimer would pay, keeps growing the longer it
+        waits. Three exits only: someone claims it, you pay carry, or a credit event is
+        confirmed (settlement takes the carry owed from your $1.00 payout).
       </p>
 
       <h2>The claim (permissionless, formulaic price — no auction)</h2>
@@ -68,13 +91,17 @@ export default function LiquidationsAndCurePage() {
         Downbet side survives a claim and pays at their next touchpoint.
       </p>
 
-      <h2>Cure — the self-rescue</h2>
+      <h2>Pay carry &mdash; any time</h2>
       <p>
-        Before anyone claims, the holder can <strong>cure</strong>: pay the live carry bill
-        in USDC and keep the Upbet. Carry has been accruing the entire time the position
-        was locked, so the sooner you cure, the less you pay &mdash; and you keep the
-        sliver a claimer would otherwise have taken. The Portfolio page shows a live
-        cure-cost estimate and an approve → cure flow whenever your position is locked.
+        Any Upbet holder can <strong>pay carry</strong> at any time from the Portfolio page:
+        you pay the carry you owe right now in USDC (net of any carry your Downbets in the
+        same market have earned), keep the Upbet, and your liquidation clock resets. It also
+        works while a market is paused.
+      </p>
+      <p>
+        If your position is already locked, paying carry is how you unlock it before
+        anyone claims. Carry keeps accruing while it&rsquo;s locked, so the sooner you pay,
+        the less you pay &mdash; and you keep the sliver a claimer would otherwise take.
       </p>
 
       <h2>For liquidators</h2>
@@ -89,8 +116,12 @@ export default function LiquidationsAndCurePage() {
 
       <div className="docs-callout docs-callout--warning">
         <p>
-          Liquidation and flagging are paused during a pending credit-event motion — a
-          position is never seized moments before its payout could be decided.
+          Liquidations <strong>continue</strong> while a DC question is open on a market. If
+          you hold an Upbet there, keep your carry paid: carry you pay from the day the
+          question opened is refunded to you if the DC rules a credit event happened (and a
+          liquidator who covered it gets theirs back). Once a credit event is confirmed, no
+          position can be flagged or claimed again. See{' '}
+          <Link href="/docs/credit-events">Credit events</Link>.
         </p>
       </div>
     </div>

@@ -22,8 +22,27 @@ export default function RisksPage() {
           <strong>Liquidation risk:</strong> if accrued carry approaches your Upbet&rsquo;s
           value (within 3%), the position is locked and can be claimed. Carry keeps
           accruing while it waits to be claimed — it is not frozen at the flagged amount —
-          so the longer it sits, the more it costs to cure and the less residual value is
-          left for you. You keep none of the residual unless you cure first.
+          so the longer it sits, the more it costs to unlock and the less residual value is
+          left for you. You keep none of the residual unless you pay carry first. The price
+          follows trading and can drop sharply; a drop counts towards liquidation at once.
+          Paying carry regularly is the protection.
+        </li>
+        <li>
+          <strong>Alerts are on-site only:</strong> health warnings appear only when you
+          visit Pari. Nothing is emailed or pushed to you.
+        </li>
+        <li>
+          <strong>Credit-event timing:</strong> carry is held only from the moment the team
+          opens a motion on a DC question, which can be some hours after the question
+          appears. Between a DC &ldquo;Yes&rdquo; and its on-chain confirmation, flagged
+          Upbets can still be claimed by anyone. Keep your carry paid. See{' '}
+          <Link href="/docs/credit-events">Credit events</Link>.
+        </li>
+        <li>
+          <strong>Mark updates:</strong> the mark is set by a team service from trades and
+          the order book, within an on-chain limit of 50 points per update and one update
+          every 10 minutes. A faulty or compromised update can move it wrongly within that
+          limit until the team corrects it.
         </li>
         <li>
           <strong>Downbet wipeout:</strong> a single confirmed credit event takes every

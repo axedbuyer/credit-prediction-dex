@@ -12,6 +12,7 @@ import { useMarkets, type Market } from '@/lib/markets'
 
 const ORACLE_ROLE = keccak256(toBytes('ORACLE_ROLE'))
 const PAUSER_ROLE = keccak256(toBytes('PAUSER_ROLE'))
+const MOTION_ROLE = keccak256(toBytes('MOTION_ROLE')) // OracleRouter, batch 4: may only open a motion
 
 // ── ABIs ─────────────────────────────────────────────────────────────────────
 
@@ -113,9 +114,25 @@ const CREDIT_MARKET_ABI = [
     inputs: [{ name: 'pending', type: 'bool' }],
     outputs: [],
   },
+  // batch 4 only — also the feature probe (batch-3 CreditMarkets revert)
+  {
+    name: 'motionId',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
 ] as const
 
 const ORACLE_ROUTER_ABI = [
+  // batch 4: ORACLE_ROLE or MOTION_ROLE
+  {
+    name: 'openMotion',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: [],
+  },
   {
     name: 'hasRole',
     type: 'function',
@@ -267,15 +284,24 @@ function AdminPanel({ market }: { market: Market }) {
       },
       // [9] currentCarryRate — −(1 − m)·ln(1 − m) a year, set by the mark
       { address: addrs.creditMarket, abi: CREDIT_MARKET_ABI, functionName: 'currentCarryRate' },
-      // [10] motionPending (liquidations frozen while true)
+      // [10] motionPending (batch 3: liquidations frozen while true; batch 4: informational)
       { address: addrs.creditMarket, abi: CREDIT_MARKET_ABI, functionName: 'motionPending' },
-      // [11] hasRole(ORACLE_ROLE, address) on CreditMarket itself
+      // [11] hasRole(ORACLE_ROLE, address) on CreditMarket itself (batch-3 stop-gap)
       {
         address: addrs.creditMarket,
         abi: CREDIT_MARKET_ABI,
         functionName: 'hasRole',
         args: [ORACLE_ROLE, userAddr],
       },
+      // [12] hasRole(MOTION_ROLE, address) on OracleRouter (batch 4)
+      {
+        address: addrs.oracleRouter,
+        abi: ORACLE_ROUTER_ABI,
+        functionName: 'hasRole',
+        args: [MOTION_ROLE, userAddr],
+      },
+      // [13] motionId — succeeds only on batch-4 contracts
+      { address: addrs.creditMarket, abi: CREDIT_MARKET_ABI, functionName: 'motionId' },
     ],
     query: { enabled: !!address },
   })
@@ -292,6 +318,10 @@ function AdminPanel({ market }: { market: Market }) {
   const carryRate            = data?.[9]?.result as bigint  | undefined
   const motionPending        = data?.[10]?.result as boolean | undefined
   const hasMarketOracleRole  = data?.[11]?.result as boolean | undefined
+  const hasMotionRole        = data?.[12]?.result as boolean | undefined
+  const motionIdResult       = data?.[13]
+  const batch4               = motionIdResult?.status === 'success'
+  const motionId             = batch4 ? (motionIdResult?.result as bigint) : undefined
 
   // ── Transactions ──────────────────────────────────────────────────────────
 
@@ -318,21 +348,34 @@ function AdminPanel({ market }: { market: Market }) {
     }
   }, [address, addrs, writeContractAsync, refetch])
 
-  // Route: CreditMarket directly if the wallet holds its ORACLE_ROLE, else via OracleRouter.
-  const motionRoute: 'market' | 'router' | null = hasMarketOracleRole
+  // Batch 4: open via OracleRouter.openMotion() (ORACLE_ROLE or the open-only
+  // MOTION_ROLE); close via OracleRouter.setMotionPending(false) (ORACLE_ROLE only).
+  // Batch 3: CreditMarket directly if the wallet holds its ORACLE_ROLE (stop-gap),
+  // else the router's setMotionPending.
+  const motionRoute: 'market' | 'router' | null = batch4
+    ? (hasOracleRole ? 'router' : null)
+    : hasMarketOracleRole
     ? 'market'
     : hasOracleRole
     ? 'router'
     : null
+  const canOpen = batch4 ? !!(hasOracleRole || hasMotionRole) : !!motionRoute
+  const canClose = !!motionRoute
 
   const handleSetMotion = useCallback(async (open: boolean) => {
-    if (!address || !motionRoute) return
+    if (!address || (open ? !canOpen : !canClose)) return
     setLastMotionAction(open ? 'open' : 'close')
     setMotionStatus('pending')
     setMotionError('')
     try {
-      const hash =
-        motionRoute === 'market'
+      const hash = batch4 && open
+        ? await writeContractAsync({
+            address: addrs.oracleRouter,
+            abi: ORACLE_ROUTER_ABI,
+            functionName: 'openMotion',
+            args: [],
+          })
+        : motionRoute === 'market'
           ? await writeContractAsync({
               address: addrs.creditMarket,
               abi: CREDIT_MARKET_ABI,
@@ -355,7 +398,7 @@ function AdminPanel({ market }: { market: Market }) {
         msg.includes('User rejected') || msg.includes('4001') ? 'Rejected by wallet' : msg,
       )
     }
-  }, [address, addrs, motionRoute, writeContractAsync, refetch])
+  }, [address, addrs, motionRoute, batch4, canOpen, canClose, writeContractAsync, refetch])
 
   const handlePauseToggle = useCallback(async () => {
     if (!address || isPaused === undefined) return
@@ -432,6 +475,7 @@ function AdminPanel({ market }: { market: Market }) {
       <div className="flex flex-wrap gap-3">
         <RoleBadge label="ORACLE_ROLE" granted={hasOracleRole} loading={isLoading} />
         <RoleBadge label="PAUSER_ROLE" granted={hasPauserRole} loading={isLoading} />
+        {batch4 && <RoleBadge label="MOTION_ROLE" granted={hasMotionRole} loading={isLoading} />}
       </div>
 
       {/* ── 1. Market Status ──────────────────────────────────────────────────── */}
@@ -486,31 +530,39 @@ function AdminPanel({ market }: { market: Market }) {
           <div
             className={
               motionPending
-                ? 'rounded border border-warning/40 bg-warning/10 px-4 py-3 text-sm font-semibold text-warning'
+                ? 'rounded border border-warning-a40 bg-warning-a10 px-4 py-3 text-sm font-semibold text-warning'
                 : 'rounded border border-subtle bg-surface-2 px-4 py-3 text-sm text-text-2'
             }
           >
             {motionPending === undefined
               ? '—'
               : motionPending
-              ? 'Motion open — liquidations frozen'
+              ? batch4
+                ? `Motion #${motionId?.toString() ?? '?'} open — EDD recorded; carry since then is held. Trading, flagging, claims and Pay carry continue.`
+                : 'Motion open — liquidations frozen (batch-3 contracts)'
+              : creditEventConfirmed && batch4
+              ? `Motion #${motionId?.toString() ?? '?'} resolved Yes (credit event confirmed)`
               : 'No motion'}
           </div>
           <p className="text-sm text-text-2">
-            Open when an ISDA DC question is raised on this entity; close only if the DC rules
-            No or declines.
+            Open the moment a DC question is raised on this entity: the on-chain time is
+            Pari&rsquo;s EDD, and carry before it is not held. Close only if the DC rules No,
+            declines, or rules Yes on an event this market does not cover. On a covered Yes, set
+            DC_YES_HOLD on the funding-keeper and liquidator-bot, then confirm below.
           </p>
           <button
             onClick={() => handleSetMotion(!motionPending)}
             disabled={
-              !motionRoute ||
+              (motionPending ? !canClose : !canOpen) ||
               motionPending === undefined ||
               motionStatus === 'pending' ||
-              (motionPending === true && creditEventConfirmed === true)
+              creditEventConfirmed === true
             }
             title={
-              motionPending && creditEventConfirmed
-                ? 'Never close the motion after a confirmed credit event'
+              creditEventConfirmed
+                ? 'A confirmed credit event ends the market; motions can no longer change'
+                : motionPending && !canClose
+                ? 'Closing needs ORACLE_ROLE on the OracleRouter (the motion-opener key can only open)'
                 : undefined
             }
             className={
@@ -523,15 +575,20 @@ function AdminPanel({ market }: { market: Market }) {
               ? 'Close motion'
               : 'Open motion'}
           </button>
-          {motionPending && creditEventConfirmed && (
+          {!batch4 && motionPending && creditEventConfirmed && (
             <p className="text-xs text-text-muted">
               Never close the motion after a confirmed credit event.
             </p>
           )}
-          {!motionRoute && (
+          {!canOpen && !motionPending && (
             <p className="text-xs text-text-muted">
-              Requires ORACLE_ROLE on CreditMarket or OracleRouter.
+              {batch4
+                ? 'Requires ORACLE_ROLE or MOTION_ROLE on the OracleRouter.'
+                : 'Requires ORACLE_ROLE on CreditMarket or OracleRouter.'}
             </p>
+          )}
+          {motionPending && !canClose && (
+            <p className="text-xs text-text-muted">Closing requires ORACLE_ROLE on the OracleRouter.</p>
           )}
           {motionStatus === 'success' && lastMotionAction && (
             <p className="text-xs text-success">
@@ -548,7 +605,7 @@ function AdminPanel({ market }: { market: Market }) {
       <Section title="Credit Event Controls">
         <div className="space-y-3">
           {creditEventConfirmed && (
-            <div className="rounded border border-success/30 bg-success/10 px-4 py-3 text-sm text-success">
+            <div className="rounded border border-success-a30 bg-success-a10 px-4 py-3 text-sm text-success">
               Credit event confirmed. Upbet holders can now settle at $1.00.
             </div>
           )}
@@ -694,7 +751,7 @@ function AdminPanel({ market }: { market: Market }) {
 
 function WarningBanner() {
   return (
-    <div className="rounded border border-warning/40 bg-warning/10 px-4 py-3 text-sm font-semibold text-warning">
+    <div className="rounded border border-warning-a40 bg-warning-a10 px-4 py-3 text-sm font-semibold text-warning">
       Internal tool. Authorized personnel only.
     </div>
   )

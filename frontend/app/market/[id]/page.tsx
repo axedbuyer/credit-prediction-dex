@@ -8,6 +8,7 @@ import { TradePanel } from '@/components/TradePanel'
 import { OpenOrders } from '@/components/OpenOrders'
 import { PriceChart } from '@/components/PriceChart'
 import { FundingTicker } from '@/components/FundingTicker'
+import { MarketAlerts } from '@/components/MarketAlerts'
 
 // `id` is the market slug (e.g. /market/mstr) — resolved through the registry.
 export default function MarketPage({ params }: { params: { id: string } }) {
@@ -66,6 +67,8 @@ export default function MarketPage({ params }: { params: { id: string } }) {
           <p className="mt-2 text-xs text-warning">This market is closed to new orders.</p>
         )}
       </div>
+
+      <MarketAlerts market={market} />
 
       <div className="grid grid-cols-3 gap-4">
         {/* Row 1: chart + order book */}

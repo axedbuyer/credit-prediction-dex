@@ -7,6 +7,7 @@ import '../styles/pari/docs.css'
 import './globals.css'
 import { Providers } from '@/components/Providers'
 import { Header } from '@/components/Header'
+import { HealthAlertModal } from '@/components/HealthAlertModal'
 
 const ebGaramond = EB_Garamond({
   subsets: ['latin'],
@@ -37,6 +38,7 @@ export default function RootLayout({
         <Providers>
           <Header />
           <main>{children}</main>
+          <HealthAlertModal />
         </Providers>
       </body>
     </html>

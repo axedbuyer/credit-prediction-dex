@@ -49,18 +49,45 @@ export default function FaqPage() {
       <h3>My position says locked — what now?</h3>
       <p>
         You crossed the liquidation trigger and were flagged. Carry keeps accruing while
-        it&rsquo;s locked, so the sooner you act the less it costs. You can cure (pay the
-        live carry bill, keep the position) before someone claims it — see{' '}
-        <Link href="/docs/liquidations-and-cure">Liquidations &amp; cure</Link>.
+        it&rsquo;s locked, so the sooner you act the less it costs. You can pay carry (pay
+        what you owe now, keep the position) before someone claims it — see{' '}
+        <Link href="/docs/liquidations-and-cure">Liquidations &amp; paying carry</Link>.
       </p>
 
       <h3>Who decides a credit event happened?</h3>
       <p>
         The ISDA Determinations Committee — the same panel that rules on credit events for
         credit default swaps. The Pari team&rsquo;s multisig oracle watches its public
-        requests, freezes liquidations when a question is raised on a listed entity, and
-        confirms the credit event on-chain when the committee rules &ldquo;Yes&rdquo;. See{' '}
+        requests, opens a motion when a question is raised on a listed entity (carry from
+        then on is held until the ruling; trading and liquidations continue), and confirms
+        the credit event on-chain when the committee rules &ldquo;Yes&rdquo;. See{' '}
         <Link href="/docs/credit-events">Credit events</Link>.
+      </p>
+
+      <h3>How do I close a position?</h3>
+      <p>
+        <strong>Sell what you hold.</strong> To close an Upbet, sell the Upbet; to close a
+        Downbet, sell the Downbet. Buying the other side does <em>not</em> close a position:
+        you end up holding both. Carry between the two only nets when your address settles,
+        and an Upbet held next to a Downbet still owes carry and can still be liquidated on
+        its own. If you do end up with both, redeem the matched pairs for $1.00 each from
+        the Portfolio page.
+      </p>
+
+      <h3>Should I pay carry before I&rsquo;m flagged?</h3>
+      <p>
+        You can, any time, from the Portfolio page. Paying carry resets your liquidation
+        clock; it&rsquo;s the simplest protection against a sudden fall in price. While a
+        DC question is open on the market, carry you pay is refunded to you if the DC rules
+        a credit event happened.
+      </p>
+
+      <h3>What happens to my Downbet carry while a DC question is open?</h3>
+      <p>
+        Carry from the day the question opened is held. Your Portfolio shows it as
+        &ldquo;pending carry&rdquo;: it&rsquo;s paid to you if the DC rules No, and cancelled
+        if it rules Yes. If you sell your Downbet meanwhile, the held carry stays with you,
+        not the buyer.
       </p>
 
       <h3>What are the fees?</h3>

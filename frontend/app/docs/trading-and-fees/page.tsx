@@ -58,10 +58,19 @@ export default function TradingAndFeesPage() {
         <li>
           Fees go 50/50 to the Pari team wallet and the market&rsquo;s{' '}
           <strong>insurance fund</strong> (which backstops liquidations — see{' '}
-          <Link href="/docs/liquidations-and-cure">Liquidations &amp; cure</Link>). Fees
+          <Link href="/docs/liquidations-and-cure">Liquidations &amp; paying carry</Link>). Fees
           never touch the $1-per-set collateral backing positions.
         </li>
       </ul>
+
+      <h2>Closing a position</h2>
+      <p>
+        Close a position by <strong>selling what you hold</strong>: sell the Upbet to close
+        an Upbet, sell the Downbet to close a Downbet. Buying the opposite side doesn&rsquo;t
+        close anything. You end up holding both, carry between them only nets when your
+        address settles, and the Upbet can still be liquidated on its own carry. If you do
+        hold both, redeem the matched pairs for $1.00 each on the Portfolio page.
+      </p>
 
       <h2>When a sale can be rejected</h2>
       <p>

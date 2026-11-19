@@ -52,7 +52,8 @@ export default function CreditEventsPage() {
       </p>
       <ol>
         <li>
-          <strong>Continuous monitoring.</strong> The team watches the{' '}
+          <strong>Monitoring.</strong> At least twice every working day, and daily at
+          weekends, the team checks the{' '}
           <em>All DC Requests</em> list on{' '}
           <a href={DC_URL} target="_blank" rel="noreferrer">
             cdsdeterminationscommittees.org
@@ -66,29 +67,63 @@ export default function CreditEventsPage() {
         </li>
         <li>
           <strong>Motion opened.</strong> As soon as the team picks up the question, the
-          multisig opens a credit-event motion on that market. From that moment no position
-          can be flagged and no liquidation claim can go through, so nobody&rsquo;s Upbet is
-          seized while its payout is being decided. The market can also be paused, which
-          halts minting and redeeming.
+          multisig opens a credit-event motion on that market. The moment it opens is
+          Pari&rsquo;s <strong>event determination date</strong>. A motion blocks nothing:
+          trading, liquidations and Pay carry all continue, and the market page shows a
+          banner. What changes is carry: carry from that moment on is <strong>held</strong>{' '}
+          until the DC rules.
+          <ul>
+            <li>
+              <strong>Downbet holders</strong> see it as &ldquo;pending carry&rdquo;. It is
+              paid to them if the DC rules No, and cancelled if it rules Yes. If you sell
+              your Downbet during the motion, the carry held so far stays with you, not the
+              buyer.
+            </li>
+            <li>
+              <strong>Upbet holders</strong> keep owing carry, and an Upbet that falls behind
+              can still be liquidated. Any carry paid in cash since the motion opened
+              (through Pay carry, a sale, redeeming, or by a liquidator) is refunded to
+              whoever paid it if the DC rules Yes.
+            </li>
+          </ul>
         </li>
         <li>
-          <strong>DC rules &ldquo;Yes&rdquo;:</strong> the multisig confirms the credit
-          event on-chain. Every Upbet redeems for <strong>$1.00</strong> (its full backing);
-          every Downbet is worth <strong>$0.00</strong>. Redemption is a one-click settle
-          from the Portfolio page. If your position was locked before the event, settlement
-          auto-cures it: the carry bill accrued up to that moment is deducted from your
-          $1.00-per-Upbet payout.
+          <strong>DC rules &ldquo;Yes&rdquo;</strong> on an event the market covers: the
+          multisig confirms the credit event on-chain and the market ends. Every Upbet
+          redeems for <strong>$1.00</strong> (its full backing), minus only carry owed from
+          before the motion opened, plus any carry you paid since then; every Downbet is
+          worth <strong>$0.00</strong>. Redemption is a one-click settle from the Portfolio
+          page. If your position was locked, settlement unlocks it and takes the carry
+          owed from the payout. After confirmation no position can be flagged or claimed.
         </li>
         <li>
-          <strong>DC rules &ldquo;No&rdquo; or declines the question:</strong> the motion
-          is closed and the market unpauses. Nothing settles; flagging and liquidations
-          resume. Carry keeps accruing throughout the motion.
+          <strong>DC rules &ldquo;No&rdquo;, declines the question, or rules Yes on an event
+          this market doesn&rsquo;t cover:</strong> the motion is closed. Held carry is paid
+          to Downbet holders, and Upbet carry owed since the motion opened becomes ordinary
+          carry owed. Nothing else changes.
         </li>
       </ol>
       <p>
         You cannot raise a motion on-chain yourself. If you think the team has missed a DC
         request on a listed entity, contact the team with a link to it.
       </p>
+
+      <h2>Timing gaps you should know about</h2>
+      <ul>
+        <li>
+          <strong>Before the motion.</strong> The team checks the DC site by hand, at least
+          twice every working day and daily at weekends. A question can sit there for some
+          hours before the motion opens; carry in that gap is not held.
+        </li>
+        <li>
+          <strong>Before confirmation.</strong> Between the DC announcing &ldquo;Yes&rdquo;
+          and the confirmation landing on-chain, liquidations are still possible. The team
+          stops its own liquidator at once and confirms within minutes, but anyone can
+          claim a flagged position in that window. If you hold an Upbet, keep your carry
+          paid: a position whose carry is paid can&rsquo;t be flagged, so it can&rsquo;t be
+          liquidated in that gap.
+        </li>
+      </ul>
 
       <h2>Zero recovery, by design</h2>
       <p>
