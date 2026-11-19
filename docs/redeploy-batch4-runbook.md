@@ -251,6 +251,14 @@ deployer nonce).
   chain; test-taker bought 1 Upbet on `try` (settled on-chain); 0.5-Upbet order →
   `400 BelowMinOrderSize`; cancel check passed; uptime workflow green; motion on mstr opened by
   the on-call wallet (router `MotionPendingSet(0x7587…, true)`, `MotionOpened(1, …)`), closed by
-  the deployer (`MotionResolved(1, false)`). Not yet seen: a `MarkUpdated` from the mark
-  updater (seed books are below its depth filter) and the first funding-keeper tick
-  (08:00 UTC).
+  the deployer (`MotionResolved(1, false)`). First funding-keeper tick on batch 4: all three
+  markets accrued at 08:00:01–08:00:04 UTC (`lastFundingTime`).
+- Mark updater go-live (2026-11-19, the last §6 item): `MARK_BOOK_MIN_DEPTH=10` and
+  `MARK_MIN_FILL_VOLUME=10` set on Railway (the 4-token seed books were below the 100 / 50
+  defaults); re-seed with `MM_QTY=10` (20 USDC minted per market); dry run showed targets
+  23.5 / 10.5 / 2.25% from the book (half a tick above the seed, as expected); then
+  `MARK_DRY_RUN` deleted + `railway redeploy -s mark-updater --yes` (delete alone does not
+  restart; `redeploy` needs `--yes` when run non-interactively). First `setMark` from
+  `0x115D…2aD7`, `MarkUpdated(old, new, adminOverride=false)`: mstr 0.23 → 0.235
+  (block 60889618), crwv 0.10 → 0.105 (60889630), try 0.02 → 0.0225 (60889642).
+  **§6 complete.**

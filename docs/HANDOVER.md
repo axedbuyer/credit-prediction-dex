@@ -44,8 +44,10 @@ One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is share
   confirm); on-call opener `0x7587Ac4ab25D037aa9D4A6abf592fd67C58262f9` (`MOTION_ROLE`: open only).
 - Seed marks are placeholders until the owner supplies CDS-implied marks
   (`m = 1 − exp(−s/(1−R))`).
-- The Railway `mark-updater` service moves marks to follow trading — deployed, but still in
-  dry run (open work item 1), so marks are still the seed values.
+- The Railway `mark-updater` service moves marks to follow trading — LIVE since 2026-11-19
+  (first `MarkUpdated` on each market: 23 → 23.5%, 10 → 10.5%, 2 → 2.25%). Testnet tuning:
+  `MARK_BOOK_MIN_DEPTH=10`, `MARK_MIN_FILL_VOLUME=10` (code defaults 100 / 50 — revisit for
+  mainnet with real books).
 - All 19 batch-4 contracts are Blockscout-verified (recipe under "Ops wallets and access").
 
 Deploy history, for orientation: 2026-07-06 first deploy → 07-12 fee-aware CLOB → 10-01
@@ -99,19 +101,7 @@ Tests that assert maker/taker must pin order timestamps (a `Date.now()` pair fla
 
 ## Open work, in priority order
 
-1. **Mark updater go-live (in progress, owner-paced).** Deployed 2026-11-19, still
-   `MARK_DRY_RUN=true`: the defaults (100-token depth, 50-token hourly fill volume) never see
-   a price on the 4-token seed books. Agreed testnet plan (owner, 2026-11-19), once the
-   deployer has ≈105 USDC (≈70 more; the Circle faucet gives 20 USDC per 2 h):
-   1. `railway variable set MARK_BOOK_MIN_DEPTH=10 -s mark-updater` and
-      `railway variable set MARK_MIN_FILL_VOLUME=10 -s mark-updater` (owner);
-   2. re-seed with `MM_QTY=10` on all three markets (adds a 10-token ladder beside the 4s);
-   3. check the dry-run logs show "would setMark" ≈ 23.5% / 10.5% / 2.25% (half a tick up —
-      see "Non-obvious semantics");
-   4. `railway variable delete MARK_DRY_RUN -s mark-updater` + `railway redeploy -s mark-updater`;
-   5. confirm one `MarkUpdated` per market with `adminOverride` false (last open §6 item of
-      the batch-4 runbook). Then record it in the runbook and in "Current state".
-2. **Safe role ceremony** (production-plan requirement 2 — the largest launch blocker we can
+1. **Safe role ceremony** (production-plan requirement 2 — the largest launch blocker we can
    build ourselves). Nothing written yet: deploy a 2-of-3 Safe; write `TransferRoles.s.sol`
    to move `DEFAULT_ADMIN_ROLE` on every per-market contract + MarketRegistry +
    InsuranceFund, the OracleRouter attester role (`ORACLE_ROLE`: close + confirm) and
@@ -119,23 +109,24 @@ Tests that assert maker/taker must pin order timestamps (a `Date.now()` pair fla
    their operational role on dedicated hot EOAs; the deployer renounces everything. Until
    then, closing a motion or confirming a credit event needs the deployer key, which exists
    only in `contracts/.env`. Fold in the deploy-script fix below.
-3. **Credit-event dress rehearsal on Sepolia** (requirement 4) — batch 4 flow: open motion
+2. **Credit-event dress rehearsal on Sepolia** (requirement 4) — batch 4 flow: open motion
    → flag + claim + Pay carry during it → close (No: escrow paid) on one market, and confirm
    (Yes: refunds, settleYES) on a throwaway market, run through the Safe. Gate for mainnet.
    (A short open/close motion on mstr already passed on 2026-11-19 — see the batch-4 runbook
    Record.) DC site `robots.txt` disallows bots: monitoring stays manual unless the operator
    permits automation. Also confirm each launch name has ISDA DC coverage — the deck claims it.
-4. **Audit** (deliberately deferred by the owner — not forgotten) and an external
+3. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
-5. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
-6. **Runbooks** for mainnet: deploy/rollback and incident response (keeper down, Redis
+4. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
+5. **Runbooks** for mainnet: deploy/rollback and incident response (keeper down, Redis
    loss, pause, credit event, key rotation).
-7. **Pending owner decision:** the docs sentence "These follow the ISDA credit derivatives
+6. **Pending owner decision:** the docs sentence "These follow the ISDA credit derivatives
    definitions" (`frontend/app/docs/credit-events/page.tsx`) — keep, reword or drop.
 
 Recently done (details in git history and the runbooks): batch 4 live 2026-11-19 — motion
 escrow redesign and post-confirmation guards (PRs #24–#28, `docs/design/motion-escrow-and-mark.md`),
-mark-updater fixes (#29), batch-4 docs record (#30), CI flake (#31).
+mark-updater fixes (#29), batch-4 docs record (#30), CI flake (#31), HANDOVER reorder (#32);
+mark updater live 2026-11-19 (thresholds 10/10, re-seed `MM_QTY=10`, three `MarkUpdated`).
 
 ### Before any Base MAINNET deploy (owner: "not in a rush")
 
@@ -160,12 +151,12 @@ deploy-mainnet` with a chain-id + `CONFIRM_MAINNET=yes` guard, mainnet USDC pinn
 ## Ops wallets and access
 
 Keys live only in gitignored `.env` files (`.gitignore` ignores every `.env*` except
-`*.example`). Everything runs off raw EOAs — moving admin to a Safe is open work item 2 (above).
+`*.example`). Everything runs off raw EOAs — moving admin to a Safe is open work item 1 (above).
 
 | Wallet | Address | Key location | Roles | Balance (date) |
 |---|---|---|---|---|
-| Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` only (the owner cannot sign with it in a browser — closing/confirming a motion is a `cast send` from this machine) | DEFAULT_ADMIN everywhere, PAUSER, OracleRouter `ORACLE_ROLE` (open, close, confirm), team wallet, market maker | 0.00095 ETH, 34.9 USDC (11-19) |
-| Mark updater | `0x115D6536d37435e97228c0ecc0126D531cA02aD7` | Railway `mark-updater` var `MARK_UPDATER_PRIVATE_KEY` | CreditMarket `MARK_ROLE` on all three markets | funded by the owner 11-18 |
+| Deployer | `0x0D0917e418bc99Ecbfbd1Eb25a98d09CeFB580f1` | `contracts/.env` only (the owner cannot sign with it in a browser — closing/confirming a motion is a `cast send` from this machine) | DEFAULT_ADMIN everywhere, PAUSER, OracleRouter `ORACLE_ROLE` (open, close, confirm), team wallet, market maker | 0.00115 ETH, 54.9 USDC (11-19, after the `MM_QTY=10` re-seed) |
+| Mark updater | `0x115D6536d37435e97228c0ecc0126D531cA02aD7` | Railway `mark-updater` var `MARK_UPDATER_PRIVATE_KEY` | CreditMarket `MARK_ROLE` on all three markets | 0.0025 ETH (11-19) |
 | On-call motion opener | `0x7587Ac4ab25D037aa9D4A6abf592fd67C58262f9` | the owner's own wallet | OracleRouter `MOTION_ROLE` (open only) on all three markets | funded by the owner 11-18 |
 | Keeper | `0x63F98358246D5860A5b4c85fBB7936494F4FeC54` | `backend/keepers/.env` | KEEPER_ROLE (flagging; NOT `MARK_ROLE`) | 0.00249 ETH (11-17) |
 | Settler | `0x1a4A3796189a6aAB0E0D7fFFA111B5e90e3d98b9` | `backend/matching-engine/.env` | CLOBSettlement OPERATOR_ROLE (only it can fill) | 0.00714 ETH (11-17) |
@@ -295,5 +286,5 @@ History purge done 2026-11-18 (git filter-repo + force-push of every branch): `P
 v2.html`, `Pari Brand Guidelines.html` and `Pari design2dev handoff.zip` are gone from all
 branches, and every commit SHA before that date changed. GitHub's read-only `refs/pull/1–20/head`
 still point at the old commits (e.g. `2fe49c3`), so the files stay reachable by direct SHA
-link until GitHub Support purges them. The deck's trade-following-mark claim is backed once
-the mark updater leaves dry run (open work item 1).
+link until GitHub Support purges them. The deck's trade-following-mark claim is backed: the mark
+updater is live since 2026-11-19.
