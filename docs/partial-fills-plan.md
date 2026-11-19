@@ -2,7 +2,7 @@
 
 *Written 2026-10-15. Status: **BUILT 2026-10-16 on `feat/partial-fills` (not deployed). All
 decisions A–E made 2026-10-16 (§6). Rollout = a FULL redeploy of every market (§4),
-runbook `docs/redeploy-batch3-runbook.md`.** Read with root `CLAUDE.md` ("Partial fills",
+runbook `docs/redeploy-batch3-runbook.md` (historical — batch 3 is retired).** Read with root `CLAUDE.md` ("Partial fills",
 "Order removal policy", Funding Model). §2–§3 are the original plan; "As built" notes mark
 where the code differs.*
 
