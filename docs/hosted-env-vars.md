@@ -1,4 +1,4 @@
-# Hosted env vars — Railway + Vercel (Base Sepolia, batch 4 since 2026-11-18)
+# Hosted env vars — Railway + Vercel (Base Sepolia, batch 4 live since 2026-11-19)
 
 Single source of truth for what each hosted service needs. Services run in registry mode:
 the CURRENT addresses are the batch-4 registry below (2026-11-18). The single-set
@@ -239,7 +239,7 @@ MARKET_REGISTRY_ADDRESS=<batch-4 registry>
 MARK_UPDATER_PRIVATE_KEY=<SECRET — the wallet passed as MARK_UPDATER_ADDRESS to AddMarket; never the keeper key>
 ORDER_BOOK_URL=http://<order-book-server private domain>:<port>
 HEALTH_PORT=3005
-MARK_DRY_RUN=true          # first hour only: compare targets vs on-chain marks in logs + /health, then delete
+MARK_DRY_RUN=true          # until its logs show sane targets; then delete it AND `railway redeploy -s mark-updater` (delete does not restart)
 ```
 Optional tuning (defaults): `MARK_POLL_MS` (60000), `MARK_TWAP_WINDOW_SEC` (3600),
 `MARK_MIN_FILLS` (2), `MARK_MIN_FILL_TOKENS` (1), `MARK_MIN_FILL_VOLUME` (50),
@@ -253,7 +253,8 @@ for 6h; a repricing bigger than one 50-point step).
 **`DC_YES_HOLD` (funding-keeper + liquidator-bot, batch 4):** unset normally. The moment the DC
 announces "Yes" on a covered event, set it to the market slug(s) (or `*`) on BOTH services; they
 redeploy and stop flagging / claiming in those markets until it is removed after the on-chain
-confirmation (`docs/credit-event-runbook.md` §4). Shown as `dcYesHold` on their `/health`.
+confirmation (`docs/credit-event-runbook.md` §4). Removing a variable does not restart a service:
+follow `railway variable delete` with `railway redeploy -s <service>`. Shown as `dcYesHold` on their `/health`.
 
 ## Vercel — frontend (root dir `frontend`)
 

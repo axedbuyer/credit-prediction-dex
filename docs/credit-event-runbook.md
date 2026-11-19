@@ -63,7 +63,9 @@ several, or `*`) on the Railway **funding-keeper** and **liquidator-bot** servic
 redeploys in about 1–2 minutes and then neither flags nor claims in that market; check
 `dcYesHold` on the liquidator-bot `/health`. Claims by third parties on already-flagged
 positions stay permissionless, so confirm fast. Remove the variable after confirmation (the
-on-chain guard takes over). If the DC rules No, remove it when closing the motion.
+on-chain guard takes over). If the DC rules No, remove it when closing the motion — and then
+redeploy both services: `railway variable delete` does NOT restart a service, so until
+`railway redeploy -s funding-keeper` / `-s liquidator-bot` they keep the hold and flagging stays off.
 
 ### Fallback with `cast`
 
