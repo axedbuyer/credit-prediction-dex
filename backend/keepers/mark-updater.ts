@@ -309,7 +309,7 @@ export function markConfigFromEnv(env: NodeJS.ProcessEnv = process.env): MarkCon
     maxMark:        wadOf(num(env.MARK_MAX, 0.95)),
     staleAlertSec:  num(env.MARK_STALE_ALERT_SEC, 6 * 3600),
     blockTimeSec:   num(env.BLOCK_TIME_SEC, 2) || 2,
-    logChunkBlocks: BigInt(Math.max(1, Math.floor(num(env.LOG_CHUNK_BLOCKS, 2000)))),
+    logChunkBlocks: BigInt(Math.max(1, Math.floor(num(env.LOG_CHUNK_BLOCKS, 200)))),
     dryRun:         ['1', 'true', 'yes'].includes((env.MARK_DRY_RUN ?? '').trim().toLowerCase()),
   }
 }

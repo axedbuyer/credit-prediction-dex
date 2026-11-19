@@ -245,7 +245,7 @@ Optional tuning (defaults): `MARK_POLL_MS` (60000), `MARK_TWAP_WINDOW_SEC` (3600
 `MARK_MIN_FILLS` (2), `MARK_MIN_FILL_TOKENS` (1), `MARK_MIN_FILL_VOLUME` (50),
 `MARK_BOOK_MIN_DEPTH` (100), `MARK_BOOK_MAX_SPREAD` (0.10), `MARK_DEADBAND` (0.0025),
 `MARK_MIN` / `MARK_MAX` (0.001 / 0.95), `MARK_STALE_ALERT_SEC` (21600), `MARK_MIN_ETH`,
-`BLOCK_TIME_SEC` (2), `LOG_CHUNK_BLOCKS` (2000). Fund the wallet with ~0.002 ETH (one `setMark`
+`BLOCK_TIME_SEC` (2), `LOG_CHUNK_BLOCKS` (200 — sepolia.base.org caps `eth_getLogs` at 200 blocks). Fund the wallet with ~0.002 ETH (one `setMark`
 per market at most every 10 minutes). Without the key, or on a market where the wallet lacks
 `MARK_ROLE`, it computes and logs but sends nothing. Grep logs for `[ALERT]` (no price source
 for 6h; a repricing bigger than one 50-point step).
