@@ -189,8 +189,10 @@ describe('NO market matching', () => {
   beforeEach(resetIds)
 
   it('matches a NO buy against a NO sell at overlapping prices', async () => {
-    const bid = noBid('no-bid', 0.70)
-    const ask = noAsk('no-ask', 0.65)
+    // Pinned timestamps: with Date.now() defaults the bid (created first) could land a
+    // millisecond earlier and become the maker, so the assertion below flaked on CI.
+    const ask = noAsk('no-ask', 0.65, 1_000)   // resting first → maker
+    const bid = noBid('no-bid', 0.70, 2_000)
     const engine = new MatchingEngine(staticClient({ bids: [bid], asks: [ask] }), CONFIG)
 
     const matches = collectMatches(engine)
