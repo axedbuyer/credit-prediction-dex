@@ -229,7 +229,7 @@ largest position it may claim (a claim costs ≤ m×Q); `/health` → `skippedBy
 shows `insufficientFloat` / `insuranceFundShortfall` when it can't claim. Update the
 contract addresses here after any CreditMarket-family redeploy.
 
-## Railway — mark-updater (root dir `backend/keepers`, internal-only) — batch 4, create before the flip
+## Railway — mark-updater (root dir `backend/keepers`, internal-only) — batch 4, live since 2026-11-19
 
 ```
 RAILWAY_DOCKERFILE_PATH=Dockerfile.mark-updater

@@ -31,7 +31,7 @@ script/DeployMarketRegistry.s.sol — deploys MarketRegistry, registers the exis
 script/AddMarket.s.sol           — env-driven: deploys + wires + registers one more market
                                    against the shared InsuranceFund
 script/MarketScriptBase.sol      — shared wiring/assertions/JSON writers for the two above
-script/GrantMotionRole.s.sol     — BATCH-3 STOP-GAP ONLY: grants the attester CreditMarket
+script/GrantMotionRole.s.sol     — HISTORICAL (batch 3, retired): granted the attester CreditMarket
                                    ORACLE_ROLE so it can open motions (batch 4 uses the router)
 deployments/<net>/core.json, markets/<slug>.json — new layout, written only under --broadcast
 test/helpers/MarketSetBuilder.sol — builds a wired per-market set for multi-market tests

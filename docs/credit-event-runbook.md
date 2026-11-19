@@ -5,9 +5,8 @@ Derivatives Determinations Committee (DC). Design: `docs/design/motion-escrow-an
 User-facing copy: `frontend/app/docs/credit-events/page.tsx`. Invariants: root `CLAUDE.md`
 5, 10 and 11.
 
-Sections 1–6 describe **batch 4** (motions are informational and escrow post-EDD carry).
-The live markets are still **batch 3**, which behaves differently. Read §7 until batch 4
-is deployed.
+Applies to the live **batch-4** markets (since 2026-11-19): motions are informational and
+escrow post-EDD carry. (The retired batch-3 motion semantics are in git history.)
 
 ## 1. Roles and wallets
 
@@ -114,19 +113,3 @@ cast call $CREDIT_MARKET "paused()(bool)"               --rpc-url $RPC_URL   # t
   Upbet holders get it back if the DC rules Yes. Keep your carry paid to avoid liquidation."
 - **Result:** announce the DC ruling with a link. Yes: Upbets redeem at $1 on Portfolio.
   No: held carry is paid out to Downbet holders.
-
-## 7. Batch-3 caveat (until batch 4 is live)
-
-Batch 3 (live) still has the OLD motion semantics: an open motion **freezes** flagging and
-claims, carry is not escrowed, and confirmation does NOT block flagging or claims by itself.
-The attester got CreditMarket `ORACLE_ROLE` via `GrantMotionRole.s.sol` (block 60319124).
-Until batch 4 is live:
-
-- **Never confirm without an open motion** (a liquidator could seize an Upbet about to pay
-  $1 at the stale mark).
-- **Never close a motion after confirming.**
-- Batch-3 motions go directly to CreditMarket (`$CREDIT_MARKET`, not the router):
-  `cast send $CREDIT_MARKET "setMotionPending(bool)" true --rpc-url $RPC_URL --private-key $ATTESTER_KEY`.
-- Batch-3 comms: "Liquidations on this market are frozen while it is decided."
-
-Batch 4 replaces all of this (`docs/redeploy-batch4-runbook.md`).

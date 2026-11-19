@@ -1,6 +1,6 @@
 # Engineering Handover — Pari / credit-prediction-dex
 
-*Last updated 2026-11-18. This doc holds current state, ops knowledge and open work that
+*Last updated 2026-11-19. This doc holds current state, ops knowledge and open work that
 are NOT derivable from the code. The product/economics spec — including the 10 hard
 invariants — is the root `CLAUDE.md`; if code and that spec disagree, treat it as a bug.*
 
@@ -21,7 +21,7 @@ F1–F4 — all fixed).
 
 ## Current state
 
-### Contracts — Base Sepolia (chainId 84532), batch 4, live since 2026-11-18
+### Contracts — Base Sepolia (chainId 84532), batch 4 (deployed 2026-11-18, live since the 2026-11-19 flip)
 
 MarketRegistry **`0x36a1507fef705E8760d40bD8c959F40d242e342a`** (start block 60461374).
 One full contract set per market; the InsuranceFund `0x1a0dB241…403b` is shared.
@@ -211,34 +211,23 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
 2. **Credit-event dress rehearsal on Sepolia** (requirement 4) — batch 4 flow: open motion
    → flag + claim + Pay carry during it → close (No: escrow paid) on one market, and confirm
    (Yes: refunds, settleYES) on a throwaway market, run through the Safe. Gate for mainnet.
-3. **Mark updater** — no service moves the mark on the live batch-3 markets (see "Current
-   state"). Owner decision 2026-11-18: the mark must follow trades (fills TWAP,
-   depth-filtered mid fallback, jumps both ways) — REQUIRED for batch 4 (design note §3).
-   BUILT on `feat/batch4-offchain-keepers`: `backend/keepers/mark-updater.ts` +
-   `Dockerfile.mark-updater`, its own `MARK_ROLE` key, dry run without it; new Railway
-   service at the batch-4 flip (`docs/redeploy-batch4-runbook.md` §4.3).
-4. **Credit-event motion redesign + post-event liquidation bug** — gate for the dress
-   rehearsal. Owner rejected the motion freeze 2026-11-18; batch-4 contracts implement the
-   escrow design (`docs/design/motion-escrow-and-mark.md`, branch
-   `feat/batch4-motion-escrow`, supersedes PR #22): informational motions, post-EDD carry
-   escrow, Pay carry for all, `MARK_ROLE`, router `MOTION_ROLE`. Off-chain work (keepers,
-   liquidator-bot, mark updater, frontend, docs pages) still to do before the batch-4 flip.
-   Keepers + mark updater DONE on `feat/batch4-offchain-keepers` (draft PR #25) and the
-   frontend + docs pages on `feat/batch4-frontend` (stacked on it); both merge at the flip
-   only (Railway/Vercel auto-deploy `main`).
+3. **Mark updater** — LIVE on Railway since 2026-11-19 (`backend/keepers/mark-updater.ts`,
+   own `MARK_ROLE` key `0x115D…2aD7`, `LOG_CHUNK_BLOCKS=200` because the public RPC caps
+   `eth_getLogs` at 200 blocks — PR #29 makes that the default). Still `MARK_DRY_RUN=true`:
+   its filters need ≥ 100 tokens of book depth or ≥ 50 tokens of fills per hour, and the seed
+   books are 4 tokens per level, so it finds no price source (expect a 6-hourly `[ALERT]`).
+   Open: decide testnet thresholds or deeper seed books, then delete `MARK_DRY_RUN` and
+   confirm `MarkUpdated` events with `adminOverride` false.
+4. **Credit-event motion redesign + post-event liquidation bug** — DONE: batch 4 live
+   2026-11-19 (`docs/design/motion-escrow-and-mark.md`; PRs #24–#28): informational motions,
+   post-EDD carry escrow, Pay carry for all, `MARK_ROLE`, router `MOTION_ROLE`, on-chain
+   post-confirmation guards. Motion test on mstr 2026-11-19: opened by the on-call
+   `MOTION_ROLE` wallet via `/admin` (Close greyed out for it), closed by the deployer
+   (`MotionResolved(1, false)`). Remaining gate for mainnet is the dress rehearsal (item 2).
    DC site `robots.txt` disallows bots: no automated monitor without operator permission.
-   History:
-   Found 2026-11-18: on batch 3 nobody can open a motion (only the OracleRouter holds
-   CreditMarket `ORACLE_ROLE`; the router forwards only `confirmCreditEvent`), AND
-   confirmation alone does not block flag/claim — a liquidator could seize an Upbet about to
-   pay $1 at the stale mark (proof-of-concept test: ~951 USDC net per 1,000 Upbets).
-   Fixed in code (branch `fix/post-event-liquidation-guard`: on-chain post-event guards,
-   `OracleRouter.setMotionPending`, keeper/bot skips, `/admin` motion control); deploys as
-   **batch 4** (`docs/redeploy-batch4-runbook.md`). Batch-3 stop-gap DONE 2026-11-18:
-   `GrantMotionRole.s.sol` broadcast (block 60319124) — the attester holds CreditMarket
-   `ORACLE_ROLE` on mstr/crwv/try, so `/admin` can open motions. Until batch 4, follow
-   `docs/credit-event-runbook.md` §7 (never confirm without an open motion; never close after). Also confirm each launch name has ISDA DC coverage —
-   the deck claims it.
+   Also confirm each launch name has ISDA DC coverage — the deck claims it. Closing or
+   confirming needs router `ORACLE_ROLE` = the deployer key (only in `contracts/.env`) until
+   the Safe ceremony (item 1).
 5. **Audit** (deliberately deferred by the owner — not forgotten) and an external
    **legal/regulatory read** (economically a CDS on named entities — CFTC swap exposure).
 6. **InsuranceFund sizing** — it holds 2 USDC and backstops every market's tail-case claims.
