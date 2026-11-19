@@ -119,7 +119,7 @@ MARKET_SLUG=try ENTITY_NAME=Turkey ENTITY_TYPE=sovereign TOKEN_TICKER=TRY INITIA
 
 Each must log `Operator : 0x1a4A…98b9` and end with `Post-broadcast configuration
 assertions passed` (which now also checks `MARK_ROLE` / `MOTION_ROLE` when their env is set,
-and the 50-point / 10-minute mark bounds). Record the new registry address and start block: **TBD**.
+and the 50-point / 10-minute mark bounds). Record the new registry address and start block: **`0x36a1507fef705E8760d40bD8c959F40d242e342a`, block 60461374** (2026-11-18).
 
 **Blockscout verification** (Claude can run it; one contract at a time, 20–45s apart to
 avoid 429s): recipe in `docs/HANDOVER.md` (`forge verify-contract <addr> src/<F>.sol:<C>
@@ -148,11 +148,11 @@ paused. Rollback: `unpause()` + `setActive(id, true)`.
 
 ## 4. Flip (≈10 min) — OWNER
 
-1. **Vercel:** `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS = <new registry: TBD>`, saved before the
+1. **Vercel:** `NEXT_PUBLIC_MARKET_REGISTRY_ADDRESS = 0x36a1507fef705E8760d40bD8c959F40d242e342a`, saved before the
    merge that carries the new addresses.
 2. **Redis:** delete `orders:*`, `orderbook:*`, `nonces:*` (every resting order is signed
    for a batch-3 CLOB domain). Never `holder-index:*`. Commands as in batch-2 runbook §4.2.
-3. **Railway:** `railway variable set MARKET_REGISTRY_ADDRESS=<new registry: TBD>` on
+3. **Railway:** `railway variable set MARKET_REGISTRY_ADDRESS=0x36a1507fef705E8760d40bD8c959F40d242e342a` on
    order-book-server, matching-engine, funding-keeper, liquidation-keeper, liquidator-bot.
    Any Railway domain change is also owner-run.
    **New service `mark-updater`** (create before the flip): Root Directory `backend/keepers`,
@@ -210,5 +210,32 @@ batch-3 caveat), memory. Batch-3 contracts stay paused and inactive.
 
 ## Record
 
-TBD (date, new registry + start block, CreditMarket/OracleRouter addresses per market,
-wind-down results, Redis key counts, verification status).
+**Deployed 2026-11-18** by the owner from `main` `3806fe8`; all four scripts printed
+`Post-broadcast configuration assertions passed`. Addresses equal the fork rehearsal's (same
+deployer nonce).
+
+- MarketRegistry `0x36a1507fef705E8760d40bD8c959F40d242e342a`, start block 60461374. Mark updater
+  `0x115D6536d37435e97228c0ecc0126D531cA02aD7` (`MARK_ROLE`, 0.0025 ETH); on-call motion opener
+  `0x7587Ac4ab25D037aa9D4A6abf592fd67C58262f9` (router `MOTION_ROLE`, 0.0016 ETH).
+
+| Slug | CreditMarket | OracleRouter | Start block |
+|---|---|---|---|
+| `mstr` | `0x5914fCd859Bfdf3FB28c31718b3d710e83B217B1` | `0xa10101825167BDe5F779e42a33FEa08e6c8E3828` | 60461432 |
+| `crwv` | `0x0E086feb7A91a89291460Cb81A045B5deac96Ae6` | `0x473f297888DA3a974d5D0bB758C8734738Ce3B3e` | 60461667 |
+| `try` | `0xD089e1A07e4BFCCf6CA432521240Ac1406D84566` | `0x2159bc99AAF6B54D43BEe982b543C5B5C83bc69A` | 60461900 |
+
+- §2 on live Base Sepolia, 2026-11-18 — all pass:
+  - registry: 3 markets, entries match `markets/*.json`, all active;
+  - CLOB: settler holds the operator role, fee 50, insurance share 5000, team wallet = deployer, fund shared;
+  - CreditMarket:
+    - mark 23 / 10 / 2%, carry 0.20125 / 0.09482 / 0.01980;
+    - step 0.5e18, interval 600, cap 50,000;
+    - not paused, no motion, not confirmed;
+    - `MARK_ROLE` held by the updater and not by the keeper; `KEEPER_ROLE` by the keeper;
+    - `ORACLE_ROLE` held by the router only, not the deployer;
+    - CLOB and engine roles in place;
+  - router: deployer holds `ORACLE_ROLE`; the opener holds `MOTION_ROLE` only;
+  - tokens: `YES-/NO-<TICKER>`, CLOB role on CLOB + engine, supply 0/0;
+  - InsuranceFund grants `LIQUIDATOR_ROLE` to all three engines.
+- Blockscout verification (2026-11-19): all 19 verified.
+- Wind-down, Redis key counts: fill in at §3–§6.
