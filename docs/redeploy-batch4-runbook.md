@@ -238,4 +238,19 @@ deployer nonce).
   - tokens: `YES-/NO-<TICKER>`, CLOB role on CLOB + engine, supply 0/0;
   - InsuranceFund grants `LIQUIDATOR_ROLE` to all three engines.
 - Blockscout verification (2026-11-19): all 19 verified.
-- Wind-down, Redis key counts: fill in at §3–§6.
+- §3 wind-down (2026-11-19): batch-3 mstr/crwv/try paused, inactive in registry `0xA7bc…69b1`,
+  old engines' InsuranceFund `LIQUIDATOR_ROLE` revoked (checked on-chain).
+- §4 flip (2026-11-19): Vercel registry env set; Redis deleted 28 `orders:*`, 6 `orderbook:*`,
+  6 `nonces:*` (20 `holder-index:*` kept); `MARKET_REGISTRY_ADDRESS` set on all 5 services (read
+  back); merged #25 → #26 → #28; mark-updater service created. Gotchas: an expired `railway`
+  login makes the Redis one-liner fail with an empty URL (re-run `railway login`); #26 only
+  retargets to `main` once #25's branch is deleted; the mark-updater needs
+  `LOG_CHUNK_BLOCKS=200` (public RPC `eth_getLogs` cap, PR #29).
+- §5 re-seed: 7 quotes per market around 23 / 10 / 2% (8 USDC minted each).
+- §6: every `/health` registry mode on `0x36a1…`, 3 markets, no `lastError`, fee 50 bps from
+  chain; test-taker bought 1 Upbet on `try` (settled on-chain); 0.5-Upbet order →
+  `400 BelowMinOrderSize`; cancel check passed; uptime workflow green; motion on mstr opened by
+  the on-call wallet (router `MotionPendingSet(0x7587…, true)`, `MotionOpened(1, …)`), closed by
+  the deployer (`MotionResolved(1, false)`). Not yet seen: a `MarkUpdated` from the mark
+  updater (seed books are below its depth filter) and the first funding-keeper tick
+  (08:00 UTC).
