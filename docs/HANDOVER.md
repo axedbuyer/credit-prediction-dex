@@ -206,17 +206,20 @@ themselves and assert every grant after broadcast — no manual post-deploy gran
 2. **Credit-event dress rehearsal on Sepolia** (requirement 4) — batch 4 flow: open motion
    → flag + claim + Pay carry during it → close (No: escrow paid) on one market, and confirm
    (Yes: refunds, settleYES) on a throwaway market, run through the Safe. Gate for mainnet.
-3. **Mark updater** — no service moves the mark (see "Current state"). Owner decision
-   2026-11-18: the mark must follow trades (fills TWAP, depth-filtered mid fallback, jumps
-   both ways) — REQUIRED for batch 4 (design note §3). Batch-4 contracts give it its own
-   `MARK_ROLE` key (not the flagging keeper) with a wide 50-point / 10-minute circuit
-   breaker. Not built yet.
+3. **Mark updater** — no service moves the mark on the live batch-3 markets (see "Current
+   state"). Owner decision 2026-11-18: the mark must follow trades (fills TWAP,
+   depth-filtered mid fallback, jumps both ways) — REQUIRED for batch 4 (design note §3).
+   BUILT on `feat/batch4-offchain-keepers`: `backend/keepers/mark-updater.ts` +
+   `Dockerfile.mark-updater`, its own `MARK_ROLE` key, dry run without it; new Railway
+   service at the batch-4 flip (`docs/redeploy-batch4-runbook.md` §4.3).
 4. **Credit-event motion redesign + post-event liquidation bug** — gate for the dress
    rehearsal. Owner rejected the motion freeze 2026-11-18; batch-4 contracts implement the
    escrow design (`docs/design/motion-escrow-and-mark.md`, branch
    `feat/batch4-motion-escrow`, supersedes PR #22): informational motions, post-EDD carry
    escrow, Pay carry for all, `MARK_ROLE`, router `MOTION_ROLE`. Off-chain work (keepers,
    liquidator-bot, mark updater, frontend, docs pages) still to do before the batch-4 flip.
+   Keepers + mark updater DONE on `feat/batch4-offchain-keepers` (merge at the flip only);
+   frontend + docs pages still to do.
    DC site `robots.txt` disallows bots: no automated monitor without operator permission.
    History:
    Found 2026-11-18: on batch 3 nobody can open a motion (only the OracleRouter holds

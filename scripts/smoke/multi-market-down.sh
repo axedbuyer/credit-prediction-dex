@@ -6,7 +6,7 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 log() { printf '\033[1;36m[smoke-down]\033[0m %s\n' "$*"; }
 
-for name in liquidator-bot liquidation-keeper funding-keeper matching-engine order-book-server redis anvil; do
+for name in mark-updater liquidator-bot liquidation-keeper funding-keeper matching-engine order-book-server redis anvil; do
   pidf="$RUN_DIR/$name.pid"
   [[ -f "$pidf" ]] || continue
   pid="$(cat "$pidf")"

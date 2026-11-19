@@ -43,6 +43,8 @@ import { installShutdownHandlers, closeHttpServer } from './shutdown'
 import type { IYesSeller, SellResult } from './seller'
 import { buildDirectory, readRegistryShared } from './markets'
 import type { IRegistryClient, MarketInfo, MarketDirectory, MarketDirectoryStatus } from './registry'
+import { holdFromEnv } from './credit-event-hold'
+import type { CreditEventHold } from './credit-event-hold'
 
 // ─── WAD constant (1e18, for fixed-point arithmetic) ──────────────────────────
 
@@ -140,7 +142,12 @@ export const LIQUIDATION_ENGINE_ABI = [
     inputs: [],
   },
   {
-    name: 'MotionPending',
+    name: 'MotionPending',      // batch 3 only — batch-4 claims run during a motion
+    type: 'error' as const,
+    inputs: [],
+  },
+  {
+    name: 'CreditEventAlreadyConfirmed',
     type: 'error' as const,
     inputs: [],
   },
@@ -234,6 +241,8 @@ export interface BotSharedConfig {
   insuranceFundAddress: Address
   pollIntervalMs?: number // default 30_000
   autoSell?: boolean      // default true
+  /** "DC Yes announced" switch (credit-event-hold.ts): no claims in a held market. */
+  hold?: CreditEventHold
 }
 
 /** Single-market config (legacy / the 5-arg LiquidatorBot constructor). */
@@ -266,7 +275,8 @@ export interface BotMarketsProvider {
 // ─── Health / counters ─────────────────────────────────────────────────────────
 
 export type SkipReason =
-  | 'motionPending'
+  | 'dcYesHold'
+  | 'motionPending'          // batch-3 contracts only (their claim() reverts MotionPending)
   | 'creditEventConfirmed'
   | 'zeroBalance'
   | 'insufficientFloat'
@@ -314,6 +324,8 @@ export interface BotHealth {
   holderIndex: HolderIndexStatus
   // Multi-market additions:
   registry?: MarketDirectoryStatus
+  /** Markets under the "DC Yes announced" switch (no claims). */
+  dcYesHold?: string[]
   alerts?: BotAlerts
   markets?: Record<string, BotMarketHealth>
 }
@@ -345,6 +357,7 @@ interface MarketBotState {
 
 export type DecodedClaimRevert =
   | { kind: 'MotionPending' }
+  | { kind: 'CreditEventAlreadyConfirmed' }
   | { kind: 'NotClaimable' }
   | { kind: 'PositionFrozen' }
   | { kind: 'ERC20InsufficientBalance'; sender?: Address; balance?: bigint; needed?: bigint }
@@ -366,6 +379,7 @@ export function decodeClaimRevert(err: unknown): DecodedClaimRevert {
     const args = revertError?.data?.args as readonly unknown[] | undefined
 
     if (errorName === 'MotionPending') return { kind: 'MotionPending' }
+    if (errorName === 'CreditEventAlreadyConfirmed') return { kind: 'CreditEventAlreadyConfirmed' }
     if (errorName === 'NotClaimable') return { kind: 'NotClaimable' }
     if (errorName === 'PositionFrozen') return { kind: 'PositionFrozen' }
     if (errorName === 'ERC20InsufficientBalance') {
@@ -431,10 +445,12 @@ export function parseLiquidatedEvent(
 // ─── LiquidatorBot ────────────────────────────────────────────────────────────
 //
 // Multi-market: one wallet, one USDC float, N markets. Each cycle:
-//   1. per market: refresh the holder index, read motionPending + currentMark
+//   1. per market: refresh the holder index, read motionPending, creditEventConfirmed
+//      and currentMark
 //      (a market whose reads fail is skipped for the cycle — the others go on);
 //   2. discovery: every flagged (claimable) holder with a YES balance, across all
-//      non-frozen markets, plus an estimate of each one's tail-case shortfall;
+//      markets not confirmed and not under DC_YES_HOLD (batch 4: an open motion
+//      does not stop claims; it raises an alert), plus an estimate of each one's tail-case shortfall;
 //   3. alerts: the InsuranceFund is SHARED, so its "short" alert compares its USDC
 //      balance with the SUM of the concurrent tail-case shortfalls (owed − m×Q);
 //   4. claims, one at a time (one wallet = one nonce stream), each through THAT
@@ -651,14 +667,23 @@ export class LiquidatorBot {
         this.bumpSkip('creditEventConfirmed', market.slug)
         continue
       }
-      if (motionPending) {
-        console.log(`[liquidator-bot] ${ts} — ${market.slug}: motion pending — skipping all claims this cycle`)
-        this.bumpSkip('motionPending', market.slug)
+      if (this.config.hold?.held(market.slug)) {
+        console.log(`[liquidator-bot] ${ts} — ${market.slug}: DC_YES_HOLD set — no claims in this market`)
+        this.bumpSkip('dcYesHold', market.slug)
         continue
       }
+      // Batch 4: a motion blocks nothing — claims continue (a stall costs the
+      // InsuranceFund). Post-EDD carry the bot pays in P is refunded to it on a DC Yes.
+      const before = pending.length
       for (const holder of market.holderSource.holders()) {
         const p = await this.discover(market, holder, currentMark, ts)
         if (p) pending.push(p)
+      }
+      if (motionPending && pending.length > before) {
+        console.error(
+          `[liquidator-bot] ${ts} — ALERT ${market.slug}: motion open and ${pending.length - before} flagged ` +
+          `position(s) to claim — claiming as normal; if the DC has announced Yes, set DC_YES_HOLD=${market.slug} and confirm`,
+        )
       }
     }
     for (const market of markets) {
@@ -969,8 +994,12 @@ export class LiquidatorBot {
     const decoded = decodeClaimRevert(err)
     switch (decoded.kind) {
       case 'MotionPending':
-        console.log(`[liquidator-bot] ${ts} — motion pending (surfaced at simulate) for ${holder} (${slug}) — skipping`)
+        console.log(`[liquidator-bot] ${ts} — motion pending (batch-3 freeze, surfaced at simulate) for ${holder} (${slug}) — skipping`)
         this.bumpSkip('motionPending', slug)
+        break
+      case 'CreditEventAlreadyConfirmed':
+        console.log(`[liquidator-bot] ${ts} — credit event confirmed (surfaced at simulate) for ${holder} (${slug}) — skipping`)
+        this.bumpSkip('creditEventConfirmed', slug)
         break
       case 'NotClaimable':
         // Normal — someone else claimed first between our claimable() read
@@ -1126,6 +1155,7 @@ export class LiquidatorBot {
     // Multi-market additions — only when a registry-aware provider is wired.
     if (this.provider.registryStatus) {
       base.registry = this.provider.registryStatus()
+      base.dcYesHold = this.config.hold?.describe() ?? []
       base.alerts = { ...this.alerts }
       const markets: Record<string, BotMarketHealth> = {}
       for (const m of this.provider.markets()) {
@@ -1366,6 +1396,7 @@ async function main(): Promise<void> {
       insuranceFundAddress,
       pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS ?? '30000'),
       autoSell,
+      hold: holdFromEnv(),
     },
   )
 

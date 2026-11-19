@@ -10,7 +10,9 @@ order-book-server/    — REST API for orders (Fastify + Redis), many markets
 matching-engine/      — price-time priority CLOB matcher + on-chain settler, many markets
 keepers/              — funding-keeper.ts (accrual + seizure flagging), liquidation-keeper.ts
                         (GET /claimable), liquidator-bot.ts (+ clob-seller.ts: claims and
-                        resells flagged positions), holder-index.ts (YES holder discovery)
+                        resells flagged positions), holder-index.ts (YES holder discovery),
+                        mark-updater.ts (batch 4: moves each mark to follow trading),
+                        credit-event-hold.ts (the DC_YES_HOLD switch)
 shared/               — canonical registry.ts (copied into each service by sync-registry.sh)
 
 ## Multi-market (order-book-server + matching-engine)
@@ -85,6 +87,25 @@ CI fails on drift).
   token, opposite sides, same market; otherwise it prunes both WITHOUT submitting and logs loudly.
   An order whose market is unknown to the settler's directory is released, not pruned.
 - Optional `CHAIN_ID` (default 84532) for a local anvil node.
+
+### keepers — batch 4 (motion escrow, trade-following mark)
+- A motion blocks nothing: funding-keeper flags and liquidator-bot claims during it (the bot
+  logs an `[ALERT]` when it has claims in a market with a motion open). Both stop for good
+  once `creditEventConfirmed()` (the contracts revert too).
+- `DC_YES_HOLD` (funding-keeper + liquidator-bot): comma-separated slugs, or `*`. Set it on
+  both services the moment the DC announces Yes on a covered event, before the confirm tx
+  lands; Railway redeploys them (~1–2 min) and neither flags or claims at boot. Shown as
+  `dcYesHold` on `/health`. Remove after confirmation.
+- `/claimable` positions carry `motionPending`; `frozen` means `claim()` would revert.
+- `mark-updater.ts` (Dockerfile.mark-updater, own Railway service, `HEALTH_PORT` 3005):
+  `MARK_UPDATER_PRIVATE_KEY` (holds `MARK_ROLE`; never the keeper key), `ORDER_BOOK_URL`,
+  registry env as the other keepers. Tuning: `MARK_POLL_MS` (60000),
+  `MARK_TWAP_WINDOW_SEC` (3600), `MARK_MIN_FILLS` (2), `MARK_MIN_FILL_TOKENS` (1),
+  `MARK_MIN_FILL_VOLUME` (50), `MARK_BOOK_MIN_DEPTH` (100 tokens per side),
+  `MARK_BOOK_MAX_SPREAD` (0.10), `MARK_DEADBAND` (0.0025), `MARK_MIN`/`MARK_MAX`
+  (0.001 / 0.95), `MARK_STALE_ALERT_SEC` (21600), `MARK_DRY_RUN`, `MARK_MIN_ETH`,
+  `BLOCK_TIME_SEC` (2), `LOG_CHUNK_BLOCKS` (2000). Without the key or the role it computes,
+  logs and serves `/health` but sends nothing (so it is safe against batch 3).
 
 ### Env vars added
 `MARKET_REGISTRY_ADDRESS`, `REGISTRY_REFRESH_MS` (both services); `CHAIN_ID` (matching-engine);

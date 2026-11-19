@@ -47,13 +47,13 @@ Contracts:
   - optional `MOTION_OPENER_ADDRESS` (gets router `MOTION_ROLE`).
 
 Off-chain (**must ship before the flip in step 4**; tracked in the design note §8):
-- funding-keeper: flag during motions; add the "DC Yes announced" flagging switch.
-- liquidator-bot: claim during motions.
-- `/claimable`: no longer reports frozen during a motion.
-- A mark updater service (`MARK_ROLE` key).
-- Frontend: Pay carry for every Upbet, health badge, motion banner, pending carry for
+- DONE (branch `feat/batch4-offchain-keepers`): funding-keeper flags during motions;
+  `DC_YES_HOLD` switch (funding-keeper + liquidator-bot); liquidator-bot claims during
+  motions; `/claimable` no longer reports frozen during a motion (adds `motionPending`);
+  `keepers/mark-updater` service; the smoke grants `MARK_ROLE` and checks a fill moves the
+  mark (13/13).
+- TODO: Frontend: Pay carry for every Upbet, health badge, motion banner, pending carry for
   Downbets, `/admin` (`openMotion`), docs pages.
-- The multi-market smoke must grant `MARK_ROLE` before calling `setMark`.
 
 Constructors are unchanged. CreditMarket, LiquidationEngine and OracleRouter changed, so
 **every market gets a new contract set** under a **new MarketRegistry** (slugs `mstr`, `crwv`,
@@ -150,6 +150,12 @@ paused. Rollback: `unpause()` + `setActive(id, true)`.
 3. **Railway:** `railway variable set MARKET_REGISTRY_ADDRESS=<new registry: TBD>` on
    order-book-server, matching-engine, funding-keeper, liquidation-keeper, liquidator-bot.
    Any Railway domain change is also owner-run.
+   **New service `mark-updater`** (create before the flip): Root Directory `backend/keepers`,
+   `RAILWAY_DOCKERFILE_PATH=Dockerfile.mark-updater`; vars `BASE_SEPOLIA_RPC_URL`,
+   `MARKET_REGISTRY_ADDRESS`, `ORDER_BOOK_URL`, `MARK_UPDATER_PRIVATE_KEY` (the key whose
+   address went into `MARK_UPDATER_ADDRESS`; fund it with ~0.002 ETH). Start it with
+   `MARK_DRY_RUN=true` for the first hour, read its logs / `/health` (targets vs on-chain
+   marks), then remove `MARK_DRY_RUN`.
 4. **Merge** the deployment-files PR (new `core.json` + `markets/*.json`, frontend
    contract-addresses page, `docs/hosted-env-vars.md`, uptime fallback address) so Railway
    and Vercel rebuild. The batch-4 keepers (flag during motions), liquidator-bot, mark
